@@ -28,6 +28,20 @@ class NostrEvent(Base):
     )
 
 
+class Account(Base):
+    __tablename__ = "accounts"
+
+    id = Column(String(64), primary_key=True)  # API key
+    pubkey = Column(String(64), nullable=True, unique=True)
+    balance_sats = Column(Integer, default=0)
+    balance_usd = Column(Text, default="0")
+    created_at = Column(DateTime, default=lambda: datetime.utcnow())
+
+    __table_args__ = (
+        Index("ix_accounts_pubkey", "pubkey"),
+    )
+
+
 class Vote(Base):
     __tablename__ = "votes"
 
