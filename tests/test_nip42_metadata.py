@@ -36,7 +36,7 @@ def _make_metadata(sk, name="TestAgent", about="A test agent", picture=""):
     })
 
 
-def _make_auth_event(sk, challenge, relay_url="ws://localhost:8089"):
+def _make_auth_event(sk, challenge, relay_url=None):
     """Create a kind:22242 NIP-42 auth event."""
     from coincurve import PrivateKey
     import hashlib
@@ -44,12 +44,14 @@ def _make_auth_event(sk, challenge, relay_url="ws://localhost:8089"):
     priv = PrivateKey(bytes.fromhex(sk))
     pk = priv.public_key.format(compressed=True)[1:].hex()
 
+    from app.config import settings
+    url = relay_url or settings.BASE_URL
     event = {
         "pubkey": pk,
         "created_at": int(time.time()),
         "kind": 22242,
         "tags": [
-            ["relay", relay_url],
+            ["relay", url],
             ["challenge", challenge],
         ],
         "content": "",
