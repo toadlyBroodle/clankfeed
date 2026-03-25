@@ -1,0 +1,144 @@
+/* Clankfeed Theme */
+
+:root {
+  --bg: #000;
+  --bg-alt: #111;
+  --text: #4ade80;
+  --accent: #fbbf24;
+  --border: #166534;
+  --border-hover: #15803d;
+  --dim: #6b7280;
+  --error: #ef4444;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Courier New', Courier, monospace;
+}
+
+/* Base elements */
+textarea, input {
+  background: var(--bg-alt);
+  color: var(--text);
+  border: 1px solid var(--border);
+  font-family: inherit;
+}
+textarea:focus, input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+button {
+  background: var(--border);
+  color: var(--text);
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+button:hover { background: var(--border-hover); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Color utility classes */
+.c-accent { color: var(--accent); }
+.c-dim { color: var(--dim); }
+.c-text { color: var(--text); }
+.c-error { color: var(--error); }
+.bg-alt { background: var(--bg-alt); }
+.bg-primary { background: var(--border); }
+.b-accent { border: 1px solid var(--accent); }
+.b-border { border: 1px solid var(--border); }
+.bt-border { border-top: 1px solid var(--border); }
+
+/* Status dot */
+.status-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.status-connected { background: var(--text); }
+.status-disconnected { background: var(--error); }
+
+/* Copy button */
+.copy-btn { color: var(--dim); cursor: pointer; }
+.copy-btn:hover { color: var(--accent); }
+
+/* Note cards */
+.note-card {
+  border: 1px solid var(--border);
+  transition: border-color 0.2s;
+}
+.note-card:hover { border-color: var(--accent); }
+
+/* Avatar */
+.avatar {
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  object-fit: cover;
+  flex-shrink: 0;
+}
+.avatar-placeholder {
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-alt);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  color: var(--dim);
+  flex-shrink: 0;
+}
+
+/* Vote controls */
+.vote-btn {
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 3px;
+  background: none;
+  border: 1px solid transparent;
+  color: var(--dim);
+  transition: color 0.15s, border-color 0.15s;
+}
+.vote-btn:hover { color: var(--accent); border-color: var(--border); }
+.vote-value {
+  font-size: 11px;
+  font-weight: bold;
+  min-width: 30px;
+  text-align: center;
+  color: var(--accent);
+}
+.vote-prompt {
+  display: none;
+  margin-top: 6px;
+  margin-left: 32px;
+}
+.vote-prompt.active { display: flex; }
+.vote-col { min-width: 32px; }
+
+/* Value badge */
+.value-badge {
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
+
+/* QR code */
+#qr-canvas { image-rendering: pixelated; }
+
+/* Sizing utilities */
+.w-login { width: 140px; font-size: 10px; }
+.w-deposit { width: 80px; }
+.w-vote { width: 80px; }
+.fs-key { font-size: 9px; }
+
+/* Profile panel */
+.profile-panel {
+  border: 1px solid var(--border);
+  max-width: 280px;
+}
+.keys-section {
+  border-top: 1px solid var(--border);
+  padding-top: 4px;
+}
