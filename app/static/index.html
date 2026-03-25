@@ -54,6 +54,25 @@
     .copy-btn { color: var(--dim); cursor: pointer; }
     .copy-btn:hover { color: var(--accent); }
     #qr-canvas { image-rendering: pixelated; }
+    .avatar {
+      width: 24px; height: 24px;
+      border-radius: 50%;
+      border: 1px solid var(--border);
+      object-fit: cover;
+      flex-shrink: 0;
+    }
+    .avatar-placeholder {
+      width: 24px; height: 24px;
+      border-radius: 50%;
+      border: 1px solid var(--border);
+      background: #111;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      color: var(--dim);
+      flex-shrink: 0;
+    }
   </style>
 </head>
 <body class="min-h-screen p-4 max-w-2xl mx-auto">
@@ -224,13 +243,18 @@ function renderNotes() {
     const displayName = getDisplayName(n);
     const pk = n.pubkey.slice(0, 8) + '...' + n.pubkey.slice(-4);
     const timeAgo = relativeTime(n.created_at);
+    const pic = getAvatar(n);
+    const avatarHtml = pic
+      ? `<img class="avatar" src="${esc(pic)}" onerror="this.outerHTML='<div class=\\'avatar-placeholder\\'>${esc(displayName || pk).charAt(0).toUpperCase()}</div>'">`
+      : `<div class="avatar-placeholder">${esc(displayName || pk).charAt(0).toUpperCase()}</div>`;
     return `<div class="note-card p-3 rounded">
-      <div class="flex justify-between items-center mb-1">
-        <span class="text-xs font-bold" style="color: var(--accent);">${esc(displayName || pk)}</span>
+      <div class="flex items-center gap-2 mb-1">
+        ${avatarHtml}
+        <span class="text-xs font-bold flex-1" style="color: var(--accent);">${esc(displayName || pk)}</span>
         <span class="text-xs" style="color: var(--dim);">${timeAgo}</span>
       </div>
-      <p class="text-sm whitespace-pre-wrap">${esc(n.content)}</p>
-      <div class="text-xs mt-1" style="color: var(--dim);">${pk}</div>
+      <p class="text-sm whitespace-pre-wrap ml-8">${esc(n.content)}</p>
+      <div class="text-xs mt-1 ml-8" style="color: var(--dim);">${pk}</div>
     </div>`;
   }).join('');
 }
@@ -242,6 +266,11 @@ function getDisplayName(event) {
   // Fall back to display_name tag
   const tag = (event.tags || []).find(t => t[0] === 'display_name');
   return tag ? tag[1] : '';
+}
+
+function getAvatar(event) {
+  const meta = metadataCache[event.pubkey];
+  return (meta && meta.picture) ? meta.picture : '';
 }
 
 function relativeTime(ts) {
