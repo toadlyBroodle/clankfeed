@@ -1,0 +1,13 @@
+[Unit]
+Description=Clankfeed Paid Nostr Relay
+After=network.target lnbits.service
+
+[Service]
+User=rob
+WorkingDirectory=/home/rob/Dev/clankfeed
+ExecStart=/home/rob/Dev/clankfeed/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8089
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
