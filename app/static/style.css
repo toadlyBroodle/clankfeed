@@ -28,6 +28,17 @@ textarea:focus, input:focus {
   outline: none;
   border-color: var(--accent);
 }
+input::selection, textarea::selection {
+  background: var(--border);
+  color: var(--text);
+}
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 1000px var(--bg-alt) inset;
+  -webkit-text-fill-color: var(--text);
+  caret-color: var(--text);
+}
 button {
   background: var(--border);
   color: var(--text);
