@@ -416,9 +416,17 @@ async def relay_post(request: Request, db: AsyncSession = Depends(get_db)):
         "content": content,
     }
 
-    if not settings.RELAY_PRIVATE_KEY:
+    # Sign with account's Nostr key if logged in, otherwise relay key
+    api_key = request.headers.get("X-Account-Key", "")
+    signing_key = settings.RELAY_PRIVATE_KEY
+    if api_key:
+        acct = await get_account(db, api_key)
+        if acct and acct.nostr_privkey:
+            signing_key = acct.nostr_privkey
+
+    if not signing_key:
         return JSONResponse(status_code=500, content={"detail": "Relay private key not configured"})
-    signed = sign_event(settings.RELAY_PRIVATE_KEY, event)
+    signed = sign_event(signing_key, event)
 
     # Parse custom amount
     req_sats = body.get("amount_sats", settings.POST_PRICE_SATS)
@@ -716,9 +724,11 @@ async def confirm_vote(request: Request, event_id: str, db: AsyncSession = Depen
 @router.post("/account/create")
 @limiter.limit(RATE_POST)
 async def account_create(request: Request, db: AsyncSession = Depends(get_db)):
-    """Create a new account. Returns an API key.
+    """Create a new account or import an existing Nostr key.
 
-    Body: {} or {"pubkey": "hex"}
+    Body: {} (generate new keypair)
+          {"pubkey": "hex"} (link external pubkey)
+          {"nostr_privkey": "hex"} (import existing Nostr private key)
     """
     try:
         body = await request.json()
@@ -729,8 +739,16 @@ async def account_create(request: Request, db: AsyncSession = Depends(get_db)):
     if pubkey and (not isinstance(pubkey, str) or len(pubkey) != 64):
         return JSONResponse(status_code=400, content={"detail": "pubkey must be 64-char hex"})
 
-    acct = await create_account(db, pubkey)
-    return {"api_key": acct.id, "balance_sats": acct.balance_sats or 0}
+    nostr_privkey = body.get("nostr_privkey", "")
+    if nostr_privkey and (not isinstance(nostr_privkey, str) or len(nostr_privkey) != 64):
+        return JSONResponse(status_code=400, content={"detail": "nostr_privkey must be 64-char hex"})
+
+    acct = await create_account(db, pubkey, nostr_privkey=nostr_privkey)
+    return {
+        "api_key": acct.id,
+        "nostr_pubkey": acct.nostr_pubkey or "",
+        "balance_sats": acct.balance_sats or 0,
+    }
 
 
 @router.get("/account/balance")
@@ -745,7 +763,11 @@ async def account_balance(request: Request, db: AsyncSession = Depends(get_db)):
     if not acct:
         return JSONResponse(status_code=404, content={"detail": "Account not found"})
 
-    return {"balance_sats": acct.balance_sats or 0, "balance_usd": acct.balance_usd or "0"}
+    return {
+        "balance_sats": acct.balance_sats or 0,
+        "balance_usd": acct.balance_usd or "0",
+        "nostr_pubkey": acct.nostr_pubkey or "",
+    }
 
 
 @router.post("/account/deposit")
@@ -874,3 +896,114 @@ async def account_deposit_confirm(request: Request, db: AsyncSession = Depends(g
         "amount_sats": dep_sats,
         "balance_sats": acct.balance_sats or 0,
     }
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/account/key  (export Nostr private key)
+# ---------------------------------------------------------------------------
+
+@router.get("/account/key")
+@limiter.limit(RATE_EVENTS_READ)
+async def account_export_key(request: Request, db: AsyncSession = Depends(get_db)):
+    """Export the account's Nostr private key. Requires X-Account-Key header."""
+    api_key = request.headers.get("X-Account-Key", "")
+    if not api_key:
+        return JSONResponse(status_code=401, content={"detail": "X-Account-Key header required"})
+
+    acct = await get_account(db, api_key)
+    if not acct:
+        return JSONResponse(status_code=404, content={"detail": "Account not found"})
+
+    return {
+        "nostr_privkey": acct.nostr_privkey or "",
+        "nostr_pubkey": acct.nostr_pubkey or "",
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/account/profile  (update avatar and about via kind:0)
+# ---------------------------------------------------------------------------
+
+@router.post("/account/profile")
+@limiter.limit(RATE_POST)
+async def account_update_profile(request: Request, db: AsyncSession = Depends(get_db)):
+    """Update account profile (name, about, picture) by posting a kind:0 metadata event.
+
+    Requires X-Account-Key header. Uses credits if available.
+    Body: {"name": "...", "about": "...", "picture": "https://..."}
+    """
+    api_key = request.headers.get("X-Account-Key", "")
+    if not api_key:
+        return JSONResponse(status_code=401, content={"detail": "X-Account-Key header required"})
+
+    acct = await get_account(db, api_key)
+    if not acct:
+        return JSONResponse(status_code=404, content={"detail": "Account not found"})
+
+    if not acct.nostr_privkey:
+        return JSONResponse(status_code=500, content={"detail": "Account has no Nostr key"})
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"detail": "Invalid JSON body"})
+
+    # Build kind:0 metadata content
+    metadata = {}
+    if "name" in body and isinstance(body["name"], str):
+        metadata["name"] = body["name"][:MAX_DISPLAY_NAME]
+    if "about" in body and isinstance(body["about"], str):
+        metadata["about"] = body["about"][:MAX_CONTENT_LENGTH]
+    if "picture" in body and isinstance(body["picture"], str):
+        metadata["picture"] = body["picture"][:1024]
+
+    if not metadata:
+        return JSONResponse(status_code=400, content={"detail": "Provide at least one of: name, about, picture"})
+
+    # Create and sign kind:0 event with account's key
+    event = {
+        "created_at": int(time.time()),
+        "kind": 0,
+        "tags": [],
+        "content": json.dumps(metadata),
+    }
+    signed = sign_event(acct.nostr_privkey, event)
+
+    # Try spending credits
+    req_sats = settings.POST_PRICE_SATS
+    spent, _ = await _try_spend_credits(request, db, req_sats)
+    if spent:
+        await store_event(db, signed, value_sats=req_sats)
+        await broadcast_event(signed)
+        return {"updated": True, "event": signed, "metadata": metadata}
+
+    # No payment configured: store directly
+    if not payments_enabled() and not tempo_enabled():
+        await store_event(db, signed, value_sats=req_sats)
+        await broadcast_event(signed)
+        return {"updated": True, "event": signed, "metadata": metadata}
+
+    # Requires payment
+    token = await store_pending_event(db, signed, amount_sats=req_sats)
+
+    payment_hash = ""
+    bolt11 = ""
+    if payments_enabled():
+        invoice_data = await create_invoice(req_sats, "clankfeed profile update")
+        pending = await db.get(PendingEvent, token)
+        pending.payment_hash = invoice_data["payment_hash"]
+        await db.commit()
+        payment_hash = invoice_data["payment_hash"]
+        bolt11 = invoice_data["payment_request"]
+
+    options = _build_payment_options(payment_hash, bolt11, amount_sats=req_sats)
+
+    return JSONResponse(
+        status_code=402,
+        content={
+            "status": "payment_required",
+            "token": token,
+            **options,
+        },
+        headers={"Cache-Control": "no-store"},
+    )

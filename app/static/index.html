@@ -124,10 +124,35 @@
         <div id="account-logged-in" class="hidden">
           <span style="color: var(--accent);" id="balance-display">0 sats</span>
           <button class="px-2 py-1 rounded ml-1" onclick="showDeposit()" style="background: var(--border);">Deposit</button>
+          <button class="px-2 py-1 rounded ml-1" onclick="showProfile()" style="background: #111;">Profile</button>
           <button class="px-2 py-1 rounded ml-1" onclick="logout()" style="background: #111;">Logout</button>
           <div id="deposit-area" class="hidden mt-1">
             <input id="deposit-amount" type="number" class="p-1 rounded" style="width: 80px;" min="21" value="5000" placeholder="sats">
             <button class="px-2 py-1 rounded" onclick="startDeposit()">Pay</button>
+          </div>
+          <div id="profile-area" class="hidden mt-1 p-2 rounded text-left" style="border: 1px solid var(--border); max-width: 280px;">
+            <p class="mb-1" style="color: var(--accent);">Profile</p>
+            <div class="mb-1"><label style="color: var(--dim);">Name:</label><br>
+              <input id="prof-name" type="text" class="p-1 rounded w-full" maxlength="100"></div>
+            <div class="mb-1"><label style="color: var(--dim);">About:</label><br>
+              <input id="prof-about" type="text" class="p-1 rounded w-full" maxlength="200"></div>
+            <div class="mb-1"><label style="color: var(--dim);">Avatar URL:</label><br>
+              <input id="prof-picture" type="text" class="p-1 rounded w-full" placeholder="https://..."></div>
+            <button class="px-2 py-1 rounded" onclick="saveProfile()">Save Profile</button>
+            <span id="prof-status" class="ml-1" style="color: var(--dim);"></span>
+            <div class="mt-2" style="border-top: 1px solid var(--border); padding-top: 4px;">
+              <p class="mb-1" style="color: var(--dim);">Nostr Keys:</p>
+              <div class="flex items-center gap-1 mb-1">
+                <span style="color: var(--dim);">pub:</span>
+                <input id="key-pub" type="text" readonly onclick="this.select()" class="p-1 rounded flex-1" style="font-size: 9px; background: #111;">
+                <span class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('key-pub').value)">[copy]</span>
+              </div>
+              <div class="flex items-center gap-1">
+                <span style="color: var(--dim);">priv:</span>
+                <input id="key-priv" type="password" readonly onclick="this.type='text';this.select()" class="p-1 rounded flex-1" style="font-size: 9px; background: #111;">
+                <span class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('key-priv').value)">[copy]</span>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -895,6 +920,69 @@ async function updateAccountUI() {
 
 function showDeposit() {
   document.getElementById('deposit-area').classList.toggle('hidden');
+  document.getElementById('profile-area').classList.add('hidden');
+}
+
+async function showProfile() {
+  const profArea = document.getElementById('profile-area');
+  profArea.classList.toggle('hidden');
+  document.getElementById('deposit-area').classList.add('hidden');
+
+  if (!profArea.classList.contains('hidden')) {
+    // Load keys
+    try {
+      const resp = await fetch('/api/v1/account/key', {
+        headers: {'X-Account-Key': apiKey},
+      });
+      const data = await resp.json();
+      document.getElementById('key-pub').value = data.nostr_pubkey || '';
+      document.getElementById('key-priv').value = data.nostr_privkey || '';
+    } catch (e) {}
+  }
+}
+
+async function saveProfile() {
+  const name = document.getElementById('prof-name').value.trim();
+  const about = document.getElementById('prof-about').value.trim();
+  const picture = document.getElementById('prof-picture').value.trim();
+  const status = document.getElementById('prof-status');
+
+  if (!name && !about && !picture) {
+    status.textContent = 'Fill at least one field';
+    status.style.color = 'var(--error)';
+    return;
+  }
+
+  status.textContent = 'Saving...';
+  status.style.color = 'var(--dim)';
+
+  const body = {};
+  if (name) body.name = name;
+  if (about) body.about = about;
+  if (picture) body.picture = picture;
+
+  try {
+    const resp = await fetch('/api/v1/account/profile', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-Account-Key': apiKey},
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json();
+    if (data.updated) {
+      status.textContent = 'Saved!';
+      status.style.color = 'var(--accent)';
+      updateAccountUI();
+    } else if (data.status === 'payment_required') {
+      status.textContent = 'Needs payment (deposit credits first)';
+      status.style.color = 'var(--accent)';
+    } else {
+      status.textContent = data.detail || 'Failed';
+      status.style.color = 'var(--error)';
+    }
+  } catch (e) {
+    status.textContent = 'Error';
+    status.style.color = 'var(--error)';
+  }
 }
 
 async function startDeposit() {

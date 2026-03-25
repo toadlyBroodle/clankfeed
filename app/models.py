@@ -32,7 +32,9 @@ class Account(Base):
     __tablename__ = "accounts"
 
     id = Column(String(64), primary_key=True)  # API key
-    pubkey = Column(String(64), nullable=True, unique=True)
+    pubkey = Column(String(64), nullable=True, unique=True)  # linked external Nostr pubkey
+    nostr_privkey = Column(String(64), nullable=True)  # auto-generated secp256k1 private key (hex)
+    nostr_pubkey = Column(String(64), nullable=True)  # derived x-only public key (hex)
     balance_sats = Column(Integer, default=0)
     balance_usd = Column(Text, default="0")
     created_at = Column(DateTime, default=lambda: datetime.utcnow())

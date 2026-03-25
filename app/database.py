@@ -32,6 +32,7 @@ async def init_db():
         for table, columns in [
             ("nostr_events", [("value_sats", "INTEGER DEFAULT 0"), ("value_usd", "TEXT DEFAULT '0'")]),
             ("pending_events", [("amount_sats", "INTEGER DEFAULT 0"), ("amount_usd", "TEXT DEFAULT '0'")]),
+            ("accounts", [("nostr_privkey", "VARCHAR(64)"), ("nostr_pubkey", "VARCHAR(64)")]),
         ]:
             result = await conn.execute(sqlalchemy.text(f"PRAGMA table_info({table})"))
             existing = {row[1] for row in result.fetchall()}

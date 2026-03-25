@@ -3,6 +3,7 @@
 import secrets
 import logging
 
+from coincurve import PrivateKey
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,17 +12,58 @@ from app.models import Account
 logger = logging.getLogger("clankfeed.accounts")
 
 
-async def create_account(db: AsyncSession, pubkey: str = "") -> Account:
-    """Create a new account with a random API key."""
+def _generate_nostr_keypair() -> tuple[str, str]:
+    """Generate a secp256k1 keypair for Nostr. Returns (privkey_hex, pubkey_hex)."""
+    privkey_bytes = secrets.token_bytes(32)
+    sk = PrivateKey(privkey_bytes)
+    pk_compressed = sk.public_key.format(compressed=True)
+    pubkey_hex = pk_compressed[1:].hex()  # x-only: strip prefix byte
+    return privkey_bytes.hex(), pubkey_hex
+
+
+def _derive_pubkey_from_privkey(privkey_hex: str) -> str:
+    """Derive x-only pubkey from a hex private key."""
+    sk = PrivateKey(bytes.fromhex(privkey_hex))
+    pk_compressed = sk.public_key.format(compressed=True)
+    return pk_compressed[1:].hex()
+
+
+async def create_account(db: AsyncSession, pubkey: str = "", nostr_privkey: str = "") -> Account:
+    """Create a new account with a random API key and Nostr keypair.
+
+    If nostr_privkey is provided, imports that key instead of generating one.
+    If pubkey is provided, links to that external Nostr identity.
+    """
     api_key = secrets.token_hex(32)
 
-    # If pubkey provided, check for existing account
+    # If external pubkey provided, check for existing account
     if pubkey:
         existing = await get_account_by_pubkey(db, pubkey)
         if existing:
             return existing
 
-    acct = Account(id=api_key, pubkey=pubkey or None, balance_sats=0, balance_usd="0")
+    # Use provided private key or generate one
+    if nostr_privkey:
+        try:
+            derived_pubkey = _derive_pubkey_from_privkey(nostr_privkey)
+            # Check if this pubkey already has an account
+            existing = await get_account_by_nostr_pubkey(db, derived_pubkey)
+            if existing:
+                return existing
+        except Exception:
+            # Invalid key, generate fresh
+            nostr_privkey, derived_pubkey = _generate_nostr_keypair()
+    else:
+        nostr_privkey, derived_pubkey = _generate_nostr_keypair()
+
+    acct = Account(
+        id=api_key,
+        pubkey=pubkey or None,
+        nostr_privkey=nostr_privkey,
+        nostr_pubkey=derived_pubkey,
+        balance_sats=0,
+        balance_usd="0",
+    )
     db.add(acct)
     await db.commit()
     return acct
@@ -33,8 +75,15 @@ async def get_account(db: AsyncSession, api_key: str) -> Account | None:
 
 
 async def get_account_by_pubkey(db: AsyncSession, pubkey: str) -> Account | None:
-    """Look up account by Nostr pubkey."""
+    """Look up account by linked external Nostr pubkey."""
     stmt = select(Account).where(Account.pubkey == pubkey)
+    result = await db.execute(stmt)
+    return result.scalar_one_or_none()
+
+
+async def get_account_by_nostr_pubkey(db: AsyncSession, nostr_pubkey: str) -> Account | None:
+    """Look up account by auto-generated Nostr pubkey."""
+    stmt = select(Account).where(Account.nostr_pubkey == nostr_pubkey)
     result = await db.execute(stmt)
     return result.scalar_one_or_none()
 
