@@ -152,7 +152,10 @@
 
     <!-- Payment Widget -->
     <div id="payment-widget" class="hidden mt-4 p-4 rounded" style="border: 1px solid var(--accent);">
-      <p class="text-sm mb-2" style="color: var(--accent);">Pay to post your note:</p>
+      <div class="flex justify-between items-center mb-2">
+        <p class="text-sm" style="color: var(--accent);" id="payment-widget-title">Pay to post your note:</p>
+        <button class="text-xs px-2 py-1 rounded" onclick="hidePaymentWidget()" style="background: #111;">Cancel</button>
+      </div>
 
       <!-- Method tabs -->
       <div id="pay-tabs" class="flex gap-2 mb-3 text-xs">
@@ -403,11 +406,27 @@ document.getElementById('post-form').addEventListener('submit', async (e) => {
   }
 });
 
+function hidePaymentWidget() {
+  document.getElementById('payment-widget').classList.add('hidden');
+  if (paymentPollTimer) clearInterval(paymentPollTimer);
+  document.getElementById('post-btn').disabled = false;
+  document.getElementById('post-btn').textContent = 'Post Note';
+}
+
 function showPaymentWidget(data) {
   const widget = document.getElementById('payment-widget');
   widget.classList.remove('hidden');
   currentPayData = data;
-  currentBolt11 = data.bolt11 || '';
+  currentBolt11 = data.bolt11 || (data.lightning && data.lightning.bolt11) || '';
+
+  // Set title based on context
+  const title = document.getElementById('payment-widget-title');
+  if (data._deposit) {
+    const amt = data.deposit_amount_sats || (data.lightning && data.lightning.amount_sats) || '';
+    title.textContent = `Deposit ${amt} sats:`;
+  } else {
+    title.textContent = 'Pay to post your note:';
+  }
 
   // Show/hide method tabs based on available methods
   const methods = data.methods || [];
@@ -447,18 +466,25 @@ function showPaymentWidget(data) {
   const statusText = document.getElementById('payment-status-text');
   if (paymentPollTimer) clearInterval(paymentPollTimer);
 
-  if (methods.includes('lightning') && data.payment_hash) {
-    statusText.textContent = `Waiting for payment... (${data.amount_sats} sats)`;
+  const payHash = data.payment_hash || (data.lightning && data.lightning.payment_hash) || '';
+  const paySats = data.amount_sats || (data.lightning && data.lightning.amount_sats) || 0;
+
+  if (methods.includes('lightning') && payHash) {
+    statusText.textContent = `Waiting for payment... (${paySats} sats)`;
     statusText.style.color = 'var(--dim)';
     paymentPollTimer = setInterval(async () => {
       try {
-        const resp = await fetch(`/pay/status?payment_hash=${data.payment_hash}`);
+        const resp = await fetch(`/api/v1/payments/status?payment_hash=${payHash}`);
         const status = await resp.json();
         if (status.paid) {
           clearInterval(paymentPollTimer);
           statusText.textContent = 'Payment received! Confirming...';
           statusText.style.color = 'var(--accent)';
-          await confirmPayment(data.token, data.payment_hash, 'lightning');
+          if (data._deposit) {
+            await confirmDeposit(data.token, payHash);
+          } else {
+            await confirmPayment(data.token, payHash, 'lightning');
+          }
         }
       } catch (err) {
         console.error('Poll error:', err);
@@ -489,7 +515,11 @@ async function confirmTempo() {
   statusText.textContent = 'Verifying on-chain...';
   statusText.style.color = 'var(--dim)';
 
-  await confirmPayment(currentPayData.token, txHash, 'tempo');
+  if (currentPayData._deposit) {
+    await confirmDeposit(currentPayData.token, txHash, 'tempo');
+  } else {
+    await confirmPayment(currentPayData.token, txHash, 'tempo');
+  }
 }
 
 async function confirmPayment(token, paymentId, method) {
@@ -754,6 +784,37 @@ async function setSort(mode) {
   }
 }
 
+// ---- Deposit Confirm ----
+async function confirmDeposit(token, paymentId, method) {
+  method = method || 'lightning';
+  const body = { token, method };
+  if (method === 'tempo') body.tx_hash = paymentId;
+  else body.payment_hash = paymentId;
+
+  try {
+    const resp = await fetch('/api/v1/account/deposit/confirm', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-Account-Key': apiKey},
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json();
+    if (data.deposited) {
+      document.getElementById('payment-status-text').textContent = `Deposited ${data.amount_sats} sats!`;
+      document.getElementById('tempo-status-text').textContent = `Deposited ${data.amount_sats} sats!`;
+      document.getElementById('tempo-status-text').style.color = 'var(--accent)';
+      updateAccountUI();
+      setTimeout(hidePaymentWidget, 2000);
+    } else {
+      const msg = data.detail || 'Deposit failed';
+      document.getElementById('payment-status-text').textContent = msg;
+      document.getElementById('tempo-status-text').textContent = msg;
+      document.getElementById('tempo-status-text').style.color = 'var(--error)';
+    }
+  } catch (err) {
+    console.error('Deposit confirm error:', err);
+  }
+}
+
 // ---- Account ----
 async function createAccount() {
   try {
@@ -847,8 +908,7 @@ async function startDeposit() {
     const data = await resp.json();
     if (data.status === 'payment_required') {
       // Show the main payment widget for the deposit
-      currentPayData = {...data, _deposit: true};
-      showPaymentWidget(data);
+      showPaymentWidget({...data, _deposit: true});
     }
   } catch (err) {
     console.error('Deposit error:', err);
