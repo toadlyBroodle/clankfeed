@@ -297,6 +297,63 @@ class TestEventEdgeCases:
 # Rate limiting
 # ---------------------------------------------------------------------------
 
+class TestInputLimits:
+    """Test server-side input length limits."""
+
+    @pytest.mark.asyncio
+    async def test_display_name_truncated(self, client):
+        """Display names over 100 chars are silently truncated."""
+        long_name = "A" * 200
+        resp = await client.post("/api/v1/post", json={
+            "content": "test",
+            "display_name": long_name,
+        })
+        assert resp.status_code == 200
+        tags = resp.json()["event"]["tags"]
+        name_tag = [t for t in tags if t[0] == "display_name"]
+        assert len(name_tag[0][1]) == 100
+
+    @pytest.mark.asyncio
+    async def test_tag_value_too_long(self, client):
+        """Tag values over 1024 chars are rejected."""
+        event = _make_event("tag test")
+        event["tags"] = [["t", "x" * 2000]]
+        # Re-sign since tags changed
+        event = sign_event(TEST_SK, {
+            "created_at": event["created_at"],
+            "kind": 1,
+            "tags": [["t", "x" * 2000]],
+            "content": "tag test",
+        })
+        resp = await client.post("/api/v1/events", json={"event": event})
+        assert resp.status_code == 400
+        assert "tag value" in resp.json()["detail"].lower()
+
+    @pytest.mark.asyncio
+    async def test_tag_value_within_limit(self, client):
+        """Tag values at 1024 chars are accepted."""
+        event = sign_event(TEST_SK, {
+            "created_at": int(time.time()),
+            "kind": 1,
+            "tags": [["t", "x" * 1024]],
+            "content": "ok tag",
+        })
+        resp = await client.post("/api/v1/events", json={"event": event})
+        assert resp.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_non_string_tag_values_rejected(self, client):
+        """Tag values that aren't strings are rejected."""
+        event = sign_event(TEST_SK, {
+            "created_at": int(time.time()),
+            "kind": 1,
+            "tags": [["t", 12345]],
+            "content": "bad tag type",
+        })
+        resp = await client.post("/api/v1/events", json={"event": event})
+        assert resp.status_code == 400
+
+
 class TestRateLimiting:
     @pytest.mark.asyncio
     async def test_post_rate_limit(self, client):

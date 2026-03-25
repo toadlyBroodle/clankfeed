@@ -18,6 +18,7 @@ from app.config import (
     MAX_MESSAGE_BYTES,
     MAX_CONTENT_LENGTH,
     MAX_EVENT_TAGS,
+    MAX_TAG_VALUE_LENGTH,
     PENDING_EVENT_TTL,
     ALLOWED_EVENT_KINDS,
 )
@@ -245,10 +246,16 @@ async def _handle_event(conn: Connection, msg: list, db: AsyncSession):
         await conn.send(["OK", event_id, False, f"invalid: content exceeds {MAX_CONTENT_LENGTH} chars"])
         return
 
-    # Enforce tag count
+    # Enforce tag count and tag value lengths
     if len(event["tags"]) > MAX_EVENT_TAGS:
         await conn.send(["OK", event_id, False, f"invalid: too many tags (max {MAX_EVENT_TAGS})"])
         return
+    for tag in event["tags"]:
+        if isinstance(tag, list):
+            for val in tag:
+                if isinstance(val, str) and len(val) > MAX_TAG_VALUE_LENGTH:
+                    await conn.send(["OK", event_id, False, f"invalid: tag value exceeds {MAX_TAG_VALUE_LENGTH} chars"])
+                    return
 
     if not payments_enabled() and not tempo_enabled():
         # No payment methods configured: store directly

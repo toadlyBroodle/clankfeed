@@ -19,6 +19,7 @@ from app.config import (
     settings, payments_enabled, tempo_enabled,
     RATE_POST, RATE_POST_CONFIRM, RATE_EVENTS_READ, RATE_PAY_STATUS,
     ALLOWED_EVENT_KINDS, MAX_CONTENT_LENGTH, MAX_EVENT_TAGS,
+    MAX_DISPLAY_NAME, MAX_TAG_VALUE_LENGTH,
 )
 from app.database import get_db
 from app.lightning import create_invoice, check_payment_status, check_and_consume_payment
@@ -141,6 +142,14 @@ async def submit_event(request: Request, db: AsyncSession = Depends(get_db)):
         return JSONResponse(status_code=400, content={"detail": f"Content exceeds {MAX_CONTENT_LENGTH} chars"})
     if len(event["tags"]) > MAX_EVENT_TAGS:
         return JSONResponse(status_code=400, content={"detail": f"Too many tags (max {MAX_EVENT_TAGS})"})
+    for tag in event["tags"]:
+        if not isinstance(tag, list):
+            return JSONResponse(status_code=400, content={"detail": "Each tag must be an array"})
+        for val in tag:
+            if not isinstance(val, str):
+                return JSONResponse(status_code=400, content={"detail": "Tag values must be strings"})
+            if len(val) > MAX_TAG_VALUE_LENGTH:
+                return JSONResponse(status_code=400, content={"detail": f"Tag value exceeds {MAX_TAG_VALUE_LENGTH} chars"})
 
     # No payment configured: store directly
     if not payments_enabled() and not tempo_enabled():
@@ -330,7 +339,7 @@ async def relay_post(request: Request, db: AsyncSession = Depends(get_db)):
     if len(content) > MAX_CONTENT_LENGTH:
         return JSONResponse(status_code=400, content={"detail": f"Content too long (max {MAX_CONTENT_LENGTH} chars)"})
 
-    display_name = body.get("display_name", "").strip()
+    display_name = body.get("display_name", "").strip()[:MAX_DISPLAY_NAME]
 
     tags = []
     if display_name:

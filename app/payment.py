@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import (
     settings, payments_enabled, tempo_enabled, PENDING_EVENT_TTL,
     RATE_POST, RATE_PAY, RATE_PAY_STATUS, RATE_POST_CONFIRM,
+    MAX_CONTENT_LENGTH, MAX_DISPLAY_NAME,
 )
 from app.database import get_db
 from app.lightning import create_invoice, check_payment_status, check_and_consume_payment
@@ -172,10 +173,10 @@ async def api_post(request: Request, db: AsyncSession = Depends(get_db)):
     content = body.get("content", "").strip()
     if not content:
         return JSONResponse(status_code=400, content={"detail": "Content is required"})
-    if len(content) > 8196:
-        return JSONResponse(status_code=400, content={"detail": "Content too long (max 8196 chars)"})
+    if len(content) > MAX_CONTENT_LENGTH:
+        return JSONResponse(status_code=400, content={"detail": f"Content too long (max {MAX_CONTENT_LENGTH} chars)"})
 
-    display_name = body.get("display_name", "").strip()
+    display_name = body.get("display_name", "").strip()[:MAX_DISPLAY_NAME]
 
     # Build a Nostr event
     tags = []
