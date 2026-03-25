@@ -8,6 +8,7 @@ import hmac as _hmac
 import json
 import logging
 import re
+import secrets
 import time
 from datetime import datetime
 
@@ -39,17 +40,24 @@ router = APIRouter(prefix="/api/v1")
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _build_payment_options(payment_hash: str = "", bolt11: str = "") -> dict:
+def _build_payment_options(
+    payment_hash: str = "",
+    bolt11: str = "",
+    amount_sats: int = 0,
+    amount_usd: str = "",
+) -> dict:
     """Build the payment options dict for 402 responses."""
     methods = []
     result = {}
+    sats = amount_sats or settings.POST_PRICE_SATS
+    usd = amount_usd or settings.TEMPO_PRICE_USD
 
     if payments_enabled() and bolt11:
         methods.append("lightning")
         result["lightning"] = {
             "bolt11": bolt11,
             "payment_hash": payment_hash,
-            "amount_sats": settings.POST_PRICE_SATS,
+            "amount_sats": sats,
             "expires_in": 600,
         }
 
@@ -58,7 +66,7 @@ def _build_payment_options(payment_hash: str = "", bolt11: str = "") -> dict:
         result["tempo"] = {
             "recipient": settings.TEMPO_RECIPIENT,
             "currency": settings.TEMPO_CURRENCY,
-            "amount_usd": settings.TEMPO_PRICE_USD,
+            "amount_usd": usd,
             "chain": "tempo",
             "testnet": settings.TEMPO_TESTNET,
         }
@@ -151,17 +159,29 @@ async def submit_event(request: Request, db: AsyncSession = Depends(get_db)):
             if len(val) > MAX_TAG_VALUE_LENGTH:
                 return JSONResponse(status_code=400, content={"detail": f"Tag value exceeds {MAX_TAG_VALUE_LENGTH} chars"})
 
-    # No payment configured: store directly
+    # Parse optional custom amount (>= minimum)
+    req_sats = body.get("amount_sats", settings.POST_PRICE_SATS)
+    req_usd = body.get("amount_usd", settings.TEMPO_PRICE_USD)
+    if not isinstance(req_sats, int) or req_sats < settings.POST_PRICE_SATS:
+        req_sats = settings.POST_PRICE_SATS
+    if isinstance(req_usd, (int, float)):
+        req_usd = str(req_usd)
+    try:
+        if float(req_usd) < float(settings.TEMPO_PRICE_USD):
+            req_usd = settings.TEMPO_PRICE_USD
+    except (ValueError, TypeError):
+        req_usd = settings.TEMPO_PRICE_USD
+
+    # No payment configured: store directly with minimum value
     if not payments_enabled() and not tempo_enabled():
-        await store_event(db, event)
+        await store_event(db, event, value_sats=req_sats, value_usd=req_usd)
         await broadcast_event(event)
-        return {"paid": True, "event": event}
+        return {"paid": True, "event": event, "value_sats": req_sats}
 
     # Check for inline MPP credential (one-shot payment)
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Payment "):
-        # Store as pending first (needed for cleanup on failure)
-        token = await store_pending_event(db, event)
+        token = await store_pending_event(db, event, amount_sats=req_sats, amount_usd=req_usd)
         pending = await db.get(PendingEvent, token)
 
         credential = parse_mpp_credential(auth)
@@ -173,19 +193,19 @@ async def submit_event(request: Request, db: AsyncSession = Depends(get_db)):
         return await _verify_and_store_paid_event(credential, pending, db)
 
     # No payment provided: store as pending, return payment options
-    token = await store_pending_event(db, event)
+    token = await store_pending_event(db, event, amount_sats=req_sats, amount_usd=req_usd)
 
     payment_hash = ""
     bolt11 = ""
     if payments_enabled():
-        invoice_data = await create_invoice(settings.POST_PRICE_SATS, "clankfeed note posting")
+        invoice_data = await create_invoice(req_sats, "clankfeed note posting")
         pending = await db.get(PendingEvent, token)
         pending.payment_hash = invoice_data["payment_hash"]
         await db.commit()
         payment_hash = invoice_data["payment_hash"]
         bolt11 = invoice_data["payment_request"]
 
-    options = _build_payment_options(payment_hash, bolt11)
+    options = _build_payment_options(payment_hash, bolt11, amount_sats=req_sats, amount_usd=req_usd)
 
     return JSONResponse(
         status_code=402,
@@ -253,12 +273,14 @@ async def confirm_event(request: Request, db: AsyncSession = Depends(get_db)):
         return JSONResponse(status_code=401, content={"detail": "Payment already consumed"})
 
     event = json.loads(pending.event_json)
-    await store_event(db, event)
+    v_sats = pending.amount_sats or settings.POST_PRICE_SATS
+    v_usd = pending.amount_usd or settings.TEMPO_PRICE_USD
+    await store_event(db, event, value_sats=v_sats, value_usd=v_usd)
     await db.delete(pending)
     await db.commit()
     await broadcast_event(event)
 
-    return {"paid": True, "event": event}
+    return {"paid": True, "event": event, "value_sats": v_sats}
 
 
 # ---------------------------------------------------------------------------
@@ -276,10 +298,16 @@ async def read_events(
     until: int = 0,
     limit: int = 50,
     ids: str = "",
+    sort: str = "newest",
+    min_value: int | None = None,
+    max_value: int | None = None,
+    reply_to: str = "",
 ):
     """Query stored events with optional filters.
 
-    All filter params are optional. Returns newest-first.
+    sort: "newest" (default) or "value" (highest value first)
+    min_value/max_value: filter by value_sats range
+    reply_to: filter replies to a specific event ID
     """
     filt = {}
 
@@ -296,10 +324,15 @@ async def read_events(
         filt["until"] = until
     if ids:
         filt["ids"] = [i.strip() for i in ids.split(",") if i.strip()]
+    if reply_to:
+        filt["reply_to"] = reply_to
 
     filt["limit"] = min(max(limit, 1), 500)
 
-    events = await query_events(db, [filt])
+    if sort not in ("newest", "value"):
+        sort = "newest"
+
+    events = await query_events(db, [filt], sort=sort, min_value=min_value, max_value=max_value)
     return {"events": events, "count": len(events)}
 
 
@@ -326,7 +359,7 @@ async def get_event(request: Request, event_id: str, db: AsyncSession = Depends(
 async def relay_post(request: Request, db: AsyncSession = Depends(get_db)):
     """Post a note signed by the relay. For agents without their own Nostr keypair.
 
-    Body: {"content": "...", "display_name": "..."}
+    Body: {"content": "...", "display_name": "...", "reply_to": "...", "amount_sats": 21}
     """
     try:
         body = await request.json()
@@ -340,10 +373,13 @@ async def relay_post(request: Request, db: AsyncSession = Depends(get_db)):
         return JSONResponse(status_code=400, content={"detail": f"Content too long (max {MAX_CONTENT_LENGTH} chars)"})
 
     display_name = body.get("display_name", "").strip()[:MAX_DISPLAY_NAME]
+    reply_to = body.get("reply_to", "").strip()
 
     tags = []
     if display_name:
         tags.append(["display_name", display_name])
+    if reply_to and len(reply_to) == 64:
+        tags.append(["e", reply_to, "", "reply"])
 
     event = {
         "created_at": int(time.time()),
@@ -356,26 +392,39 @@ async def relay_post(request: Request, db: AsyncSession = Depends(get_db)):
         return JSONResponse(status_code=500, content={"detail": "Relay private key not configured"})
     signed = sign_event(settings.RELAY_PRIVATE_KEY, event)
 
+    # Parse custom amount
+    req_sats = body.get("amount_sats", settings.POST_PRICE_SATS)
+    req_usd = body.get("amount_usd", settings.TEMPO_PRICE_USD)
+    if not isinstance(req_sats, int) or req_sats < settings.POST_PRICE_SATS:
+        req_sats = settings.POST_PRICE_SATS
+    if isinstance(req_usd, (int, float)):
+        req_usd = str(req_usd)
+    try:
+        if float(req_usd) < float(settings.TEMPO_PRICE_USD):
+            req_usd = settings.TEMPO_PRICE_USD
+    except (ValueError, TypeError):
+        req_usd = settings.TEMPO_PRICE_USD
+
     # No payment configured: store directly
     if not payments_enabled() and not tempo_enabled():
-        await store_event(db, signed)
+        await store_event(db, signed, value_sats=req_sats, value_usd=req_usd)
         await broadcast_event(signed)
-        return {"paid": True, "event": signed}
+        return {"paid": True, "event": signed, "value_sats": req_sats}
 
     # Store as pending
-    token = await store_pending_event(db, signed)
+    token = await store_pending_event(db, signed, amount_sats=req_sats, amount_usd=req_usd)
 
     payment_hash = ""
     bolt11 = ""
     if payments_enabled():
-        invoice_data = await create_invoice(settings.POST_PRICE_SATS, "clankfeed note posting")
+        invoice_data = await create_invoice(req_sats, "clankfeed note posting")
         pending = await db.get(PendingEvent, token)
         pending.payment_hash = invoice_data["payment_hash"]
         await db.commit()
         payment_hash = invoice_data["payment_hash"]
         bolt11 = invoice_data["payment_request"]
 
-    options = _build_payment_options(payment_hash, bolt11)
+    options = _build_payment_options(payment_hash, bolt11, amount_sats=req_sats, amount_usd=req_usd)
 
     return {
         "token": token,
@@ -394,3 +443,207 @@ async def payment_status(request: Request, payment_hash: str):
     """Poll Lightning payment status."""
     paid = await check_payment_status(payment_hash)
     return {"paid": paid, "payment_hash": payment_hash}
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/events/{event_id}/replies  (get replies to a note)
+# ---------------------------------------------------------------------------
+
+@router.get("/events/{event_id}/replies")
+@limiter.limit(RATE_EVENTS_READ)
+async def get_replies(
+    request: Request,
+    event_id: str,
+    db: AsyncSession = Depends(get_db),
+    limit: int = 50,
+    sort: str = "newest",
+):
+    """Get replies to a specific note."""
+    row = await db.get(NostrEvent, event_id)
+    if not row:
+        return JSONResponse(status_code=404, content={"detail": "Event not found"})
+
+    filt = {"reply_to": event_id, "kinds": [1], "limit": min(max(limit, 1), 500)}
+    replies = await query_events(db, [filt], sort=sort)
+    return {"event_id": event_id, "replies": replies, "count": len(replies)}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/events/{event_id}/vote  (upvote/downvote with payment)
+# ---------------------------------------------------------------------------
+
+@router.post("/events/{event_id}/vote")
+@limiter.limit(RATE_POST)
+async def vote_event(request: Request, event_id: str, db: AsyncSession = Depends(get_db)):
+    """Vote on a note. Requires payment.
+
+    Body: {"direction": 1, "amount_sats": 21} or {"direction": -1, "amount_usd": "0.01"}
+    direction: 1 (upvote) or -1 (downvote)
+    amount: must be >= minimum (POST_PRICE_SATS / TEMPO_PRICE_USD)
+    """
+    row = await db.get(NostrEvent, event_id)
+    if not row:
+        return JSONResponse(status_code=404, content={"detail": "Event not found"})
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"detail": "Invalid JSON body"})
+
+    direction = body.get("direction", 1)
+    if direction not in (1, -1):
+        return JSONResponse(status_code=400, content={"detail": "direction must be 1 or -1"})
+
+    req_sats = body.get("amount_sats", settings.POST_PRICE_SATS)
+    req_usd = body.get("amount_usd", settings.TEMPO_PRICE_USD)
+    if not isinstance(req_sats, int) or req_sats < settings.POST_PRICE_SATS:
+        req_sats = settings.POST_PRICE_SATS
+    if isinstance(req_usd, (int, float)):
+        req_usd = str(req_usd)
+    try:
+        if float(req_usd) < float(settings.TEMPO_PRICE_USD):
+            req_usd = settings.TEMPO_PRICE_USD
+    except (ValueError, TypeError):
+        req_usd = settings.TEMPO_PRICE_USD
+
+    # Build a synthetic pending event for the vote (reuses payment flow)
+    vote_data = {
+        "vote_event_id": event_id,
+        "direction": direction,
+        "amount_sats": req_sats,
+        "amount_usd": req_usd,
+    }
+
+    # No payment configured: apply vote directly
+    if not payments_enabled() and not tempo_enabled():
+        from app.models import Vote
+        vote = Vote(
+            id=secrets.token_hex(32),
+            event_id=event_id,
+            pubkey="relay",
+            direction=direction,
+            amount_sats=req_sats,
+            amount_usd=req_usd,
+            payment_id="free",
+        )
+        db.add(vote)
+        row.value_sats = (row.value_sats or 0) + (direction * req_sats)
+        await db.commit()
+        return {"voted": True, "direction": direction, "amount_sats": req_sats, "new_value_sats": row.value_sats}
+
+    # Store vote intent as pending event (reuse PendingEvent table)
+    token = await store_pending_event(
+        db,
+        vote_data,  # not a real Nostr event, but JSON-serializable
+        amount_sats=req_sats,
+        amount_usd=req_usd,
+    )
+
+    payment_hash = ""
+    bolt11 = ""
+    if payments_enabled():
+        invoice_data = await create_invoice(req_sats, f"clankfeed vote on {event_id[:12]}")
+        pending = await db.get(PendingEvent, token)
+        pending.payment_hash = invoice_data["payment_hash"]
+        await db.commit()
+        payment_hash = invoice_data["payment_hash"]
+        bolt11 = invoice_data["payment_request"]
+
+    options = _build_payment_options(payment_hash, bolt11, amount_sats=req_sats, amount_usd=req_usd)
+
+    return JSONResponse(
+        status_code=402,
+        content={
+            "status": "payment_required",
+            "token": token,
+            "event_id": event_id,
+            "direction": direction,
+            **options,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/events/{event_id}/vote/confirm  (confirm vote payment)
+# ---------------------------------------------------------------------------
+
+@router.post("/events/{event_id}/vote/confirm")
+@limiter.limit(RATE_POST_CONFIRM)
+async def confirm_vote(request: Request, event_id: str, db: AsyncSession = Depends(get_db)):
+    """Confirm vote payment.
+
+    Body: {"token": "...", "method": "tempo", "tx_hash": "0x..."} (same as event confirm)
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"detail": "Invalid JSON body"})
+
+    token = body.get("token", "")
+    method = body.get("method", "lightning")
+
+    pending = await db.get(PendingEvent, token)
+    if not pending or pending.expires_at.replace(tzinfo=None) < datetime.utcnow():
+        return JSONResponse(status_code=404, content={"detail": "Token expired or not found"})
+
+    # Verify payment (same logic as event confirm)
+    if method == "tempo":
+        tx_hash = body.get("tx_hash", "")
+        if not tx_hash or not re.fullmatch(r"0x[0-9a-fA-F]{64}", tx_hash):
+            return JSONResponse(status_code=400, content={"detail": "tx_hash must be 0x + 64 hex chars"})
+        from app.tempo_pay import _verify_tx_on_chain
+        paid = await _verify_tx_on_chain(
+            tx_hash, settings.TEMPO_RECIPIENT.lower(),
+            settings.TEMPO_CURRENCY.lower(), float(pending.amount_usd or settings.TEMPO_PRICE_USD),
+        )
+        payment_id = tx_hash
+    else:
+        pay_hash = body.get("payment_hash", "")
+        if not pay_hash or not re.fullmatch(r"[0-9a-fA-F]+", pay_hash):
+            return JSONResponse(status_code=400, content={"detail": "payment_hash must be hex"})
+        if pending.payment_hash and not _hmac.compare_digest(pending.payment_hash, pay_hash):
+            return JSONResponse(status_code=400, content={"detail": "Payment hash mismatch"})
+        paid = await check_payment_status(pay_hash)
+        payment_id = pay_hash
+
+    if not paid:
+        return JSONResponse(status_code=402, content={"detail": "Payment not yet received"})
+
+    consumed = await check_and_consume_payment(payment_id, db)
+    if not consumed:
+        return JSONResponse(status_code=401, content={"detail": "Payment already consumed"})
+
+    # Parse vote data from pending
+    vote_data = json.loads(pending.event_json)
+    direction = vote_data.get("direction", 1)
+    v_sats = pending.amount_sats or settings.POST_PRICE_SATS
+
+    # Apply vote
+    from app.models import Vote
+    row = await db.get(NostrEvent, event_id)
+    if not row:
+        await db.delete(pending)
+        await db.commit()
+        return JSONResponse(status_code=404, content={"detail": "Event not found"})
+
+    vote = Vote(
+        id=secrets.token_hex(32),
+        event_id=event_id,
+        pubkey=vote_data.get("pubkey", "anonymous"),
+        direction=direction,
+        amount_sats=v_sats,
+        amount_usd=pending.amount_usd or "0",
+        payment_id=payment_id,
+    )
+    db.add(vote)
+    row.value_sats = (row.value_sats or 0) + (direction * v_sats)
+    await db.delete(pending)
+    await db.commit()
+
+    return {
+        "voted": True,
+        "direction": direction,
+        "amount_sats": v_sats,
+        "new_value_sats": row.value_sats,
+    }

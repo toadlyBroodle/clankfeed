@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, String, Integer, Text, DateTime, Index
+from sqlalchemy import Column, String, Integer, Float, Text, DateTime, Index
 
 from app.database import Base
 
@@ -16,12 +16,33 @@ class NostrEvent(Base):
     content = Column(Text, nullable=False)
     sig = Column(String(128), nullable=False)  # 64-byte hex Schnorr sig
     stored_at = Column(DateTime, default=lambda: datetime.utcnow())
+    value_sats = Column(Integer, default=0)
+    value_usd = Column(Text, default="0")
 
     __table_args__ = (
         Index("ix_nostr_events_pubkey", "pubkey"),
         Index("ix_nostr_events_kind", "kind"),
         Index("ix_nostr_events_created_at", "created_at"),
         Index("ix_nostr_events_kind_created_at", "kind", "created_at"),
+        Index("ix_nostr_events_value_sats", "value_sats"),
+    )
+
+
+class Vote(Base):
+    __tablename__ = "votes"
+
+    id = Column(String(64), primary_key=True)  # random hex
+    event_id = Column(String(64), nullable=False)
+    pubkey = Column(String(64), nullable=False)
+    direction = Column(Integer, nullable=False)  # +1 or -1
+    amount_sats = Column(Integer, default=0)
+    amount_usd = Column(Text, default="0")
+    payment_id = Column(String(128), nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.utcnow())
+
+    __table_args__ = (
+        Index("ix_votes_event_id", "event_id"),
+        Index("ix_votes_event_pubkey", "event_id", "pubkey"),
     )
 
 
@@ -38,6 +59,8 @@ class PendingEvent(Base):
     token = Column(String(64), primary_key=True)  # random hex
     event_json = Column(Text, nullable=False)
     payment_hash = Column(String(64), nullable=False, default="")
+    amount_sats = Column(Integer, default=0)
+    amount_usd = Column(Text, default="0")
     created_at = Column(DateTime, default=lambda: datetime.utcnow())
     expires_at = Column(DateTime, nullable=False)
 

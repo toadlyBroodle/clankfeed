@@ -86,8 +86,18 @@ def _matches_filter(event: dict, filt: dict) -> bool:
     return True
 
 
-async def query_events(db: AsyncSession, filters: list[dict]) -> list[dict]:
-    """Query stored events matching any of the given filters."""
+async def query_events(
+    db: AsyncSession,
+    filters: list[dict],
+    sort: str = "newest",
+    min_value: int | None = None,
+    max_value: int | None = None,
+) -> list[dict]:
+    """Query stored events matching any of the given filters.
+
+    sort: "newest" (created_at DESC) or "value" (value_sats DESC)
+    min_value/max_value: filter by value_sats range
+    """
     results = []
     seen_ids = set()
 
@@ -107,7 +117,24 @@ async def query_events(db: AsyncSession, filters: list[dict]) -> list[dict]:
         if "until" in filt:
             conditions.append(NostrEvent.created_at <= filt["until"])
 
-        stmt = select(NostrEvent).order_by(NostrEvent.created_at.desc())
+        # Value filters
+        if min_value is not None:
+            conditions.append(NostrEvent.value_sats >= min_value)
+        if max_value is not None:
+            conditions.append(NostrEvent.value_sats <= max_value)
+
+        # Reply filter
+        if "reply_to" in filt:
+            # Match events that have an "e" tag with the parent event ID
+            # json.dumps uses ", " separator, so search for '"e", "parent_id"'
+            conditions.append(NostrEvent.tags.contains(f'"e", "{filt["reply_to"]}"'))
+
+        # Sort order
+        if sort == "value":
+            stmt = select(NostrEvent).order_by(NostrEvent.value_sats.desc(), NostrEvent.created_at.desc())
+        else:
+            stmt = select(NostrEvent).order_by(NostrEvent.created_at.desc())
+
         if conditions:
             stmt = stmt.where(and_(*conditions))
 
@@ -125,7 +152,7 @@ async def query_events(db: AsyncSession, filters: list[dict]) -> list[dict]:
 
 def row_to_event(row: NostrEvent) -> dict:
     """Convert a DB row to a Nostr event dict."""
-    return {
+    d = {
         "id": row.id,
         "pubkey": row.pubkey,
         "created_at": row.created_at,
@@ -134,9 +161,14 @@ def row_to_event(row: NostrEvent) -> dict:
         "content": row.content,
         "sig": row.sig,
     }
+    if row.value_sats:
+        d["value_sats"] = row.value_sats
+    if row.value_usd and row.value_usd != "0":
+        d["value_usd"] = row.value_usd
+    return d
 
 
-async def store_event(db: AsyncSession, event: dict):
+async def store_event(db: AsyncSession, event: dict, value_sats: int = 0, value_usd: str = "0"):
     """Store a validated, paid event in the database.
 
     Kind 0 (metadata) is replaceable: only the latest per pubkey is kept.
@@ -167,18 +199,24 @@ async def store_event(db: AsyncSession, event: dict):
         tags=json.dumps(event["tags"]),
         content=event["content"],
         sig=event["sig"],
+        value_sats=value_sats,
+        value_usd=value_usd,
     )
     db.add(row)
     await db.commit()
 
 
-async def store_pending_event(db: AsyncSession, event: dict) -> str:
+async def store_pending_event(
+    db: AsyncSession, event: dict, amount_sats: int = 0, amount_usd: str = "0"
+) -> str:
     """Store an event awaiting payment. Returns the token."""
     token = secrets.token_hex(32)
     expires = datetime.utcnow() + timedelta(seconds=PENDING_EVENT_TTL)
     row = PendingEvent(
         token=token,
         event_json=json.dumps(event),
+        amount_sats=amount_sats,
+        amount_usd=amount_usd,
         created_at=datetime.utcnow(),
         expires_at=expires,
     )

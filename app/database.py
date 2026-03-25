@@ -27,3 +27,10 @@ async def init_db():
     # Enable WAL mode for concurrent reads
     async with engine.begin() as conn:
         await conn.execute(sqlalchemy.text("PRAGMA journal_mode=WAL"))
+    # Migrate: add new columns to existing tables if missing
+    async with engine.begin() as conn:
+        result = await conn.execute(sqlalchemy.text("PRAGMA table_info(nostr_events)"))
+        existing = {row[1] for row in result.fetchall()}
+        for col, col_type in [("value_sats", "INTEGER DEFAULT 0"), ("value_usd", "TEXT DEFAULT '0'")]:
+            if col not in existing:
+                await conn.execute(sqlalchemy.text(f"ALTER TABLE nostr_events ADD COLUMN {col} {col_type}"))
