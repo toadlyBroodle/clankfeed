@@ -33,7 +33,7 @@ router = APIRouter()
 async def pay_get(request: Request, token: str, db: AsyncSession = Depends(get_db)):
     """Issue a 402 MPP challenge with a Lightning invoice for a pending event."""
     pending = await db.get(PendingEvent, token)
-    if not pending or pending.expires_at < datetime.now(timezone.utc):
+    if not pending or pending.expires_at.replace(tzinfo=None) < datetime.utcnow():
         return JSONResponse(status_code=404, content={"detail": "Token expired or not found"})
 
     price = settings.POST_PRICE_SATS
@@ -70,7 +70,7 @@ async def pay_get(request: Request, token: str, db: AsyncSession = Depends(get_d
 async def pay_post(request: Request, token: str, db: AsyncSession = Depends(get_db)):
     """Verify MPP credential and store the paid event."""
     pending = await db.get(PendingEvent, token)
-    if not pending or pending.expires_at < datetime.now(timezone.utc):
+    if not pending or pending.expires_at.replace(tzinfo=None) < datetime.utcnow():
         return JSONResponse(status_code=404, content={"detail": "Token expired or not found"})
 
     auth = request.headers.get("Authorization", "")
@@ -205,7 +205,7 @@ async def api_post_confirm(request: Request, db: AsyncSession = Depends(get_db))
         return JSONResponse(status_code=400, content={"detail": "token and payment_hash required"})
 
     pending = await db.get(PendingEvent, token)
-    if not pending or pending.expires_at < datetime.now(timezone.utc):
+    if not pending or pending.expires_at.replace(tzinfo=None) < datetime.utcnow():
         return JSONResponse(status_code=404, content={"detail": "Token expired or not found"})
 
     if pending.payment_hash != payment_hash:

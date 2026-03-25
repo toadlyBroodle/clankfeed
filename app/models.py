@@ -15,7 +15,7 @@ class NostrEvent(Base):
     tags = Column(Text, nullable=False)  # JSON-serialized
     content = Column(Text, nullable=False)
     sig = Column(String(128), nullable=False)  # 64-byte hex Schnorr sig
-    stored_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    stored_at = Column(DateTime, default=lambda: datetime.utcnow())
 
     __table_args__ = (
         Index("ix_nostr_events_pubkey", "pubkey"),
@@ -29,7 +29,7 @@ class ConsumedPayment(Base):
     __tablename__ = "consumed_payments"
 
     payment_hash = Column(String(64), primary_key=True)
-    consumed_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    consumed_at = Column(DateTime, default=lambda: datetime.utcnow())
 
 
 class PendingEvent(Base):
@@ -38,7 +38,7 @@ class PendingEvent(Base):
     token = Column(String(64), primary_key=True)  # random hex
     event_json = Column(Text, nullable=False)
     payment_hash = Column(String(64), nullable=False, default="")
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: datetime.utcnow())
     expires_at = Column(DateTime, nullable=False)
 
     __table_args__ = (

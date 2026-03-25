@@ -153,11 +153,11 @@ async def store_event(db: AsyncSession, event: dict):
 async def store_pending_event(db: AsyncSession, event: dict) -> str:
     """Store an event awaiting payment. Returns the token."""
     token = secrets.token_hex(32)
-    expires = datetime.now(timezone.utc) + timedelta(seconds=PENDING_EVENT_TTL)
+    expires = datetime.utcnow() + timedelta(seconds=PENDING_EVENT_TTL)
     row = PendingEvent(
         token=token,
         event_json=json.dumps(event),
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.utcnow(),
         expires_at=expires,
     )
     db.add(row)

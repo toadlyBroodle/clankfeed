@@ -13,3 +13,5 @@ dist/
 build/
 .pytest_cache/
 .mypy_cache/
+deploy/
+screenshot*.png
