@@ -26,6 +26,7 @@ from app.database import get_db
 from app.lightning import create_invoice, check_payment_status, check_and_consume_payment
 from app.limiter import limiter
 from app.accounts import create_account, get_account, deposit_credits, spend_credits
+from app.rates import get_btc_usd_price, usd_to_sats
 from app.models import PendingEvent, NostrEvent
 from app.mpp import parse_mpp_credential, verify_mpp_credential, extract_payment_hash, build_receipt
 from app.nostr import validate_event, sign_event
@@ -293,8 +294,15 @@ async def confirm_event(request: Request, db: AsyncSession = Depends(get_db)):
         return JSONResponse(status_code=401, content={"detail": "Payment already consumed"})
 
     event = json.loads(pending.event_json)
-    v_sats = pending.amount_sats or settings.POST_PRICE_SATS
     v_usd = pending.amount_usd or settings.TEMPO_PRICE_USD
+
+    # Convert USD to sats at spot for Tempo payments
+    if method == "tempo":
+        btc_price = await get_btc_usd_price()
+        v_sats = usd_to_sats(float(v_usd), btc_price) if btc_price > 0 else (pending.amount_sats or settings.POST_PRICE_SATS)
+    else:
+        v_sats = pending.amount_sats or settings.POST_PRICE_SATS
+
     await store_event(db, event, value_sats=v_sats, value_usd=v_usd)
     await db.delete(pending)
     await db.commit()
@@ -662,7 +670,14 @@ async def confirm_vote(request: Request, event_id: str, db: AsyncSession = Depen
     # Parse vote data from pending
     vote_data = json.loads(pending.event_json)
     direction = vote_data.get("direction", 1)
-    v_sats = pending.amount_sats or settings.POST_PRICE_SATS
+
+    # Convert USD to sats at spot for Tempo payments
+    if method == "tempo":
+        v_usd = pending.amount_usd or settings.TEMPO_PRICE_USD
+        btc_price = await get_btc_usd_price()
+        v_sats = usd_to_sats(float(v_usd), btc_price) if btc_price > 0 else (pending.amount_sats or settings.POST_PRICE_SATS)
+    else:
+        v_sats = pending.amount_sats or settings.POST_PRICE_SATS
 
     # Apply vote
     from app.models import Vote
@@ -840,9 +855,13 @@ async def account_deposit_confirm(request: Request, db: AsyncSession = Depends(g
     if not consumed:
         return JSONResponse(status_code=401, content={"detail": "Payment already consumed"})
 
-    # Add credits
-    dep_sats = pending.amount_sats or settings.POST_PRICE_SATS
+    # Add credits (convert USD to sats at spot for Tempo)
     dep_usd = pending.amount_usd or "0"
+    if method == "tempo":
+        btc_price = await get_btc_usd_price()
+        dep_sats = usd_to_sats(float(dep_usd), btc_price) if btc_price > 0 else (pending.amount_sats or settings.POST_PRICE_SATS)
+    else:
+        dep_sats = pending.amount_sats or settings.POST_PRICE_SATS
     acct = await deposit_credits(db, api_key, dep_sats, dep_usd)
     if not acct:
         return JSONResponse(status_code=404, content={"detail": "Account not found"})
