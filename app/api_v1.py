@@ -4,8 +4,10 @@ Provides a clean JSON API for posting agent-signed events, reading the feed,
 and confirming payments. Complements the NIP-01 WebSocket interface.
 """
 
+import hmac as _hmac
 import json
 import logging
+import re
 import time
 from datetime import datetime
 
@@ -214,8 +216,8 @@ async def confirm_event(request: Request, db: AsyncSession = Depends(get_db)):
 
     if method == "tempo":
         tx_hash = body.get("tx_hash", "")
-        if not tx_hash:
-            return JSONResponse(status_code=400, content={"detail": "tx_hash required for Tempo"})
+        if not tx_hash or not re.fullmatch(r"0x[0-9a-fA-F]{64}", tx_hash):
+            return JSONResponse(status_code=400, content={"detail": "tx_hash must be 0x + 64 hex chars"})
 
         from app.tempo_pay import _verify_tx_on_chain
         paid = await _verify_tx_on_chain(
@@ -227,9 +229,9 @@ async def confirm_event(request: Request, db: AsyncSession = Depends(get_db)):
         payment_id = tx_hash
     else:
         payment_hash = body.get("payment_hash", "")
-        if not payment_hash:
-            return JSONResponse(status_code=400, content={"detail": "payment_hash required"})
-        if pending.payment_hash and pending.payment_hash != payment_hash:
+        if not payment_hash or not re.fullmatch(r"[0-9a-fA-F]+", payment_hash):
+            return JSONResponse(status_code=400, content={"detail": "payment_hash must be hex"})
+        if pending.payment_hash and not _hmac.compare_digest(pending.payment_hash, payment_hash):
             return JSONResponse(status_code=400, content={"detail": "Payment hash mismatch"})
         paid = await check_payment_status(payment_hash)
         payment_id = payment_hash
@@ -273,7 +275,10 @@ async def read_events(
     filt = {}
 
     if kinds:
-        filt["kinds"] = [int(k) for k in kinds.split(",") if k.strip()]
+        try:
+            filt["kinds"] = [int(k) for k in kinds.split(",") if k.strip()]
+        except ValueError:
+            return JSONResponse(status_code=400, content={"detail": "kinds must be comma-separated integers"})
     if authors:
         filt["authors"] = [a.strip() for a in authors.split(",") if a.strip()]
     if since:

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import logging.handlers
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +25,34 @@ from app.api_v1 import router as api_v1_router
 from app.payment import router as payment_router
 from app.relay import Connection, connections, handle_message
 
+def _setup_logging():
+    """Configure structured logging with rotation."""
+    root = logging.getLogger("clankfeed")
+    root.setLevel(logging.INFO)
+
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    # Console handler (always)
+    console = logging.StreamHandler()
+    console.setFormatter(formatter)
+    root.addHandler(console)
+
+    # File handler with rotation (if db/ dir exists, log next to db)
+    log_dir = Path(__file__).parent.parent / "db"
+    if log_dir.exists():
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_dir / "clankfeed.log",
+            maxBytes=10 * 1024 * 1024,  # 10 MB
+            backupCount=5,
+        )
+        file_handler.setFormatter(formatter)
+        root.addHandler(file_handler)
+
+
+_setup_logging()
 logger = logging.getLogger("clankfeed")
 
 # Derive relay pubkey from private key (if configured)

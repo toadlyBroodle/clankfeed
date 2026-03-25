@@ -90,7 +90,11 @@ async def verify_tempo_credential(credential: dict) -> bool:
         if method != "tempo":
             return False
 
-        if not tx_hash or not tx_hash.startswith("0x"):
+        if not tx_hash or not tx_hash.startswith("0x") or len(tx_hash) != 66:
+            return False
+        try:
+            bytes.fromhex(tx_hash[2:])
+        except ValueError:
             return False
 
         # Decode challenge request to get expected values

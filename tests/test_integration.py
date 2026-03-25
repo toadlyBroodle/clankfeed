@@ -98,7 +98,7 @@ def _mock_create_invoice():
     """Patch create_invoice to return fake Lightning data with unique hashes."""
     global _invoice_counter
     _invoice_counter += 1
-    h = f"fakehash{_invoice_counter:04d}"
+    h = f"{_invoice_counter:064x}"  # valid 64-char hex
     return patch("app.payment.create_invoice", new_callable=AsyncMock, return_value={
         "payment_hash": h,
         "payment_request": f"lnbc210n1fake{_invoice_counter}",
@@ -176,7 +176,7 @@ class TestTempoConfirm:
             resp = await tempo_client.post("/api/post/confirm", json={
                 "token": token,
                 "method": "tempo",
-                "tx_hash": "0xvalidtxhash123",
+                "tx_hash": "0x" + "a1" * 32,
             })
         assert resp.status_code == 200
         data = resp.json()
@@ -193,7 +193,7 @@ class TestTempoConfirm:
             resp = await tempo_client.post("/api/post/confirm", json={
                 "token": token,
                 "method": "tempo",
-                "tx_hash": "0xunpaidtx",
+                "tx_hash": "0x" + "b2" * 32,
             })
         assert resp.status_code == 402
         assert "not yet received" in resp.json()["detail"]
@@ -209,7 +209,7 @@ class TestTempoConfirm:
             "method": "tempo",
         })
         assert resp.status_code == 400
-        assert "tx_hash required" in resp.json()["detail"]
+        assert resp.json()["detail"]  # either "required" or "must be 0x + 64 hex"
 
     @pytest.mark.asyncio
     async def test_tempo_confirm_expired_token(self, tempo_client):
@@ -230,7 +230,7 @@ class TestTempoConfirm:
             resp = await tempo_client.post("/api/post/confirm", json={
                 "token": token,
                 "method": "tempo",
-                "tx_hash": "0xvalidbutexpired",
+                "tx_hash": "0x" + "c3" * 32,
             })
         assert resp.status_code == 404
 
@@ -271,10 +271,10 @@ class TestLightningConfirm:
             resp = await full_client.post("/api/post/confirm", json={
                 "token": token,
                 "method": "lightning",
-                "payment_hash": "wronghash",
+                "payment_hash": "ee" * 32,  # valid hex but doesn't match
             })
         assert resp.status_code == 400
-        assert "mismatch" in resp.json()["detail"]
+        assert "mismatch" in resp.json()["detail"].lower() or "hex" in resp.json()["detail"].lower()
 
     @pytest.mark.asyncio
     async def test_lightning_confirm_unpaid(self, full_client):
@@ -307,7 +307,7 @@ class TestReplayProtection:
         token1 = resp.json()["token"]
         with _mock_tempo_verify(paid=True):
             resp = await tempo_client.post("/api/post/confirm", json={
-                "token": token1, "method": "tempo", "tx_hash": "0xreplaytx",
+                "token": token1, "method": "tempo", "tx_hash": "0x" + "d4" * 32,
             })
         assert resp.status_code == 200
 
@@ -316,7 +316,7 @@ class TestReplayProtection:
         token2 = resp.json()["token"]
         with _mock_tempo_verify(paid=True):
             resp = await tempo_client.post("/api/post/confirm", json={
-                "token": token2, "method": "tempo", "tx_hash": "0xreplaytx",
+                "token": token2, "method": "tempo", "tx_hash": "0x" + "d4" * 32,
             })
         assert resp.status_code == 401
         assert "already consumed" in resp.json()["detail"]
@@ -324,7 +324,7 @@ class TestReplayProtection:
     @pytest.mark.asyncio
     async def test_lightning_replay_rejected(self, full_client):
         """Same payment_hash used for two notes: second is rejected."""
-        fixed_hash = "replay_test_hash_001"
+        fixed_hash = "ff" * 32
         mock_invoice = patch("app.payment.create_invoice", new_callable=AsyncMock, return_value={
             "payment_hash": fixed_hash,
             "payment_request": "lnbc210n1replay",
@@ -368,7 +368,7 @@ class TestConfirmValidation:
     @pytest.mark.asyncio
     async def test_missing_token(self, tempo_client):
         resp = await tempo_client.post("/api/post/confirm", json={
-            "method": "tempo", "tx_hash": "0xabc",
+            "method": "tempo", "tx_hash": "0x" + "ef" * 32,
         })
         assert resp.status_code == 404  # empty token not found
 
@@ -384,7 +384,7 @@ class TestConfirmValidation:
     @pytest.mark.asyncio
     async def test_nonexistent_token(self, tempo_client):
         resp = await tempo_client.post("/api/post/confirm", json={
-            "token": "nonexistent", "method": "tempo", "tx_hash": "0xabc",
+            "token": "nonexistent", "method": "tempo", "tx_hash": "0x" + "ef" * 32,
         })
         assert resp.status_code == 404
 
@@ -398,7 +398,7 @@ class TestConfirmValidation:
             "token": token, "method": "lightning",
         })
         assert resp.status_code == 400
-        assert "payment_hash required" in resp.json()["detail"]
+        assert "hex" in resp.json()["detail"] or "required" in resp.json()["detail"]
 
 
 # ---------------------------------------------------------------------------

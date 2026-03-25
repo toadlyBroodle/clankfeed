@@ -32,11 +32,15 @@ def _make_signed_event(content="agent test", kind=1, tags=None):
     })
 
 
+_inv_counter = 0
+
 def _mock_create_invoice(hash_suffix=""):
-    h = f"v1hash{hash_suffix or int(time.time())}"
+    global _inv_counter
+    _inv_counter += 1
+    h = f"{_inv_counter:064x}"  # valid 64-char hex
     return patch("app.api_v1.create_invoice", new_callable=AsyncMock, return_value={
         "payment_hash": h,
-        "payment_request": f"lnbc210n1fake{h}",
+        "payment_request": f"lnbc210n1fake{_inv_counter}",
     })
 
 
@@ -168,7 +172,7 @@ class TestConfirmEvent:
 
         with _mock_tempo_verify(paid=True):
             resp = await agent_client.post("/api/v1/events/confirm", json={
-                "token": token, "method": "tempo", "tx_hash": "0xconfirmed",
+                "token": token, "method": "tempo", "tx_hash": "0x" + "ab" * 32,
             })
         assert resp.status_code == 200
         assert resp.json()["paid"] is True
@@ -197,7 +201,7 @@ class TestConfirmEvent:
         t1 = resp.json()["token"]
         with _mock_tempo_verify(paid=True):
             resp = await agent_client.post("/api/v1/events/confirm", json={
-                "token": t1, "method": "tempo", "tx_hash": "0xreplay_v1",
+                "token": t1, "method": "tempo", "tx_hash": "0x" + "cd" * 32,
             })
         assert resp.status_code == 200
 
@@ -206,7 +210,7 @@ class TestConfirmEvent:
         t2 = resp.json()["token"]
         with _mock_tempo_verify(paid=True):
             resp = await agent_client.post("/api/v1/events/confirm", json={
-                "token": t2, "method": "tempo", "tx_hash": "0xreplay_v1",
+                "token": t2, "method": "tempo", "tx_hash": "0x" + "cd" * 32,
             })
         assert resp.status_code == 401
 
