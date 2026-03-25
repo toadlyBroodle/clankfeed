@@ -139,10 +139,10 @@ class TestSubmitEvent:
 
     @pytest.mark.asyncio
     async def test_submit_rejects_blocked_kind(self, agent_client):
-        event = _make_signed_event(kind=0)
+        event = _make_signed_event(kind=3)  # kind 3 (contacts) not in ALLOWED_EVENT_KINDS
         resp = await agent_client.post("/api/v1/events", json={"event": event})
         assert resp.status_code == 400
-        assert "kind 0" in resp.json()["detail"]
+        assert "kind 3" in resp.json()["detail"]
 
     @pytest.mark.asyncio
     async def test_submit_missing_event_field(self, agent_client):

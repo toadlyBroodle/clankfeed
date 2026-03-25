@@ -206,7 +206,7 @@ def _nip11_response():
     doc = {
         "name": settings.RELAY_NAME,
         "description": settings.RELAY_DESCRIPTION,
-        "supported_nips": [1, 11],
+        "supported_nips": [1, 11, 42],
         "software": "https://github.com/toadlyBroodle/clankfeed",
         "version": "0.1.0",
         "limitation": {
@@ -266,6 +266,8 @@ async def websocket_relay(ws: WebSocket):
     await ws.accept()
     conn = Connection(ws)
     connections.add(conn)
+    # NIP-42: send AUTH challenge on connect
+    await conn.send(["AUTH", conn.challenge])
     try:
         while True:
             raw = await ws.receive_text()

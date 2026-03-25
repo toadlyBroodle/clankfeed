@@ -52,7 +52,7 @@ MAX_FILTERS_PER_REQ = 10
 MAX_MESSAGE_BYTES = 65536
 PENDING_EVENT_TTL = 600  # 10 minutes
 MAX_CONNECTIONS = 200
-ALLOWED_EVENT_KINDS = {1}  # MVP: only kind 1 (short text notes)
+ALLOWED_EVENT_KINDS = {0, 1}  # kind 0 (metadata) + kind 1 (text notes)
 
 # SECURITY: Rate limits per IP. Change values here, not in individual files.
 RATE_POST = "10/minute"

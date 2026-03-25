@@ -22,7 +22,7 @@ from app.config import (
     ALLOWED_EVENT_KINDS,
 )
 from app.models import NostrEvent, PendingEvent
-from app.nostr import validate_event
+from app.nostr import validate_event, verify_event_id, verify_signature
 
 logger = logging.getLogger("clankfeed.relay")
 
@@ -33,6 +33,8 @@ class Connection:
     def __init__(self, ws: WebSocket):
         self.ws = ws
         self.subscriptions: dict[str, list[dict]] = {}  # sub_id -> [filter, ...]
+        self.challenge: str = secrets.token_hex(16)  # NIP-42 auth challenge
+        self.authed_pubkeys: set[str] = set()  # pubkeys authenticated via NIP-42
 
     async def send(self, msg: list):
         await self.ws.send_text(json.dumps(msg))
@@ -134,10 +136,28 @@ def row_to_event(row: NostrEvent) -> dict:
 
 
 async def store_event(db: AsyncSession, event: dict):
-    """Store a validated, paid event in the database."""
+    """Store a validated, paid event in the database.
+
+    Kind 0 (metadata) is replaceable: only the latest per pubkey is kept.
+    If a newer kind:0 already exists for this pubkey, the incoming event is skipped.
+    """
     existing = await db.get(NostrEvent, event["id"])
     if existing:
         return  # duplicate, skip
+
+    # Replaceable events (kind 0, 3, 10000-19999): keep only latest per pubkey+kind
+    if event["kind"] == 0 or event["kind"] == 3 or 10000 <= event["kind"] < 20000:
+        stmt = select(NostrEvent).where(
+            and_(NostrEvent.pubkey == event["pubkey"], NostrEvent.kind == event["kind"])
+        )
+        old = (await db.execute(stmt)).scalar_one_or_none()
+        if old:
+            if old.created_at > event["created_at"]:
+                return  # existing is newer, skip
+            if old.created_at == event["created_at"] and old.id < event["id"]:
+                return  # same timestamp, existing has lower id (per NIP-01 tie-break)
+            await db.delete(old)
+
     row = NostrEvent(
         id=event["id"],
         pubkey=event["pubkey"],
@@ -190,6 +210,8 @@ async def handle_message(conn: Connection, raw: str, db: AsyncSession):
         await _handle_req(conn, msg, db)
     elif msg_type == "CLOSE":
         await _handle_close(conn, msg)
+    elif msg_type == "AUTH":
+        await _handle_auth(conn, msg)
     else:
         await conn.send(["NOTICE", f"error: unknown message type: {msg_type}"])
 
@@ -287,3 +309,70 @@ async def _handle_close(conn: Connection, msg: list):
     sub_id = msg[1]
     conn.subscriptions.pop(sub_id, None)
     await conn.send(["CLOSED", sub_id, ""])
+
+
+async def _handle_auth(conn: Connection, msg: list):
+    """Handle an AUTH message per NIP-42.
+
+    Client sends a signed kind:22242 event proving they control a pubkey.
+    Verify: kind, created_at within 10 min, challenge tag matches, relay tag matches.
+    """
+    if len(msg) < 2 or not isinstance(msg[1], dict):
+        await conn.send(["NOTICE", "error: AUTH requires a signed event"])
+        return
+
+    event = msg[1]
+    event_id = event.get("id", "")
+
+    # Basic validation
+    if event.get("kind") != 22242:
+        await conn.send(["OK", event_id, False, "invalid: AUTH event must be kind 22242"])
+        return
+
+    if not verify_event_id(event):
+        await conn.send(["OK", event_id, False, "invalid: event id does not match"])
+        return
+
+    if not verify_signature(event):
+        await conn.send(["OK", event_id, False, "invalid: bad signature"])
+        return
+
+    # Check created_at within 10 minutes
+    import time
+    now = int(time.time())
+    if abs(now - event.get("created_at", 0)) > 600:
+        await conn.send(["OK", event_id, False, "invalid: AUTH event timestamp too old"])
+        return
+
+    # Check challenge tag matches
+    tags = event.get("tags", [])
+    challenge_tag = None
+    relay_tag = None
+    for tag in tags:
+        if len(tag) >= 2:
+            if tag[0] == "challenge":
+                challenge_tag = tag[1]
+            elif tag[0] == "relay":
+                relay_tag = tag[1]
+
+    if challenge_tag != conn.challenge:
+        await conn.send(["OK", event_id, False, "invalid: challenge mismatch"])
+        return
+
+    if not relay_tag:
+        await conn.send(["OK", event_id, False, "invalid: missing relay tag"])
+        return
+
+    # Verify relay URL matches (just check domain)
+    from urllib.parse import urlparse
+    expected_domain = urlparse(settings.BASE_URL).netloc
+    actual_domain = urlparse(relay_tag).netloc
+    if expected_domain and actual_domain and expected_domain != actual_domain:
+        await conn.send(["OK", event_id, False, "invalid: relay URL mismatch"])
+        return
+
+    # Authentication successful
+    pubkey = event.get("pubkey", "")
+    conn.authed_pubkeys.add(pubkey)
+    logger.info(f"NIP-42 AUTH success: {pubkey[:16]}...")
+    await conn.send(["OK", event_id, True, ""])

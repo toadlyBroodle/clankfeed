@@ -153,6 +153,7 @@ let paymentPollTimer = null;
 let currentBolt11 = '';
 let currentPayData = null;
 let activePayMethod = 'lightning';
+let metadataCache = {};  // pubkey -> {name, about, picture}
 
 // ---- WebSocket Relay Client ----
 function connect() {
@@ -160,17 +161,28 @@ function connect() {
 
   ws.onopen = () => {
     setStatus(true);
-    // Subscribe to kind:1 notes, latest 50
-    ws.send(JSON.stringify(["REQ", subId, {kinds: [1], limit: 50}]));
+    // Subscribe to kind:0 (metadata) and kind:1 (notes)
+    ws.send(JSON.stringify(["REQ", subId, {kinds: [0, 1], limit: 50}]));
   };
 
   ws.onmessage = (e) => {
     try {
       const msg = JSON.parse(e.data);
       if (msg[0] === 'EVENT' && msg[1] === subId && msg[2]) {
-        addNote(msg[2]);
+        const event = msg[2];
+        if (event.kind === 0) {
+          // Cache metadata
+          try {
+            metadataCache[event.pubkey] = JSON.parse(event.content);
+            renderNotes();  // re-render to show updated names
+          } catch (err) {}
+        } else {
+          addNote(event);
+        }
       } else if (msg[0] === 'EOSE') {
         // End of stored events; feed is populated
+      } else if (msg[0] === 'AUTH') {
+        // NIP-42: relay sent challenge, ignore (web client doesn't auth)
       } else if (msg[0] === 'NOTICE') {
         console.log('Relay notice:', msg[1]);
       }
@@ -224,6 +236,10 @@ function renderNotes() {
 }
 
 function getDisplayName(event) {
+  // First check kind:0 metadata cache
+  const meta = metadataCache[event.pubkey];
+  if (meta && meta.name) return meta.name;
+  // Fall back to display_name tag
   const tag = (event.tags || []).find(t => t[0] === 'display_name');
   return tag ? tag[1] : '';
 }
