@@ -16,10 +16,11 @@ from slowapi.errors import RateLimitExceeded
 from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy import delete
 
-from app.config import settings, MAX_CONNECTIONS
+from app.config import settings, tempo_enabled, MAX_CONNECTIONS
 from app.database import init_db, get_db, async_session
 from app.limiter import limiter
 from app.models import PendingEvent
+from app.api_v1 import router as api_v1_router
 from app.payment import router as payment_router
 from app.relay import Connection, connections, handle_message
 
@@ -145,7 +146,8 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "Accept"],
 )
 
-app.include_router(payment_router)
+app.include_router(api_v1_router)
+app.include_router(payment_router)  # legacy routes for web client
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -188,6 +190,24 @@ def _nip11_response():
         },
         "fees": {
             "publication": [{"amount": settings.POST_PRICE_SATS, "unit": "sats"}],
+        },
+        "payments": {
+            "methods": (
+                (["lightning"] if settings.PAYMENT_URL else [])
+                + (["tempo"] if tempo_enabled() else [])
+            ),
+            **({"lightning": {
+                "currency": "BTC",
+                "amount_sats": settings.POST_PRICE_SATS,
+            }} if settings.PAYMENT_URL else {}),
+            **({"tempo": {
+                "currency": "USD",
+                "amount_usd": settings.TEMPO_PRICE_USD,
+                "recipient": settings.TEMPO_RECIPIENT,
+                "token": settings.TEMPO_CURRENCY,
+                "chain": "tempo",
+                "testnet": settings.TEMPO_TESTNET,
+            }} if tempo_enabled() else {}),
         },
     }
     if _relay_pubkey:

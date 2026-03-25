@@ -83,7 +83,7 @@ def _matches_filter(event: dict, filt: dict) -> bool:
     return True
 
 
-async def _query_events(db: AsyncSession, filters: list[dict]) -> list[dict]:
+async def query_events(db: AsyncSession, filters: list[dict]) -> list[dict]:
     """Query stored events matching any of the given filters."""
     results = []
     seen_ids = set()
@@ -115,12 +115,12 @@ async def _query_events(db: AsyncSession, filters: list[dict]) -> list[dict]:
         for row in rows:
             if row.id not in seen_ids:
                 seen_ids.add(row.id)
-                results.append(_row_to_event(row))
+                results.append(row_to_event(row))
 
     return results
 
 
-def _row_to_event(row: NostrEvent) -> dict:
+def row_to_event(row: NostrEvent) -> dict:
     """Convert a DB row to a Nostr event dict."""
     return {
         "id": row.id,
@@ -271,7 +271,7 @@ async def _handle_req(conn: Connection, msg: list, db: AsyncSession):
     conn.subscriptions[sub_id] = filters
 
     # Query and send stored events
-    events = await _query_events(db, filters)
+    events = await query_events(db, filters)
     for event in events:
         await conn.send(["EVENT", sub_id, event])
 
