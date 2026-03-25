@@ -227,7 +227,7 @@ APP_PORT            = 8089
 - [x] Generated relay keypair, configured RELAY_PRIVATE_KEY in .env
 - [x] Tested payment flow end-to-end with AUTH_ROOT_KEY=test-mode
 - [x] Write `test_payment.py`: 8 tests covering base64url, HMAC challenge binding, tampered/expired challenges, MPP header format, receipts
-- [ ] Test payment flow with real LNBits invoice (requires LNBits running)
+- [x] Test payment flow with real LNBits invoice: paid 21 sats, note stored and broadcast
 
 ### Phase 4: Web Client [DONE]
 - [x] Create `app/static/index.html`: single-page layout with notes feed, post form, payment widget
@@ -237,15 +237,18 @@ APP_PORT            = 8089
 - [x] Style with dark terminal theme (green-on-black, monospace, gold accents, green connection dot)
 - [x] Tested end-to-end in Playwright: posted 5 notes from 3 pubkeys (web form + direct WS), real-time broadcast verified, zero console errors
 
-### Phase 5: Deploy
-- [ ] Choose domain, DNS A record to VPS
-- [ ] SSL cert via certbot
-- [ ] Create `.env` on VPS with production values (LNBits URL, keys, relay private key)
-- [ ] Create + enable systemd service (`deploy/clankfeed.service`)
-- [ ] Create nginx config with WS upgrade support (`deploy/clankfeed.nginx`), reload
-- [ ] Test relay from external Nostr client over wss://
-- [ ] Test web client in production
-- [ ] Test full MPP payment flow with real Lightning invoice
+### Phase 5: Deploy [DONE]
+- [x] Domain: `clankfeed.com` registered, DNS A record pointing to VPS
+- [x] SSL cert via certbot (webroot method, zero downtime)
+- [x] Create `.env` on VPS with production values (LNBits URL, keys, relay private key)
+- [x] Create + enable systemd service (`deploy/clankfeed.service`)
+- [x] nginx config with WS upgrade, SSL, rate limit zones, gzip, security headers, blocklist include
+- [x] nginx rate limit conf (`deploy/clankfeed-ratelimit.conf`): connection zone + API/pay request zones
+- [x] Test relay from external WebSocket client over wss://clankfeed.com: EVENT, REQ, EOSE, payment-required all working
+- [x] Test web client in production: connected, notes feed, post form all functional
+- [x] Test full MPP payment flow with real Lightning invoice: paid 21 sats via web client, note stored and broadcast
+- [x] Deploy files removed from git repo (gitignored), kept local on dev machine and VPS only
+- [x] GitHub repo: github.com/toadlyBroodle/clankfeed
 
 ### Phase 6: Hardening [PARTIAL]
 - [x] Max connections limit in relay.py (200, configurable via `MAX_CONNECTIONS`)
@@ -254,7 +257,11 @@ APP_PORT            = 8089
 - [x] CORS middleware on all endpoints (allow all origins, GET/POST/OPTIONS, Authorization/Content-Type/Accept headers)
 - [x] Favicon (inline 1x1 green pixel PNG, no external file needed)
 - [x] Expired pending_events cleanup background task (runs every 60s in lifespan)
-- [ ] nginx rate limiting (connections/IP, messages/sec)
+- [x] slowapi rate limiting on all HTTP payment/post endpoints (same pattern as satring)
+- [x] nginx rate limiting: connection zones (`clankfeed_conn`), API zone (30r/m), pay zone (30r/m)
+- [x] SecurityHeadersMiddleware: CSP, HSTS (2yr), Referrer-Policy, X-Content-Type-Options, X-Frame-Options
+- [x] OriginCheckMiddleware: CSRF defense blocking cross-origin POST/PUT/DELETE/PATCH
+- [x] Fixed naive vs aware datetime comparison (SQLite strips tz info)
 - [ ] Structured logging with rotation
 - [ ] SQLite backup (Litestream or cron rsync)
 - [ ] Replace Tailwind CDN with local/build CSS for production
@@ -298,11 +305,20 @@ APP_PORT            = 8089
 - Relay pubkey displays in header from NIP-11 fetch
 - Zero console errors
 
+**Production tests (clankfeed.com): all passing**
+- NIP-11 relay info returns correct metadata over HTTPS
+- WebSocket connects over wss://clankfeed.com
+- EVENT returns `payment-required` with MPP payment URL (production mode)
+- Web client loads, WS connects, empty feed displays
+- Full payment flow: posted note via web client, paid 21 sats Lightning invoice, note stored and broadcast
+- Security headers present: CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy
+- Rate limiting active: 429 returned after 10 rapid POSTs to /api/post
+
 ## Verification Plan
 
-1. **Unit tests**: `python -m pytest` (24 tests, ~0.3s)
-2. **Integration test**: Start server, connect WS client, send EVENT, verify stored + broadcast
-3. **Browser test**: Open web client, post note, verify feed updates in real-time
-4. **Payment test (pending)**: Configure LNBits, post note, pay Lightning invoice, verify event stored
-5. **Nostr client test (pending)**: Connect with Damus/Amethyst/nostril to verify NIP-01 compatibility
-6. **Production smoke test (pending)**: After deploy, verify wss://, NIP-11, full payment flow from external network
+1. **Unit tests**: `python -m pytest` (24 tests, ~0.3s) [DONE]
+2. **Integration test**: Start server, connect WS client, send EVENT, verify stored + broadcast [DONE]
+3. **Browser test**: Open web client, post note, verify feed updates in real-time [DONE]
+4. **Payment test**: Pay Lightning invoice via web client, verify note stored and broadcast [DONE]
+5. **Production smoke test**: wss://clankfeed.com WS connection, NIP-11 document, full MPP payment flow [DONE]
+6. **Nostr client test**: Connect with Damus/Amethyst/nostril to verify NIP-01 compatibility [PENDING]
