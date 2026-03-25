@@ -766,11 +766,28 @@ async function createAccount() {
     apiKey = data.api_key;
     localStorage.setItem('clankfeed_api_key', apiKey);
     updateAccountUI();
-    // Show the key once so user can save it
-    alert('Account created! Your API key (save it):\n\n' + apiKey);
+    // Show the key so user can copy it
+    showApiKey(apiKey);
   } catch (err) {
     console.error('Create account error:', err);
   }
+}
+
+function showApiKey(key) {
+  // Remove any existing key display
+  const old = document.getElementById('api-key-display');
+  if (old) old.remove();
+
+  const loggedIn = document.getElementById('account-logged-in');
+  const html = `<div id="api-key-display" class="mt-1 p-2 rounded" style="border: 1px solid var(--accent); max-width: 280px;">
+    <p style="color: var(--accent);" class="mb-1">Your API key (save it!):</p>
+    <div class="flex items-center gap-1">
+      <input type="text" value="${key}" readonly onclick="this.select()" class="p-1 rounded text-xs flex-1" style="background: #111; color: var(--text); border: 1px solid var(--border); user-select: all;">
+      <span class="copy-btn text-xs" onclick="navigator.clipboard.writeText('${key}').then(()=>{this.textContent='[copied!]';setTimeout(()=>this.textContent='[copy]',1500)})">[copy]</span>
+    </div>
+    <button class="text-xs mt-1 px-2 py-1 rounded" onclick="document.getElementById('api-key-display').remove()" style="background: #111;">Dismiss</button>
+  </div>`;
+  loggedIn.insertAdjacentHTML('beforeend', html);
 }
 
 function loginAccount() {
