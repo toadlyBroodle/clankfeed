@@ -20,7 +20,22 @@ class Settings:
     APP_PORT: int = int(os.getenv("APP_PORT", "8089"))
 
 
+    # Tempo stablecoin settings
+    TEMPO_RECIPIENT: str = os.getenv("TEMPO_RECIPIENT", "")
+    TEMPO_RPC_URL: str = os.getenv("TEMPO_RPC_URL", "https://rpc.moderato.tempo.xyz")
+    TEMPO_CURRENCY: str = os.getenv(
+        "TEMPO_CURRENCY", "0x20c0000000000000000000000000000000000000"
+    )  # pathUSD
+    TEMPO_PRICE_USD: str = os.getenv("TEMPO_PRICE_USD", "0.01")
+    TEMPO_TESTNET: bool = os.getenv("TEMPO_TESTNET", "true").lower() == "true"
+
+
 settings = Settings()
+
+
+def tempo_enabled() -> bool:
+    """Return True if Tempo payments are configured."""
+    return bool(settings.TEMPO_RECIPIENT)
 
 
 def payments_enabled() -> bool:

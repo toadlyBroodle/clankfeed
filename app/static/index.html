@@ -88,7 +88,15 @@
     <!-- Payment Widget -->
     <div id="payment-widget" class="hidden mt-4 p-4 rounded" style="border: 1px solid var(--accent);">
       <p class="text-sm mb-2" style="color: var(--accent);">Pay to post your note:</p>
-      <div class="flex gap-4 items-start">
+
+      <!-- Method tabs -->
+      <div id="pay-tabs" class="flex gap-2 mb-3 text-xs">
+        <button id="tab-lightning" class="px-3 py-1 rounded" onclick="switchPayTab('lightning')" style="background: var(--border);">Lightning</button>
+        <button id="tab-tempo" class="hidden px-3 py-1 rounded" onclick="switchPayTab('tempo')" style="background: #111;">Tempo (USD)</button>
+      </div>
+
+      <!-- Lightning payment -->
+      <div id="pay-lightning" class="flex gap-4 items-start">
         <canvas id="qr-canvas" width="160" height="160"></canvas>
         <div class="flex-1">
           <p class="text-xs mb-1" style="color: var(--dim);">Lightning Invoice:</p>
@@ -97,6 +105,27 @@
             <span class="copy-btn text-xs" onclick="copyBolt11()" title="Copy">[copy]</span>
           </div>
           <p class="text-xs mt-2" id="payment-status-text" style="color: var(--dim);">Waiting for payment...</p>
+        </div>
+      </div>
+
+      <!-- Tempo payment -->
+      <div id="pay-tempo" class="hidden">
+        <div class="text-xs space-y-2">
+          <p style="color: var(--dim);">Send <span id="tempo-amount" style="color: var(--accent);"></span> to:</p>
+          <div class="flex items-center gap-1">
+            <code id="tempo-recipient" class="text-xs break-all" style="color: var(--text);"></code>
+            <span class="copy-btn text-xs" onclick="copyTempoAddr()" title="Copy">[copy]</span>
+          </div>
+          <p style="color: var(--dim);">Token: <span id="tempo-token" style="color: var(--text);"></span></p>
+          <p style="color: var(--dim);">Chain: Tempo <span id="tempo-network"></span></p>
+          <div class="mt-2">
+            <label class="block mb-1" style="color: var(--dim);">Paste tx hash after sending:</label>
+            <div class="flex gap-2">
+              <input id="tempo-tx-input" type="text" class="p-2 rounded text-xs flex-1" placeholder="0x...">
+              <button id="tempo-confirm-btn" class="px-3 py-1 rounded text-xs" onclick="confirmTempo()">Confirm</button>
+            </div>
+          </div>
+          <p class="text-xs" id="tempo-status-text" style="color: var(--dim);"></p>
         </div>
       </div>
     </div>
@@ -122,6 +151,8 @@ let subId = 'feed-' + Math.random().toString(36).slice(2, 10);
 let notes = [];
 let paymentPollTimer = null;
 let currentBolt11 = '';
+let currentPayData = null;
+let activePayMethod = 'lightning';
 
 // ---- WebSocket Relay Client ----
 function connect() {
@@ -241,7 +272,7 @@ document.getElementById('post-form').addEventListener('submit', async (e) => {
       return;
     }
 
-    if (data.bolt11) {
+    if (data.bolt11 || data.tempo) {
       showPaymentWidget(data);
     }
   } catch (err) {
@@ -254,53 +285,114 @@ document.getElementById('post-form').addEventListener('submit', async (e) => {
 function showPaymentWidget(data) {
   const widget = document.getElementById('payment-widget');
   widget.classList.remove('hidden');
-  currentBolt11 = data.bolt11;
+  currentPayData = data;
+  currentBolt11 = data.bolt11 || '';
 
-  // QR code
-  new QRious({
-    element: document.getElementById('qr-canvas'),
-    value: data.bolt11.toUpperCase(),
-    size: 160,
-    foreground: '#4ade80',
-    background: '#000',
-    level: 'L',
-  });
+  // Show/hide method tabs based on available methods
+  const methods = data.methods || [];
+  const lightningTab = document.getElementById('tab-lightning');
+  const tempoTab = document.getElementById('tab-tempo');
 
-  // Display truncated bolt11
-  const display = document.getElementById('bolt11-display');
-  display.textContent = data.bolt11.slice(0, 40) + '...';
+  lightningTab.classList.toggle('hidden', !methods.includes('lightning'));
+  tempoTab.classList.toggle('hidden', !methods.includes('tempo'));
 
-  // Poll for payment
+  if (data.tempo) {
+    document.getElementById('tempo-amount').textContent = data.tempo.amount_usd + ' USD';
+    document.getElementById('tempo-recipient').textContent = data.tempo.recipient;
+    document.getElementById('tempo-token').textContent = data.tempo.currency.slice(0, 10) + '...' + data.tempo.currency.slice(-4);
+    document.getElementById('tempo-network').textContent = data.tempo.testnet ? '(testnet)' : '(mainnet)';
+    document.getElementById('tempo-tx-input').value = '';
+    document.getElementById('tempo-status-text').textContent = '';
+  }
+
+  // Default to first available method
+  switchPayTab(methods[0] || 'lightning');
+
+  if (currentBolt11) {
+    // QR code
+    new QRious({
+      element: document.getElementById('qr-canvas'),
+      value: currentBolt11.toUpperCase(),
+      size: 160,
+      foreground: '#4ade80',
+      background: '#000',
+      level: 'L',
+    });
+
+    document.getElementById('bolt11-display').textContent = currentBolt11.slice(0, 40) + '...';
+  }
+
+  // Poll for Lightning payment (only if Lightning method is available)
   const statusText = document.getElementById('payment-status-text');
-  statusText.textContent = `Waiting for payment... (${data.amount_sats} sats)`;
-
   if (paymentPollTimer) clearInterval(paymentPollTimer);
-  paymentPollTimer = setInterval(async () => {
-    try {
-      const resp = await fetch(`/pay/status?payment_hash=${data.payment_hash}`);
-      const status = await resp.json();
-      if (status.paid) {
-        clearInterval(paymentPollTimer);
-        statusText.textContent = 'Payment received! Confirming...';
-        statusText.style.color = 'var(--accent)';
-        await confirmPayment(data.token, data.payment_hash);
+
+  if (methods.includes('lightning') && data.payment_hash) {
+    statusText.textContent = `Waiting for payment... (${data.amount_sats} sats)`;
+    statusText.style.color = 'var(--dim)';
+    paymentPollTimer = setInterval(async () => {
+      try {
+        const resp = await fetch(`/pay/status?payment_hash=${data.payment_hash}`);
+        const status = await resp.json();
+        if (status.paid) {
+          clearInterval(paymentPollTimer);
+          statusText.textContent = 'Payment received! Confirming...';
+          statusText.style.color = 'var(--accent)';
+          await confirmPayment(data.token, data.payment_hash, 'lightning');
+        }
+      } catch (err) {
+        console.error('Poll error:', err);
       }
-    } catch (err) {
-      console.error('Poll error:', err);
-    }
-  }, 3000);
+    }, 3000);
+  } else {
+    statusText.textContent = '';
+  }
 }
 
-async function confirmPayment(token, paymentHash) {
+function switchPayTab(method) {
+  activePayMethod = method;
+  document.getElementById('pay-lightning').classList.toggle('hidden', method !== 'lightning');
+  document.getElementById('pay-tempo').classList.toggle('hidden', method !== 'tempo');
+  document.getElementById('tab-lightning').style.background = method === 'lightning' ? 'var(--border)' : '#111';
+  document.getElementById('tab-tempo').style.background = method === 'tempo' ? 'var(--border)' : '#111';
+}
+
+async function confirmTempo() {
+  const txHash = document.getElementById('tempo-tx-input').value.trim();
+  if (!txHash || !txHash.startsWith('0x')) {
+    document.getElementById('tempo-status-text').textContent = 'Enter a valid tx hash (0x...)';
+    document.getElementById('tempo-status-text').style.color = 'var(--error)';
+    return;
+  }
+
+  const statusText = document.getElementById('tempo-status-text');
+  statusText.textContent = 'Verifying on-chain...';
+  statusText.style.color = 'var(--dim)';
+
+  await confirmPayment(currentPayData.token, txHash, 'tempo');
+}
+
+async function confirmPayment(token, paymentId, method) {
   try {
+    const body = { token, method };
+    if (method === 'tempo') {
+      body.tx_hash = paymentId;
+    } else {
+      body.payment_hash = paymentId;
+    }
+
     const resp = await fetch('/api/post/confirm', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ token, payment_hash: paymentHash }),
+      body: JSON.stringify(body),
     });
     const data = await resp.json();
+
     if (data.paid) {
-      document.getElementById('payment-status-text').textContent = 'Note posted!';
+      if (paymentPollTimer) clearInterval(paymentPollTimer);
+      const msg = 'Note posted!';
+      document.getElementById('payment-status-text').textContent = msg;
+      document.getElementById('tempo-status-text').textContent = msg;
+      document.getElementById('tempo-status-text').style.color = 'var(--accent)';
       document.getElementById('post-content').value = '';
       setTimeout(() => {
         document.getElementById('payment-widget').classList.add('hidden');
@@ -308,15 +400,30 @@ async function confirmPayment(token, paymentHash) {
         document.getElementById('post-btn').textContent = 'Post Note';
         document.getElementById('payment-status-text').style.color = 'var(--dim)';
       }, 2000);
+    } else {
+      const errMsg = data.detail || 'Payment not confirmed yet';
+      document.getElementById('tempo-status-text').textContent = errMsg;
+      document.getElementById('tempo-status-text').style.color = 'var(--error)';
     }
   } catch (err) {
     console.error('Confirm error:', err);
+    document.getElementById('tempo-status-text').textContent = 'Error confirming payment';
+    document.getElementById('tempo-status-text').style.color = 'var(--error)';
   }
 }
 
 function copyBolt11() {
   navigator.clipboard.writeText(currentBolt11).then(() => {
-    const btn = document.querySelector('.copy-btn');
+    const btn = event.target;
+    btn.textContent = '[copied!]';
+    setTimeout(() => btn.textContent = '[copy]', 1500);
+  });
+}
+
+function copyTempoAddr() {
+  if (!currentPayData || !currentPayData.tempo) return;
+  navigator.clipboard.writeText(currentPayData.tempo.recipient).then(() => {
+    const btn = event.target;
     btn.textContent = '[copied!]';
     setTimeout(() => btn.textContent = '[copy]', 1500);
   });

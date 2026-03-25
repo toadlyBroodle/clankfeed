@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import (
     settings,
     payments_enabled,
+    tempo_enabled,
     MAX_SUBSCRIPTIONS_PER_CONN,
     MAX_FILTERS_PER_REQ,
     MAX_MESSAGE_BYTES,
@@ -227,14 +228,14 @@ async def _handle_event(conn: Connection, msg: list, db: AsyncSession):
         await conn.send(["OK", event_id, False, f"invalid: too many tags (max {MAX_EVENT_TAGS})"])
         return
 
-    if not payments_enabled():
-        # Test mode: store directly
+    if not payments_enabled() and not tempo_enabled():
+        # No payment methods configured: store directly
         await store_event(db, event)
         await conn.send(["OK", event_id, True, ""])
         await broadcast_event(event)
         return
 
-    # Payment required: store as pending, return payment URL
+    # Payment required (Lightning and/or Tempo): store as pending, return payment URL
     token = await store_pending_event(db, event)
     base = settings.BASE_URL.replace("ws://", "http://").replace("wss://", "https://")
     pay_url = f"{base}/pay?token={token}"
