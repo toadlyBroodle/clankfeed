@@ -73,6 +73,30 @@
       color: var(--dim);
       flex-shrink: 0;
     }
+    .vote-btn {
+      cursor: pointer;
+      font-size: 14px;
+      line-height: 1;
+      padding: 2px 4px;
+      border-radius: 3px;
+      background: none;
+      border: 1px solid transparent;
+      color: var(--dim);
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .vote-btn:hover { color: var(--accent); border-color: var(--border); }
+    .vote-value {
+      font-size: 11px;
+      font-weight: bold;
+      min-width: 30px;
+      text-align: center;
+    }
+    .vote-prompt {
+      display: none;
+      margin-top: 6px;
+      margin-left: 32px;
+    }
+    .vote-prompt.active { display: flex; }
   </style>
 </head>
 <body class="min-h-screen p-4 max-w-2xl mx-auto">
@@ -258,16 +282,28 @@ function renderNotes() {
     const avatarHtml = pic
       ? `<img class="avatar" src="${esc(pic)}" onerror="this.outerHTML='<div class=\\'avatar-placeholder\\'>${esc(displayName || pk).charAt(0).toUpperCase()}</div>'">`
       : `<div class="avatar-placeholder">${esc(displayName || pk).charAt(0).toUpperCase()}</div>`;
-    return `<div class="note-card p-3 rounded">
-      <div class="flex items-center gap-2 mb-1">
-        ${avatarHtml}
-        <span class="text-xs font-bold flex-1" style="color: var(--accent);">${esc(displayName || pk)}</span>
-        ${valueBadge}
-        <span class="text-xs" style="color: var(--dim);">${timeAgo}</span>
+    return `<div class="note-card p-3 rounded" id="note-${n.id}">
+      <div class="flex gap-2">
+        <div class="flex flex-col items-center gap-0" style="min-width: 32px;">
+          <button class="vote-btn" onclick="startVote('${n.id}', 1)" title="Upvote">&#9650;</button>
+          <span class="vote-value" id="value-${n.id}" style="color: var(--accent);">${valueSats}</span>
+          <button class="vote-btn" onclick="startVote('${n.id}', -1)" title="Downvote">&#9660;</button>
+        </div>
+        <div class="flex-1">
+          <div class="flex items-center gap-2 mb-1">
+            ${avatarHtml}
+            <span class="text-xs font-bold flex-1" style="color: var(--accent);">${esc(displayName || pk)}</span>
+            <span class="text-xs" style="color: var(--dim);">${timeAgo}</span>
+          </div>
+          <p class="text-sm whitespace-pre-wrap">${esc(n.content)}</p>
+          <div class="text-xs mt-1" style="color: var(--dim);">${pk}</div>
+        </div>
       </div>
-      <p class="text-sm whitespace-pre-wrap ml-8">${esc(n.content)}</p>
-      <div class="text-xs mt-1 ml-8 flex items-center gap-3" style="color: var(--dim);">
-        <span>${pk}</span>
+      <div class="vote-prompt" id="vote-prompt-${n.id}">
+        <input type="number" id="vote-amount-${n.id}" class="p-1 rounded text-xs" style="width: 80px;" min="21" value="21" placeholder="sats">
+        <button class="px-2 py-1 rounded text-xs ml-1" id="vote-submit-${n.id}" onclick="submitVote('${n.id}')">Pay & Vote</button>
+        <button class="px-2 py-1 rounded text-xs ml-1" onclick="cancelVote('${n.id}')" style="background: #111;">Cancel</button>
+        <span class="text-xs ml-2" id="vote-status-${n.id}" style="color: var(--dim);"></span>
       </div>
     </div>`;
   }).join('');
@@ -486,6 +522,182 @@ function copyTempoAddr() {
     btn.textContent = '[copied!]';
     setTimeout(() => btn.textContent = '[copy]', 1500);
   });
+}
+
+// ---- Voting ----
+let pendingVoteDir = {};  // event_id -> direction
+
+function startVote(eventId, direction) {
+  pendingVoteDir[eventId] = direction;
+  const prompt = document.getElementById(`vote-prompt-${eventId}`);
+  prompt.classList.add('active');
+  const status = document.getElementById(`vote-status-${eventId}`);
+  status.textContent = direction === 1 ? 'Upvoting...' : 'Downvoting...';
+  status.style.color = 'var(--dim)';
+}
+
+function cancelVote(eventId) {
+  document.getElementById(`vote-prompt-${eventId}`).classList.remove('active');
+  delete pendingVoteDir[eventId];
+}
+
+async function submitVote(eventId) {
+  const direction = pendingVoteDir[eventId] || 1;
+  const amountInput = document.getElementById(`vote-amount-${eventId}`);
+  const amount = parseInt(amountInput.value) || 21;
+  const status = document.getElementById(`vote-status-${eventId}`);
+
+  status.textContent = 'Submitting...';
+  status.style.color = 'var(--dim)';
+
+  try {
+    const resp = await fetch(`/api/v1/events/${eventId}/vote`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ direction, amount_sats: amount }),
+    });
+    const data = await resp.json();
+
+    if (data.voted) {
+      voteSuccess(eventId, direction, amount, data.new_value_sats);
+    } else if (data.status === 'payment_required') {
+      // Show payment widget for the vote
+      status.textContent = '';
+      showVotePayment(eventId, direction, data);
+    } else {
+      status.textContent = data.detail || 'Vote failed';
+      status.style.color = 'var(--error)';
+    }
+  } catch (err) {
+    status.textContent = 'Error';
+    status.style.color = 'var(--error)';
+  }
+}
+
+function voteSuccess(eventId, direction, amount, newValue) {
+  const valueEl = document.getElementById(`value-${eventId}`);
+  if (valueEl) valueEl.textContent = newValue;
+  const note = notes.find(n => n.id === eventId);
+  if (note) note.value_sats = newValue;
+  const status = document.getElementById(`vote-status-${eventId}`);
+  status.textContent = (direction === 1 ? '+' : '-') + amount + ' sats';
+  status.style.color = 'var(--accent)';
+  // Hide vote payment widget if visible
+  const vpay = document.getElementById(`vote-pay-${eventId}`);
+  if (vpay) vpay.remove();
+  setTimeout(() => cancelVote(eventId), 2000);
+}
+
+function showVotePayment(eventId, direction, data) {
+  // Remove any existing vote payment widget for this note
+  const existing = document.getElementById(`vote-pay-${eventId}`);
+  if (existing) existing.remove();
+
+  const prompt = document.getElementById(`vote-prompt-${eventId}`);
+  const methods = data.methods || [];
+  const hasLightning = methods.includes('lightning') && data.lightning;
+  const hasTempo = methods.includes('tempo') && data.tempo;
+
+  let html = `<div id="vote-pay-${eventId}" class="mt-2 p-2 rounded text-xs" style="border: 1px solid var(--accent);">`;
+  html += `<p style="color: var(--accent);" class="mb-1">Pay to ${direction === 1 ? 'upvote' : 'downvote'}:</p>`;
+
+  // Tabs
+  html += `<div class="flex gap-1 mb-2">`;
+  if (hasLightning) html += `<button class="px-2 py-1 rounded" id="vtab-ln-${eventId}" onclick="switchVotePayTab('${eventId}','lightning')" style="background: var(--border);">Lightning</button>`;
+  if (hasTempo) html += `<button class="px-2 py-1 rounded" id="vtab-tempo-${eventId}" onclick="switchVotePayTab('${eventId}','tempo')" style="background: ${hasLightning ? '#111' : 'var(--border)'};">Tempo</button>`;
+  html += `</div>`;
+
+  // Lightning section
+  if (hasLightning) {
+    html += `<div id="vpay-ln-${eventId}">`;
+    html += `<div class="flex items-center gap-1 mb-1"><code class="break-all">${data.lightning.bolt11.slice(0,40)}...</code>`;
+    html += `<span class="copy-btn" onclick="navigator.clipboard.writeText('${data.lightning.bolt11}')">[copy]</span></div>`;
+    html += `<p style="color: var(--dim);">${data.lightning.amount_sats} sats. Polling for payment...</p>`;
+    html += `</div>`;
+  }
+
+  // Tempo section
+  if (hasTempo) {
+    html += `<div id="vpay-tempo-${eventId}" class="${hasLightning ? 'hidden' : ''}">`;
+    html += `<p style="color: var(--dim);">Send ${data.tempo.amount_usd} USD to:</p>`;
+    html += `<div class="flex items-center gap-1"><code class="break-all">${data.tempo.recipient}</code>`;
+    html += `<span class="copy-btn" onclick="navigator.clipboard.writeText('${data.tempo.recipient}')">[copy]</span></div>`;
+    html += `<p style="color: var(--dim);" class="mt-1">Chain: Tempo ${data.tempo.testnet ? '(testnet)' : ''}</p>`;
+    html += `<div class="flex gap-1 mt-1"><input type="text" id="vtx-${eventId}" class="p-1 rounded flex-1" placeholder="0x tx hash...">`;
+    html += `<button class="px-2 py-1 rounded" onclick="confirmVoteTempo('${eventId}','${data.token}')">Confirm</button></div>`;
+    html += `<p id="vstatus-${eventId}" style="color: var(--dim);"></p>`;
+    html += `</div>`;
+  }
+
+  html += `</div>`;
+  prompt.insertAdjacentHTML('afterend', html);
+
+  // If Lightning, start polling
+  if (hasLightning) {
+    pollVoteLightning(eventId, direction, data.token, data.lightning.payment_hash, data.lightning.amount_sats);
+  } else if (!hasLightning && hasTempo) {
+    switchVotePayTab(eventId, 'tempo');
+  }
+}
+
+function switchVotePayTab(eventId, method) {
+  const ln = document.getElementById(`vpay-ln-${eventId}`);
+  const tempo = document.getElementById(`vpay-tempo-${eventId}`);
+  const tlnBtn = document.getElementById(`vtab-ln-${eventId}`);
+  const ttempoBtn = document.getElementById(`vtab-tempo-${eventId}`);
+  if (ln) ln.classList.toggle('hidden', method !== 'lightning');
+  if (tempo) tempo.classList.toggle('hidden', method !== 'tempo');
+  if (tlnBtn) tlnBtn.style.background = method === 'lightning' ? 'var(--border)' : '#111';
+  if (ttempoBtn) ttempoBtn.style.background = method === 'tempo' ? 'var(--border)' : '#111';
+}
+
+function pollVoteLightning(eventId, direction, token, paymentHash, amountSats) {
+  const iv = setInterval(async () => {
+    try {
+      const resp = await fetch(`/api/v1/payments/status?payment_hash=${paymentHash}`);
+      const s = await resp.json();
+      if (s.paid) {
+        clearInterval(iv);
+        const resp2 = await fetch(`/api/v1/events/${eventId}/vote/confirm`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ token, method: 'lightning', payment_hash: paymentHash }),
+        });
+        const d = await resp2.json();
+        if (d.voted) voteSuccess(eventId, direction, amountSats, d.new_value_sats);
+      }
+    } catch (e) {}
+  }, 3000);
+}
+
+async function confirmVoteTempo(eventId, token) {
+  const txHash = document.getElementById(`vtx-${eventId}`).value.trim();
+  const status = document.getElementById(`vstatus-${eventId}`);
+  if (!txHash || !txHash.startsWith('0x')) {
+    status.textContent = 'Enter valid tx hash';
+    status.style.color = 'var(--error)';
+    return;
+  }
+  status.textContent = 'Verifying...';
+  status.style.color = 'var(--dim)';
+  try {
+    const resp = await fetch(`/api/v1/events/${eventId}/vote/confirm`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ token, method: 'tempo', tx_hash: txHash }),
+    });
+    const d = await resp.json();
+    if (d.voted) {
+      const dir = pendingVoteDir[eventId] || 1;
+      voteSuccess(eventId, dir, d.amount_sats, d.new_value_sats);
+    } else {
+      status.textContent = d.detail || 'Not confirmed';
+      status.style.color = 'var(--error)';
+    }
+  } catch (e) {
+    status.textContent = 'Error';
+    status.style.color = 'var(--error)';
+  }
 }
 
 // ---- Sort ----

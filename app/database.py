@@ -29,8 +29,12 @@ async def init_db():
         await conn.execute(sqlalchemy.text("PRAGMA journal_mode=WAL"))
     # Migrate: add new columns to existing tables if missing
     async with engine.begin() as conn:
-        result = await conn.execute(sqlalchemy.text("PRAGMA table_info(nostr_events)"))
-        existing = {row[1] for row in result.fetchall()}
-        for col, col_type in [("value_sats", "INTEGER DEFAULT 0"), ("value_usd", "TEXT DEFAULT '0'")]:
-            if col not in existing:
-                await conn.execute(sqlalchemy.text(f"ALTER TABLE nostr_events ADD COLUMN {col} {col_type}"))
+        for table, columns in [
+            ("nostr_events", [("value_sats", "INTEGER DEFAULT 0"), ("value_usd", "TEXT DEFAULT '0'")]),
+            ("pending_events", [("amount_sats", "INTEGER DEFAULT 0"), ("amount_usd", "TEXT DEFAULT '0'")]),
+        ]:
+            result = await conn.execute(sqlalchemy.text(f"PRAGMA table_info({table})"))
+            existing = {row[1] for row in result.fetchall()}
+            for col, col_type in columns:
+                if col not in existing:
+                    await conn.execute(sqlalchemy.text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"))
