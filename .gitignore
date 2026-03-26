@@ -15,3 +15,5 @@ deploy/
 screenshot*.png
 docs/
 CLAUDE.md
+.claude/
+.playwright-mcp/

@@ -805,6 +805,16 @@ Custom OpenAPI generator in `app/main.py:_custom_openapi()` adds machine-readabl
 - OpenAPI schema with MPP payment discovery extensions (x-payment-info, x-discovery, x-guidance)
 - Production (clankfeed.com): Bitcoin Connect button visible, WebSocket connected, notes loaded
 
+**Payment UI fix Playwright tests (2026-03-26): all passing**
+- BC no longer auto-launches as modal overlay; payment widget always shows with method tabs
+- Lightning tab: "Pay with Bitcoin Connect" button + QR/invoice below; Tempo tab: on-chain form
+- Tab switching works: Lightning/Tempo toggle, active styling preserved
+- Tempo-only mode (test mode, no LNBits): Lightning tab correctly hidden, only Tempo shown
+- Vote payment: inline widget with method tabs, BC button in Lightning section
+- switchPayTab() preserves hidden state for unavailable methods (fixed className overwrite bug)
+- Fixed duplicate class attribute on tab-lightning HTML button
+- Production (clankfeed.com): both Lightning + Tempo tabs visible, BC button renders, tab switching works, 0 new console errors
+
 **Production tests (clankfeed.com): all passing**
 - NIP-11 relay info with `payments` field: lists both methods, pricing, Tempo recipient
 - WebSocket connects over wss://clankfeed.com
@@ -865,8 +875,8 @@ For agents, the existing MPP 402 flow already works without accounts. This phase
 
 - [x] Add Bitcoin Connect CDN script (v3.12.2 via esm.sh) to index.html
 - [x] Initialize Bitcoin Connect with `init({ appName: 'clankfeed' })`
-- [x] Modify post flow: when 402 returned, launch Bitcoin Connect payment modal with BOLT11, server-side polling as fallback for external payments
-- [x] Modify vote flow: same pattern (Bitcoin Connect modal instead of inline QR + polling)
+- [x] Modify post flow: when 402 returned, show payment widget with Lightning/Tempo tabs; Lightning tab has "Pay with Bitcoin Connect" button + QR/invoice fallback; server-side polling for external payments
+- [x] Modify vote flow: same pattern (inline payment widget with method tabs, BC button in Lightning tab)
 - [x] Keep existing account system and QR fallback working alongside Bitcoin Connect
 - [x] Add `<bc-button>` "Connect Wallet" button in header
 - [x] Update CSP to allow esm.sh scripts and connections

@@ -265,7 +265,46 @@ function renderNotes() {
   const empty = document.getElementById('empty-feed');
   if (notes.length > 0 && empty) empty.classList.add('hidden');
 
-  feed.innerHTML = notes.map(n => renderNoteCard(n)).join('');
+  const topLevel = notes.filter(n => !(n.tags || []).some(t => t[0] === 'e'));
+  feed.innerHTML = topLevel.map(n => renderNoteCard(n)).join('');
+  // Apply cached reply counts immediately
+  for (const [eid, count] of Object.entries(replyCountCache)) {
+    const btn = document.getElementById(`expand-replies-${eid}`);
+    if (btn) {
+      btn.classList.add('has-replies');
+      btn.innerHTML = `&#9662; ${count} replies`;
+    }
+  }
+  scheduleReplyCountFetch();
+}
+
+let replyCountCache = {};
+let replyCountTimer = null;
+
+function scheduleReplyCountFetch() {
+  if (replyCountTimer) clearTimeout(replyCountTimer);
+  replyCountTimer = setTimeout(fetchReplyCounts, 500);
+}
+
+async function fetchReplyCounts() {
+  const ids = notes.map(n => n.id);
+  if (!ids.length) return;
+  try {
+    const resp = await fetch('/api/v1/events/reply-counts', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({event_ids: ids})
+    });
+    const data = await resp.json();
+    replyCountCache = data.counts || {};
+    for (const [eid, count] of Object.entries(replyCountCache)) {
+      const btn = document.getElementById(`expand-replies-${eid}`);
+      if (btn) {
+        btn.classList.add('has-replies');
+        btn.innerHTML = `&#9662; ${count} replies`;
+      }
+    }
+  } catch (e) {}
 }
 
 function renderNoteCard(n, isReply) {
@@ -899,11 +938,13 @@ async function toggleReplies(eventId) {
     container.classList.add('hidden');
     container.innerHTML = '';
     delete expandedReplies[eventId];
-    if (btn) btn.innerHTML = '&#9662; replies';
+    const count = replyCountCache[eventId];
+    if (btn) btn.innerHTML = count ? `&#9662; ${count} replies` : '&#9662; replies';
     return;
   }
 
-  if (btn) btn.innerHTML = '&#9652; replies';
+  const count = replyCountCache[eventId];
+  if (btn) btn.innerHTML = count ? `&#9652; ${count} replies` : '&#9652; replies';
   container.classList.remove('hidden');
   container.innerHTML = '<p class="text-xs c-dim p-2">Loading...</p>';
   expandedReplies[eventId] = true;

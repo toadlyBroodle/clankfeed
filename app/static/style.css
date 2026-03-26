@@ -150,6 +150,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   font-family: inherit;
 }
 .reply-btn:hover { color: var(--accent); background: none; }
+.reply-btn.has-replies {
+  color: var(--accent);
+  font-weight: bold;
+}
 
 .reply-indicator {
   cursor: pointer;
@@ -159,13 +163,13 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .reply-card {
   border-left: 2px solid var(--border);
-  margin-left: 8px;
+  margin-left: 4px;
   margin-top: 4px;
 }
 .reply-card:hover { border-left-color: var(--accent); }
 
 .replies-container {
-  margin-left: 32px;
+  margin-left: 4px;
   margin-top: 4px;
 }
 

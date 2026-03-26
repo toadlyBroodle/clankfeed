@@ -552,6 +552,32 @@ async def payment_status(request: Request, payment_hash: str):
 
 
 # ---------------------------------------------------------------------------
+# POST /api/v1/events/reply-counts  (batch reply counts)
+# ---------------------------------------------------------------------------
+
+@router.post("/events/reply-counts")
+@limiter.limit(RATE_EVENTS_READ)
+async def reply_counts(request: Request, db: AsyncSession = Depends(get_db)):
+    """Return reply counts for a batch of event IDs."""
+    body = await request.json()
+    event_ids = body.get("event_ids", [])
+    if not isinstance(event_ids, list) or len(event_ids) > 200:
+        return JSONResponse(status_code=400, content={"detail": "event_ids must be a list (max 200)"})
+
+    from sqlalchemy import select, func, and_
+    counts = {}
+    for eid in event_ids:
+        stmt = select(func.count()).select_from(NostrEvent).where(
+            and_(NostrEvent.kind == 1, NostrEvent.tags.contains(f'"e", "{eid}"'))
+        )
+        result = await db.execute(stmt)
+        c = result.scalar()
+        if c:
+            counts[eid] = c
+    return {"counts": counts}
+
+
+# ---------------------------------------------------------------------------
 # GET /api/v1/events/{event_id}/replies  (get replies to a note)
 # ---------------------------------------------------------------------------
 
