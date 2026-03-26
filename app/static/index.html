@@ -248,54 +248,53 @@ function renderNotes() {
   const empty = document.getElementById('empty-feed');
   if (notes.length > 0 && empty) empty.classList.add('hidden');
 
-  feed.innerHTML = notes.map(n => {
-    const displayName = getDisplayName(n);
-    const pk = n.pubkey.slice(0, 8) + '...' + n.pubkey.slice(-4);
-    const timeAgo = relativeTime(n.created_at);
-    const pic = getAvatar(n);
-    const valueSats = n.value_sats || 0;
-    const valueBadge = valueSats > 0
-      ? `<span class="text-xs px-1 rounded value-badge">${valueSats} sats</span>`
-      : '';
-    const avatarHtml = pic
-      ? `<img class="avatar" src="${esc(pic)}" onerror="this.outerHTML='<div class=\\'avatar-placeholder\\'>${esc(displayName || pk).charAt(0).toUpperCase()}</div>'">`
-      : `<div class="avatar-placeholder">${esc(displayName || pk).charAt(0).toUpperCase()}</div>`;
-    const parentTag = (n.tags || []).find(t => t[0] === 'e' && t[3] === 'reply');
-    const parentId = parentTag ? parentTag[1] : '';
-    const replyIndicator = parentId
-      ? `<div class="reply-indicator text-xs c-dim mb-1" onclick="scrollToNote('${parentId}')">&#8627; reply to ${parentId.slice(0,8)}...</div>`
-      : '';
-    return `<div class="note-card p-3 rounded" id="note-${n.id}" data-parent="${parentId}">
-      <div class="flex gap-2">
-        <div class="flex flex-col items-center gap-0 vote-col">
-          <button class="vote-btn" onclick="startVote('${n.id}', 1)" title="Upvote">&#9650;</button>
-          <span class="vote-value" id="value-${n.id}" class="c-accent">${valueSats}</span>
-          <button class="vote-btn" onclick="startVote('${n.id}', -1)" title="Downvote">&#9660;</button>
+  feed.innerHTML = notes.map(n => renderNoteCard(n)).join('');
+}
+
+function renderNoteCard(n, isReply) {
+  const displayName = getDisplayName(n);
+  const pk = n.pubkey.slice(0, 8) + '...' + n.pubkey.slice(-4);
+  const timeAgo = relativeTime(n.created_at);
+  const pic = getAvatar(n);
+  const valueSats = n.value_sats || 0;
+  const avatarHtml = pic
+    ? `<img class="avatar" src="${esc(pic)}" onerror="this.outerHTML='<div class=\\'avatar-placeholder\\'>${esc(displayName || pk).charAt(0).toUpperCase()}</div>'">`
+    : `<div class="avatar-placeholder">${esc(displayName || pk).charAt(0).toUpperCase()}</div>`;
+  const parentTag = (n.tags || []).find(t => t[0] === 'e' && t[3] === 'reply');
+  const parentId = parentTag ? parentTag[1] : '';
+  const replyIndicator = parentId && !isReply
+    ? `<div class="reply-indicator text-xs c-dim mb-1" onclick="scrollToNote('${parentId}')">&#8627; reply to ${parentId.slice(0,8)}...</div>`
+    : '';
+  const cardClass = isReply ? 'reply-card' : 'note-card';
+  return `<div class="${cardClass} p-3 rounded" id="note-${n.id}" data-parent="${parentId}">
+    <div class="flex gap-2">
+      <div class="flex flex-col items-center gap-0 vote-col">
+        <button class="vote-btn" onclick="startVote('${n.id}', 1)" title="Upvote">&#9650;</button>
+        <span class="vote-value" id="value-${n.id}" class="c-accent">${valueSats}</span>
+        <button class="vote-btn" onclick="startVote('${n.id}', -1)" title="Downvote">&#9660;</button>
+      </div>
+      <div class="flex-1">
+        ${replyIndicator}
+        <div class="flex items-center gap-2 mb-1">
+          ${avatarHtml}
+          <span class="text-xs font-bold flex-1 c-accent">${esc(displayName || pk)}</span>
+          <span class="text-xs c-dim">${timeAgo}</span>
         </div>
-        <div class="flex-1">
-          ${replyIndicator}
-          <div class="flex items-center gap-2 mb-1">
-            ${avatarHtml}
-            <span class="text-xs font-bold flex-1 c-accent">${esc(displayName || pk)}</span>
-            <span class="text-xs c-dim">${timeAgo}</span>
-          </div>
-          <p class="text-sm whitespace-pre-wrap">${esc(n.content)}</p>
-          <div class="flex items-center gap-3 mt-1">
-            <span class="text-xs c-dim">${pk}</span>
-            <button class="reply-btn text-xs" onclick="startReply('${n.id}', '${esc(displayName || pk)}')" title="Reply">&#8627; reply</button>
-            <button class="reply-btn text-xs" id="expand-replies-${n.id}" onclick="toggleReplies('${n.id}')" title="Show replies">&#9662; replies</button>
-          </div>
+        <p class="text-sm whitespace-pre-wrap">${esc(n.content)}</p>
+        <div class="flex items-center gap-3 mt-1">
+          <button class="reply-btn text-xs" onclick="startReply('${n.id}', '${esc(displayName || pk)}')" title="Reply">&#8627; reply</button>
+          <button class="reply-btn text-xs" id="expand-replies-${n.id}" onclick="toggleReplies('${n.id}')" title="Show replies">&#9662; replies</button>
         </div>
       </div>
-      <div class="vote-prompt" id="vote-prompt-${n.id}">
-        <input type="number" id="vote-amount-${n.id}" class="p-1 rounded text-xs w-deposit" min="21" value="21" placeholder="sats">
-        <button class="px-2 py-1 rounded text-xs ml-1" id="vote-submit-${n.id}" onclick="submitVote('${n.id}')">Pay & Vote</button>
-        <button class="px-2 py-1 rounded text-xs ml-1" onclick="cancelVote('${n.id}')" class="bg-alt">Cancel</button>
-        <span class="text-xs ml-2" id="vote-status-${n.id}" class="c-dim"></span>
-      </div>
-      <div class="replies-container hidden" id="replies-${n.id}"></div>
-    </div>`;
-  }).join('');
+    </div>
+    <div class="vote-prompt" id="vote-prompt-${n.id}">
+      <input type="number" id="vote-amount-${n.id}" class="p-1 rounded text-xs w-deposit" min="21" value="21" placeholder="sats">
+      <button class="px-2 py-1 rounded text-xs ml-1" id="vote-submit-${n.id}" onclick="submitVote('${n.id}')">Pay & Vote</button>
+      <button class="px-2 py-1 rounded text-xs ml-1" onclick="cancelVote('${n.id}')" class="bg-alt">Cancel</button>
+      <span class="text-xs ml-2" id="vote-status-${n.id}" class="c-dim"></span>
+    </div>
+    <div class="replies-container hidden" id="replies-${n.id}"></div>
+  </div>`;
 }
 
 function getDisplayName(event) {
@@ -818,29 +817,7 @@ async function toggleReplies(eventId) {
       return;
     }
 
-    container.innerHTML = replies.map(r => {
-      const dn = getDisplayName(r);
-      const rpk = r.pubkey.slice(0,8) + '...' + r.pubkey.slice(-4);
-      const rtime = relativeTime(r.created_at);
-      const rpic = getAvatar(r);
-      const rval = r.value_sats || 0;
-      const avatarH = rpic
-        ? `<img class="avatar" src="${esc(rpic)}" onerror="this.outerHTML='<div class=\\'avatar-placeholder\\'>${esc(dn || rpk).charAt(0).toUpperCase()}</div>'">`
-        : `<div class="avatar-placeholder">${esc(dn || rpk).charAt(0).toUpperCase()}</div>`;
-      return `<div class="reply-card p-2 rounded">
-        <div class="flex items-center gap-2 mb-1">
-          ${avatarH}
-          <span class="text-xs font-bold c-accent">${esc(dn || rpk)}</span>
-          <span class="text-xs c-dim">${rtime}</span>
-          <span class="text-xs c-dim ml-auto">${rval > 0 ? rval + ' sats' : ''}</span>
-        </div>
-        <p class="text-xs whitespace-pre-wrap">${esc(r.content)}</p>
-        <div class="flex items-center gap-2 mt-1">
-          <span class="text-xs c-dim">${rpk}</span>
-          <button class="reply-btn text-xs" onclick="startReply('${r.id}', '${esc(dn || rpk)}')" title="Reply">&#8627; reply</button>
-        </div>
-      </div>`;
-    }).join('');
+    container.innerHTML = replies.map(r => renderNoteCard(r, true)).join('');
   } catch (err) {
     container.innerHTML = '<p class="text-xs c-error p-2">Failed to load replies.</p>';
   }
