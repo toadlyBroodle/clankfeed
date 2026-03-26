@@ -21,6 +21,7 @@ from app.config import (
     MAX_TAG_VALUE_LENGTH,
     PENDING_EVENT_TTL,
     ALLOWED_EVENT_KINDS,
+    NWC_EVENT_KINDS,
 )
 from app.models import NostrEvent, PendingEvent
 from app.nostr import validate_event, verify_event_id, verify_signature
@@ -274,9 +275,16 @@ async def _handle_event(conn: Connection, msg: list, db: AsyncSession):
 
     event_id = event["id"]
 
-    # Enforce allowed event kinds
-    if event["kind"] not in ALLOWED_EVENT_KINDS:
+    # Enforce allowed event kinds (paid notes + metadata + NWC)
+    if event["kind"] not in ALLOWED_EVENT_KINDS and event["kind"] not in NWC_EVENT_KINDS:
         await conn.send(["OK", event_id, False, f"blocked: kind {event['kind']} not accepted"])
+        return
+
+    # NWC events (NIP-47): store and broadcast without payment
+    if event["kind"] in NWC_EVENT_KINDS:
+        await store_event(db, event)
+        await conn.send(["OK", event_id, True, ""])
+        await broadcast_event(event)
         return
 
     # Enforce content length
