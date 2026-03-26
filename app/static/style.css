@@ -18,7 +18,7 @@ body {
 }
 
 bc-button {
-  transform: scale(0.8);
+  transform: scale(0.75);
   transform-origin: top right;
 }
 

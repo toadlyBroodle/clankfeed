@@ -208,20 +208,20 @@ def _custom_openapi():
         ("/api/post", "post"): post_price_usd,
     }
 
-    # API-key-only endpoints (no payment, but need X-Account-Key)
-    apikey_routes = {
-        ("/api/v1/account/balance", "get"),
-        ("/api/v1/account/key", "get"),
-        ("/api/v1/account/deposit/confirm", "post"),
-    }
-
     # API-key + paid endpoints (already in paid_routes, also need security)
     apikey_paid_routes = {
         ("/api/v1/account/deposit", "post"),
         ("/api/v1/account/profile", "post"),
     }
 
+    # Routes to exclude from OpenAPI (non-API utility/static routes)
+    excluded_paths = {"/", "/terms", "/privacy", "/favicon.ico", "/health"}
+
+    # Remove non-API routes from the spec
     paths = schema.get("paths", {})
+    for excluded in excluded_paths:
+        paths.pop(excluded, None)
+
     for path, methods in paths.items():
         for method, operation in methods.items():
             if not isinstance(operation, dict):
@@ -241,12 +241,9 @@ def _custom_openapi():
                 if route_key in apikey_paid_routes:
                     operation["security"] = [{"AccountKey": []}]
 
-            elif route_key in apikey_routes:
-                operation["security"] = [{"AccountKey": []}]
-
             else:
-                # Free endpoint: explicitly no auth
-                operation["security"] = []
+                # All non-paid API endpoints accept optional AccountKey
+                operation["security"] = [{"AccountKey": []}]
 
     app.openapi_schema = schema
     return schema

@@ -637,18 +637,17 @@ let voteDebounce = {};  // event_id -> timeout ID
 let votePending = {};  // event_id -> accumulated clicks {direction, count}
 
 function startVote(eventId, direction) {
-  // Debounce: accumulate rapid clicks into one vote with combined amount
+  // Accumulate rapid clicks into combined amount
   if (!votePending[eventId]) {
     votePending[eventId] = { direction, count: 0 };
   }
   if (votePending[eventId].direction === direction) {
     votePending[eventId].count++;
   } else {
-    // Direction changed, reset
     votePending[eventId] = { direction, count: 1 };
   }
 
-  // Show prompt with accumulated amount
+  // Show prompt with amount input; user clicks "Pay & Vote" when ready
   pendingVoteDir[eventId] = direction;
   const prompt = document.getElementById(`vote-prompt-${eventId}`);
   prompt.classList.add('active');
@@ -657,15 +656,8 @@ function startVote(eventId, direction) {
 
   const status = document.getElementById(`vote-status-${eventId}`);
   const clicks = votePending[eventId].count;
-  status.textContent = (direction === 1 ? 'Upvoting' : 'Downvoting') + (clicks > 1 ? ` (${clicks}x)...` : '...');
+  status.textContent = (direction === 1 ? 'Upvote' : 'Downvote') + (clicks > 1 ? ` (${clicks}x)` : '');
   status.style.color = 'var(--dim)';
-
-  // Auto-submit after 1.5s of no clicks
-  if (voteDebounce[eventId]) clearTimeout(voteDebounce[eventId]);
-  voteDebounce[eventId] = setTimeout(() => {
-    delete voteDebounce[eventId];
-    submitVote(eventId);
-  }, 1500);
 }
 
 function cancelVote(eventId) {
