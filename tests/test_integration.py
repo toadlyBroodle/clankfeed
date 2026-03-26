@@ -421,3 +421,93 @@ class TestSecurityHeaders:
         resp = await client.post("/api/post", json={"content": "sec test"})
         assert "content-security-policy" in resp.headers
         assert "strict-transport-security" in resp.headers
+
+
+# ---------------------------------------------------------------------------
+# Tests: Fresh WWW-Authenticate on credential-error 402s (Fix #10, Core 1.7)
+# ---------------------------------------------------------------------------
+
+class TestCredentialError402Challenge:
+    """Credential verification errors MUST include fresh WWW-Authenticate challenge."""
+
+    @pytest.mark.asyncio
+    async def test_malformed_credential_has_challenge(self, tempo_client):
+        """Malformed Authorization header returns 402 with Tempo challenge."""
+        # First create a pending event via /api/post
+        resp = await tempo_client.post("/api/post", json={"content": "test note"})
+        assert resp.status_code == 200
+        token = resp.json()["token"]
+
+        # Submit a malformed credential
+        resp = await tempo_client.post(
+            f"/pay?token={token}",
+            headers={"Authorization": "Payment not-valid-base64!!!"},
+        )
+        assert resp.status_code == 402
+        assert "www-authenticate" in resp.headers
+        assert resp.headers["www-authenticate"].startswith("Payment ")
+
+    @pytest.mark.asyncio
+    async def test_missing_payment_prefix_has_challenge(self, tempo_client):
+        """Missing 'Payment ' prefix returns 402 with challenge."""
+        resp = await tempo_client.post("/api/post", json={"content": "test note"})
+        token = resp.json()["token"]
+
+        resp = await tempo_client.post(
+            f"/pay?token={token}",
+            headers={"Authorization": "Bearer some-token"},
+        )
+        assert resp.status_code == 402
+        assert "www-authenticate" in resp.headers
+        assert resp.headers["www-authenticate"].startswith("Payment ")
+
+    @pytest.mark.asyncio
+    async def test_invalid_method_has_challenge(self, tempo_client):
+        """Unsupported payment method returns 402 with challenge."""
+        import base64
+        cred = base64.urlsafe_b64encode(json.dumps({
+            "challenge": {"method": "bitcoin", "id": "x", "realm": "clankfeed",
+                          "intent": "charge", "request": "x", "expires": "2099-01-01T00:00:00Z"},
+            "payload": {},
+        }).encode()).rstrip(b"=").decode()
+
+        resp = await tempo_client.post("/api/post", json={"content": "test note"})
+        token = resp.json()["token"]
+
+        resp = await tempo_client.post(
+            f"/pay?token={token}",
+            headers={"Authorization": f"Payment {cred}"},
+        )
+        assert resp.status_code == 402
+        assert "www-authenticate" in resp.headers
+
+    @pytest.mark.asyncio
+    async def test_error_402_has_cache_control(self, tempo_client):
+        """Credential-error 402 responses have Cache-Control: no-store."""
+        resp = await tempo_client.post("/api/post", json={"content": "test note"})
+        token = resp.json()["token"]
+
+        resp = await tempo_client.post(
+            f"/pay?token={token}",
+            headers={"Authorization": "Payment not-valid"},
+        )
+        assert resp.status_code == 402
+        assert resp.headers.get("cache-control") == "no-store"
+
+    @pytest.mark.asyncio
+    async def test_v1_malformed_credential_has_challenge(self, tempo_client):
+        """v1 API malformed credential returns 402 with challenge."""
+        from app.nostr import sign_event as _sign
+        from app import config
+        event = _sign(config.settings.RELAY_PRIVATE_KEY, {
+            "created_at": int(time.time()), "kind": 1,
+            "tags": [], "content": "test",
+        })
+        resp = await tempo_client.post(
+            "/api/v1/events",
+            json={"event": event},
+            headers={"Authorization": "Payment bad-credential"},
+        )
+        assert resp.status_code == 402
+        assert "www-authenticate" in resp.headers
+        assert resp.headers["www-authenticate"].startswith("Payment ")

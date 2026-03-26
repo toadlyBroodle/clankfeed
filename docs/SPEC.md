@@ -521,7 +521,7 @@ Examples:
 - [x] Min/max sats filter inputs with Filter/Clear buttons
 - [x] Filters compose with sort mode via REST API call (not WebSocket)
 
-## Phase 10: User Accounts with Prepaid Credits
+## Phase 10: User Accounts with Prepaid Credits [DONE]
 
 ### Context
 
@@ -587,25 +587,25 @@ No 402, no payment widget, no second request. Single click.
 
 ### Web Client
 
-- [ ] On first visit, check localStorage for `clankfeed_api_key`. If missing, show "Create Account" button.
-- [ ] Create Account: calls `POST /api/v1/account/create`, stores key in localStorage.
-- [ ] Show balance in header (next to connection status).
-- [ ] Deposit button: amount input, then standard payment widget flow.
-- [ ] Post form: if logged in with credits, posts instantly (no payment prompt).
-- [ ] Vote buttons: if logged in with credits, votes instantly (no payment prompt).
-- [ ] If balance insufficient, show "Deposit more credits" message instead of payment widget.
-- [ ] Logout: clear localStorage key.
+- [x] On first visit, check localStorage for `clankfeed_api_key`. If missing, show "Create Account" button.
+- [x] Create Account: calls `POST /api/v1/account/create`, stores key in localStorage.
+- [x] Show balance in header (next to connection status).
+- [x] Deposit button: amount input, then standard payment widget flow.
+- [x] Post form: if logged in with credits, posts instantly (no payment prompt).
+- [x] Vote buttons: if logged in with credits, votes instantly (no payment prompt).
+- [x] If balance insufficient, show "Deposit more credits" message instead of payment widget.
+- [x] Logout: clear localStorage key.
 
 ### Implementation Steps
 
-- [ ] Add `Account` model to `models.py`
-- [ ] Add `accounts` table migration to `database.py`
-- [ ] Create `app/accounts.py` with account CRUD and balance operations
-- [ ] Add account endpoints to `api_v1.py`: create, balance, deposit, deposit/confirm
-- [ ] Modify `submit_event`, `relay_post`, `vote_event` to check `X-Account-Key` and deduct credits
-- [ ] Update web client: account creation, balance display, deposit flow, credit-based posting/voting
-- [ ] Write tests: account creation, deposit flow, credit spending, insufficient balance, balance display
-- [ ] Security: rate limit account creation, validate API key format, prevent negative balances
+- [x] Add `Account` model to `models.py`
+- [x] Add `accounts` table migration to `database.py`
+- [x] Create `app/accounts.py` with account CRUD and balance operations
+- [x] Add account endpoints to `api_v1.py`: create, balance, deposit, deposit/confirm
+- [x] Modify `submit_event`, `relay_post`, `vote_event` to check `X-Account-Key` and deduct credits
+- [x] Update web client: account creation, balance display, deposit flow, credit-based posting/voting
+- [x] Write tests: account creation, deposit flow, credit spending, insufficient balance, balance display
+- [x] Security: rate limit account creation, validate API key format, prevent negative balances
 
 ### Phase 7a: Stripe SPT Integration [PENDING]
 
@@ -665,7 +665,7 @@ Reference specs: `draft-httpauth-payment-00` (core), `draft-payment-intent-charg
 | 7 | **Receipt `timestamp` format** | Core 1.6: RFC 3339 string | Changed from Unix integer to RFC 3339 string |
 | 8 | **Error status codes** | Core 1.2: 402 for all payment failures | Changed all payment-related 401 responses to 402 across `payment.py` and `api_v1.py` |
 | 9 | **Error response format** | Core 1.7: RFC 9457 Problem Details | Added `type`, `title`, `detail` fields with `https://paymentauth.org/problems/` URIs |
-| 10 | **Fresh challenge on 402 errors** | Core 1.7: all 402 errors MUST include challenge | Deferred: requires generating challenge without an existing invoice context. Low impact for credential verification errors. |
+| 10 | **Fresh challenge on 402 errors** | Core 1.7: all 402 errors MUST include challenge | Fixed: `_error_402_with_challenge()` helper generates fresh invoice + challenges for all credential-error 402 responses |
 | 11 | **`Cache-Control: private` on receipts** | Core 1.6: receipt responses need `private` | Added `Cache-Control: private` header to all receipt responses |
 | 12 | **Receipt method for Tempo** | Receipt should reflect actual method | `build_receipt()` now accepts `method` param, callers pass actual method |
 | 13 | **JCS serialization** | Core 1.3: request JSON MUST use JCS | Current compact JSON matches JCS for our simple flat objects. Acceptable. |
@@ -693,7 +693,7 @@ Reference specs: `draft-httpauth-payment-00` (core), `draft-payment-intent-charg
 - [x] Fix #14: Strict preimage hex validation (64 chars, lowercase) in `mpp.py:verify_mpp_credential()`
 
 **Remaining (deferred):**
-- [ ] Fix #10: Fresh `WWW-Authenticate` challenge on credential-error 402 responses (requires invoice generation context)
+- [x] Fix #10: Fresh `WWW-Authenticate` challenge on credential-error 402 responses
 
 ### Files Modified
 
@@ -701,8 +701,8 @@ Reference specs: `draft-httpauth-payment-00` (core), `draft-payment-intent-charg
 |------|-------|
 | `app/mpp.py` | #1, #2, #3, #4, #5, #6, #7, #12, #14 |
 | `app/tempo_pay.py` | #2 |
-| `app/payment.py` | #8, #9, #11, #12 |
-| `app/api_v1.py` | #8, #9, #11, #12 |
+| `app/payment.py` | #8, #9, #10, #11, #12 |
+| `app/api_v1.py` | #8, #9, #10, #11, #12 |
 | `tests/test_payment.py` | Updated expected values for format changes |
 | `tests/test_tempo.py` | Updated expected expires format |
 | `tests/test_integration.py` | Updated expected status codes (401 to 402) |
@@ -710,7 +710,7 @@ Reference specs: `draft-httpauth-payment-00` (core), `draft-payment-intent-charg
 
 ## Test Results (2026-03-26)
 
-**147 tests passing** across 13 test files (`python -m pytest`, ~5s)
+**152 tests passing** across 13 test files (`python -m pytest`, ~5s)
 
 **MPP spec compliance Playwright browser test (2026-03-26):**
 - Page loads, WebSocket connects (green "connected" indicator), 0 console errors
@@ -722,7 +722,7 @@ Reference specs: `draft-httpauth-payment-00` (core), `draft-payment-intent-charg
 - `test_payment.py`: 8 tests (base64url, HMAC binding, MPP challenge format, receipts)
 - `test_relay.py`: 6 tests (NIP-11, health, HTML serving, API post, validation)
 - `test_tempo.py`: 6 tests (Tempo challenge format, HMAC verify, request contents, expiry, tx hash extraction)
-- `test_integration.py`: 18 tests (multi-method 402, credential routing, Tempo/Lightning confirm, replay protection, expired tokens, input validation, security headers)
+- `test_integration.py`: 23 tests (multi-method 402, credential routing, Tempo/Lightning confirm, replay protection, expired tokens, input validation, security headers, credential-error 402 challenge headers)
 - `test_api_v1.py`: 19 tests (agent event submission, both payment confirms, replay, read with filters, get by ID, relay-signed post, NIP-11 payments field)
 - `test_security.py`: 25 tests (SQL injection, XSS, malformed input, payment hex validation, method injection, future events, tag limits, duplicate idempotency, rate limiting, display_name truncation, tag value length limits, non-string tag rejection)
 - `test_nip42_metadata.py`: 12 tests (kind:0 metadata store/replace/older-skipped/independent-pubkeys/non-JSON, NIP-42 auth success/wrong-challenge/wrong-kind/expired/multi-pubkey)

@@ -32,6 +32,40 @@ logger = logging.getLogger("clankfeed.payment")
 router = APIRouter()
 
 
+async def _error_402_with_challenge(
+    error_body: dict,
+    amount_sats: int = 0,
+    description: str = "Pay to post a note on clankfeed relay",
+) -> "RawResponse":
+    """Build a 402 error response with fresh WWW-Authenticate challenge headers (Core 1.7)."""
+    from starlette.responses import Response as RawResponse
+
+    sats = amount_sats or settings.POST_PRICE_SATS
+    response = RawResponse(
+        content=json.dumps(error_body),
+        status_code=402,
+        media_type="application/json",
+    )
+    response.headers["Cache-Control"] = "no-store"
+
+    if payments_enabled():
+        try:
+            invoice_data = await create_invoice(sats, description)
+            challenge = build_mpp_challenge(
+                sats, invoice_data["payment_hash"],
+                invoice_data["payment_request"], description,
+            )
+            response.headers.append("WWW-Authenticate", challenge)
+        except Exception:
+            logger.debug("Could not generate Lightning challenge for error 402")
+
+    if tempo_enabled():
+        tempo_challenge = build_tempo_challenge(settings.TEMPO_PRICE_USD, description)
+        response.headers.append("WWW-Authenticate", tempo_challenge)
+
+    return response
+
+
 @router.get("/pay")
 @limiter.limit(RATE_PAY)
 async def pay_get(request: Request, token: str, db: AsyncSession = Depends(get_db)):
@@ -104,7 +138,7 @@ async def pay_post(request: Request, token: str, db: AsyncSession = Depends(get_
 
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Payment "):
-        return JSONResponse(status_code=402, content={
+        return await _error_402_with_challenge({
             "type": "https://paymentauth.org/problems/malformed-credential",
             "title": "Missing Payment authorization",
             "detail": "Authorization header must start with 'Payment '",
@@ -112,7 +146,7 @@ async def pay_post(request: Request, token: str, db: AsyncSession = Depends(get_
 
     credential = parse_mpp_credential(auth)
     if not credential:
-        return JSONResponse(status_code=402, content={
+        return await _error_402_with_challenge({
             "type": "https://paymentauth.org/problems/malformed-credential",
             "title": "Malformed credential",
             "detail": "Could not decode Payment credential",
@@ -128,21 +162,21 @@ async def pay_post(request: Request, token: str, db: AsyncSession = Depends(get_
         valid = verify_mpp_credential(credential)
         payment_id = extract_payment_hash(credential)
     else:
-        return JSONResponse(status_code=402, content={
+        return await _error_402_with_challenge({
             "type": "https://paymentauth.org/problems/method-unsupported",
             "title": "Unsupported payment method",
             "detail": f"Method '{method}' is not supported",
         })
 
     if not valid:
-        return JSONResponse(status_code=402, content={
+        return await _error_402_with_challenge({
             "type": "https://paymentauth.org/problems/verification-failed",
             "title": "Verification failed",
             "detail": "Invalid payment proof",
         })
 
     if not payment_id:
-        return JSONResponse(status_code=402, content={
+        return await _error_402_with_challenge({
             "type": "https://paymentauth.org/problems/verification-failed",
             "title": "Verification failed",
             "detail": "Missing payment identifier",
@@ -150,7 +184,7 @@ async def pay_post(request: Request, token: str, db: AsyncSession = Depends(get_
 
     consumed = await check_and_consume_payment(payment_id, db)
     if not consumed:
-        return JSONResponse(status_code=402, content={
+        return await _error_402_with_challenge({
             "type": "https://paymentauth.org/problems/invalid-challenge",
             "title": "Invalid challenge",
             "detail": "Payment already consumed",

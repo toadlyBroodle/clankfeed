@@ -28,7 +28,7 @@ from app.limiter import limiter
 from app.accounts import create_account, get_account, deposit_credits, spend_credits
 from app.rates import get_btc_usd_price, usd_to_sats
 from app.models import PendingEvent, NostrEvent
-from app.mpp import parse_mpp_credential, verify_mpp_credential, extract_payment_hash, build_receipt
+from app.mpp import build_mpp_challenge, parse_mpp_credential, verify_mpp_credential, extract_payment_hash, build_receipt
 from app.nostr import validate_event, sign_event
 from app.relay import store_event, broadcast_event, store_pending_event, query_events, row_to_event
 from app.tempo_pay import build_tempo_challenge, verify_tempo_credential, extract_tempo_tx_hash
@@ -36,6 +36,42 @@ from app.tempo_pay import build_tempo_challenge, verify_tempo_credential, extrac
 logger = logging.getLogger("clankfeed.api_v1")
 
 router = APIRouter(prefix="/api/v1")
+
+
+async def _error_402_with_challenge(
+    error_body: dict,
+    amount_sats: int = 0,
+    amount_usd: str = "",
+    description: str = "Pay to post a note on clankfeed relay",
+) -> "RawResponse":
+    """Build a 402 error response with fresh WWW-Authenticate challenge headers (Core 1.7)."""
+    from starlette.responses import Response as RawResponse
+
+    sats = amount_sats or settings.POST_PRICE_SATS
+    usd = amount_usd or settings.TEMPO_PRICE_USD
+    response = RawResponse(
+        content=json.dumps(error_body),
+        status_code=402,
+        media_type="application/json",
+    )
+    response.headers["Cache-Control"] = "no-store"
+
+    if payments_enabled():
+        try:
+            invoice_data = await create_invoice(sats, description)
+            challenge = build_mpp_challenge(
+                sats, invoice_data["payment_hash"],
+                invoice_data["payment_request"], description,
+            )
+            response.headers.append("WWW-Authenticate", challenge)
+        except Exception:
+            logger.debug("Could not generate Lightning challenge for error 402")
+
+    if tempo_enabled():
+        tempo_challenge = build_tempo_challenge(usd, description)
+        response.headers.append("WWW-Authenticate", tempo_challenge)
+
+    return response
 
 
 async def _try_spend_credits(request: Request, db: AsyncSession, amount_sats: int) -> tuple[bool, str]:
@@ -95,6 +131,8 @@ async def _verify_and_store_paid_event(
     """Verify an MPP credential, consume payment, store event, broadcast."""
     method = credential.get("challenge", {}).get("method", "")
     challenge_id = credential.get("challenge", {}).get("id", "")
+    amt_sats = pending.amount_sats or settings.POST_PRICE_SATS
+    amt_usd = pending.amount_usd or settings.TEMPO_PRICE_USD
     if method == "tempo":
         valid = await verify_tempo_credential(credential)
         payment_id = extract_tempo_tx_hash(credential)
@@ -102,32 +140,32 @@ async def _verify_and_store_paid_event(
         valid = verify_mpp_credential(credential)
         payment_id = extract_payment_hash(credential)
     else:
-        return JSONResponse(status_code=402, content={
+        return await _error_402_with_challenge({
             "type": "https://paymentauth.org/problems/method-unsupported",
             "title": "Unsupported payment method",
             "detail": f"Method '{method}' is not supported",
-        })
+        }, amount_sats=amt_sats, amount_usd=amt_usd)
 
     if not valid:
-        return JSONResponse(status_code=402, content={
+        return await _error_402_with_challenge({
             "type": "https://paymentauth.org/problems/verification-failed",
             "title": "Verification failed",
             "detail": "Invalid payment proof",
-        })
+        }, amount_sats=amt_sats, amount_usd=amt_usd)
     if not payment_id:
-        return JSONResponse(status_code=402, content={
+        return await _error_402_with_challenge({
             "type": "https://paymentauth.org/problems/verification-failed",
             "title": "Verification failed",
             "detail": "Missing payment identifier",
-        })
+        }, amount_sats=amt_sats, amount_usd=amt_usd)
 
     consumed = await check_and_consume_payment(payment_id, db)
     if not consumed:
-        return JSONResponse(status_code=402, content={
+        return await _error_402_with_challenge({
             "type": "https://paymentauth.org/problems/invalid-challenge",
             "title": "Invalid challenge",
             "detail": "Payment already consumed",
-        })
+        }, amount_sats=amt_sats, amount_usd=amt_usd)
 
     event = json.loads(pending.event_json)
     await store_event(db, event)
@@ -226,11 +264,11 @@ async def submit_event(request: Request, db: AsyncSession = Depends(get_db)):
         if not credential:
             await db.delete(pending)
             await db.commit()
-            return JSONResponse(status_code=402, content={
+            return await _error_402_with_challenge({
                 "type": "https://paymentauth.org/problems/malformed-credential",
                 "title": "Malformed credential",
                 "detail": "Could not decode Payment credential",
-            })
+            }, amount_sats=req_sats, amount_usd=req_usd)
 
         return await _verify_and_store_paid_event(credential, pending, db)
 
