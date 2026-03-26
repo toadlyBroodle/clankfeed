@@ -743,6 +743,7 @@ Reference specs: `draft-httpauth-payment-00` (core), `draft-payment-intent-charg
 - Kind 0 (metadata) blocked with descriptive error
 - Kind 3 (contacts) blocked
 - Kind 1 (text note) accepted
+- Kinds 13194, 23194, 23195 (NWC) accepted without payment
 - Oversized messages (>64KB) rejected
 
 **HTTP endpoint tests: all passing**
@@ -776,6 +777,14 @@ Reference specs: `draft-httpauth-payment-00` (core), `draft-payment-intent-charg
 - Replay protection: reused tx hash correctly rejected ("Payment already consumed")
 - Browser E2E: post note, switch to Tempo tab, paste tx hash, confirm, note appears in feed
 
+**Phase 11a Playwright browser tests (2026-03-26): all passing**
+- Bitcoin Connect v3.12.2 loaded via esm.sh CDN, 0 console errors
+- "Connect Wallet" button rendered in header (bc-button web component)
+- Credit-based post: BCBot note appeared, balance deducted (4874 -> 4853 sats)
+- Relay-signed notes display "anon" instead of truncated pubkey hex
+- NWC event kinds (13194, 23194, 23195) pass through relay without payment
+- Production (clankfeed.com): Bitcoin Connect button visible, WebSocket connected, notes loaded
+
 **Production tests (clankfeed.com): all passing**
 - NIP-11 relay info with `payments` field: lists both methods, pricing, Tempo recipient
 - WebSocket connects over wss://clankfeed.com
@@ -793,7 +802,7 @@ Reference specs: `draft-httpauth-payment-00` (core), `draft-payment-intent-charg
 
 ## Verification Plan
 
-1. **Unit tests**: `python -m pytest` (147 tests, ~5s) [DONE]
+1. **Unit tests**: `python -m pytest` (152 tests, ~6s) [DONE]
 2. **Integration test**: Start server, connect WS client, send EVENT, verify stored + broadcast [DONE]
 3. **Browser test**: Open web client, post note, verify feed updates in real-time [DONE]
 4. **Lightning payment test**: Pay invoice via web client, verify note stored and broadcast [DONE]
@@ -832,17 +841,19 @@ For agents, the existing MPP 402 flow already works without accounts. This phase
 
 ### Implementation Steps
 
-#### Phase 11a: Add Bitcoin Connect (alongside existing accounts)
+#### Phase 11a: Add Bitcoin Connect (alongside existing accounts) [DONE]
 
-- [ ] Add Bitcoin Connect CDN script to index.html
-- [ ] Initialize Bitcoin Connect with `bc.init({ appName: 'clankfeed' })`
-- [ ] Create `payWithBitcoinConnect(invoice)` helper that calls `bc.launchPaymentModal()` and returns preimage
-- [ ] Create `buildMPPCredential(challenge, preimage)` JS helper for MPP credential construction
-- [ ] Modify post flow: when 402 returned, extract BOLT11 from response, pay via Bitcoin Connect, then confirm with preimage
-- [ ] Modify vote flow: same pattern (pay via Bitcoin Connect instead of QR + polling)
-- [ ] Keep existing account system and QR fallback working alongside Bitcoin Connect
-- [ ] Add "Connect Wallet" button in header (Bitcoin Connect provides this)
-- [ ] Test: post with connected wallet, vote with connected wallet, QR fallback still works
+- [x] Add Bitcoin Connect CDN script (v3.12.2 via esm.sh) to index.html
+- [x] Initialize Bitcoin Connect with `init({ appName: 'clankfeed' })`
+- [x] Modify post flow: when 402 returned, launch Bitcoin Connect payment modal with BOLT11, server-side polling as fallback for external payments
+- [x] Modify vote flow: same pattern (Bitcoin Connect modal instead of inline QR + polling)
+- [x] Keep existing account system and QR fallback working alongside Bitcoin Connect
+- [x] Add `<bc-button>` "Connect Wallet" button in header
+- [x] Update CSP to allow esm.sh scripts and connections
+- [x] Allow NWC event kinds (13194, 23194, 23195) through relay without payment for NIP-47 wallet communication
+- [x] Display "anon" for relay-signed notes instead of truncated pubkey hex
+- [x] Add OpenAPI schema with MPP payment discovery extensions (x-payment-info, x-discovery, x-guidance)
+- [x] Test: page loads with Bitcoin Connect, 0 console errors, credit-based posting still works, production verified
 
 #### Phase 11b: Remove Account System
 

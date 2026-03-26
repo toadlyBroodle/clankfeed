@@ -17,6 +17,11 @@ body {
   font-family: 'Courier New', Courier, monospace;
 }
 
+bc-button {
+  transform: scale(0.8);
+  transform-origin: top right;
+}
+
 /* Base elements */
 textarea, input {
   background: var(--bg-alt);
