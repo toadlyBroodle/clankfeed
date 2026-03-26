@@ -310,7 +310,7 @@ async function fetchReplyCounts() {
 
 function renderNoteCard(n, isReply) {
   const displayName = getDisplayName(n);
-  const pk = (relayPubkey && n.pubkey === relayPubkey) ? 'anon' : n.pubkey.slice(0, 8) + '...' + n.pubkey.slice(-4);
+  const pk = (relayPubkey && n.pubkey === relayPubkey) ? 'anon' : n.pubkey.slice(0, 4) + '...' + n.pubkey.slice(-4);
   const timeAgo = relativeTime(n.created_at);
   const pic = getAvatar(n);
   const valueSats = n.value_sats || 0;
@@ -334,7 +334,8 @@ function renderNoteCard(n, isReply) {
         ${replyIndicator}
         <div class="flex items-center gap-2 mb-1">
           ${avatarHtml}
-          <span class="text-xs font-bold flex-1 c-accent">${esc(displayName || pk)}</span>
+          <span class="text-xs font-bold c-accent">${esc(displayName || pk)}</span>${displayName && pk !== 'anon' ? `<span class="text-xs c-dim ml-1">${pk}</span>` : ''}
+          <span class="flex-1"></span>
           <span class="text-xs c-dim">${timeAgo}</span>
         </div>
         <p class="text-sm whitespace-pre-wrap">${esc(n.content)}</p>
@@ -1167,6 +1168,7 @@ async function showProfile() {
     // Load keys and populate profile fields
     try {
       const resp = await fetch('/api/v1/account/key', {
+        method: 'POST',
         headers: {'X-Account-Key': apiKey},
       });
       const data = await resp.json();

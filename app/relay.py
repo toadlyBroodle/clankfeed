@@ -285,8 +285,14 @@ async def _handle_event(conn: Connection, msg: list, db: AsyncSession):
         await conn.send(["OK", event_id, False, f"blocked: kind {event['kind']} not accepted"])
         return
 
-    # NWC events (NIP-47): store and broadcast without payment
+    # NWC events (NIP-47): store and broadcast without payment, but validate size
     if event["kind"] in NWC_EVENT_KINDS:
+        if len(event["content"]) > MAX_CONTENT_LENGTH:
+            await conn.send(["OK", event_id, False, f"invalid: content exceeds {MAX_CONTENT_LENGTH} chars"])
+            return
+        if len(event["tags"]) > MAX_EVENT_TAGS:
+            await conn.send(["OK", event_id, False, f"invalid: too many tags (max {MAX_EVENT_TAGS})"])
+            return
         await store_event(db, event)
         await conn.send(["OK", event_id, True, ""])
         await broadcast_event(event)

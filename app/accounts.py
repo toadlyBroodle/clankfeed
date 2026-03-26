@@ -7,6 +7,7 @@ from coincurve import PrivateKey
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.crypto import encrypt_field
 from app.models import Account
 
 logger = logging.getLogger("clankfeed.accounts")
@@ -60,7 +61,7 @@ async def create_account(db: AsyncSession, pubkey: str = "", nostr_privkey: str 
     acct = Account(
         id=api_key,
         pubkey=pubkey or None,
-        nostr_privkey=nostr_privkey,
+        nostr_privkey=encrypt_field(nostr_privkey),
         nostr_pubkey=derived_pubkey,
         balance_sats=0,
         balance_usd="0",

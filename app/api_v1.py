@@ -29,6 +29,7 @@ from app.accounts import create_account, get_account, deposit_credits, spend_cre
 from app.rates import get_btc_usd_price, usd_to_sats
 from app.models import PendingEvent, NostrEvent
 from app.mpp import build_mpp_challenge, parse_mpp_credential, verify_mpp_credential, extract_payment_hash, build_receipt
+from app.crypto import decrypt_field
 from app.nostr import validate_event, sign_event
 from app.relay import store_event, broadcast_event, store_pending_event, query_events, row_to_event
 from app.tempo_pay import build_tempo_challenge, verify_tempo_credential, extract_tempo_tx_hash
@@ -492,7 +493,7 @@ async def relay_post(request: Request, db: AsyncSession = Depends(get_db)):
     if api_key:
         acct = await get_account(db, api_key)
         if acct and acct.nostr_privkey:
-            signing_key = acct.nostr_privkey
+            signing_key = decrypt_field(acct.nostr_privkey)
 
     if not signing_key:
         return JSONResponse(status_code=500, content={"detail": "Relay private key not configured"})
@@ -1018,10 +1019,10 @@ async def account_deposit_confirm(request: Request, db: AsyncSession = Depends(g
 
 
 # ---------------------------------------------------------------------------
-# GET /api/v1/account/key  (export Nostr private key)
+# POST /api/v1/account/key  (export Nostr private key)
 # ---------------------------------------------------------------------------
 
-@router.get("/account/key")
+@router.post("/account/key")
 @limiter.limit(RATE_EVENTS_READ)
 async def account_export_key(request: Request, db: AsyncSession = Depends(get_db)):
     """Export the account's Nostr private key. Requires X-Account-Key header."""
@@ -1034,7 +1035,7 @@ async def account_export_key(request: Request, db: AsyncSession = Depends(get_db
         return JSONResponse(status_code=404, content={"detail": "Account not found"})
 
     return {
-        "nostr_privkey": acct.nostr_privkey or "",
+        "nostr_privkey": decrypt_field(acct.nostr_privkey) if acct.nostr_privkey else "",
         "nostr_pubkey": acct.nostr_pubkey or "",
     }
 
@@ -1087,7 +1088,7 @@ async def account_update_profile(request: Request, db: AsyncSession = Depends(ge
         "tags": [],
         "content": json.dumps(metadata),
     }
-    signed = sign_event(acct.nostr_privkey, event)
+    signed = sign_event(decrypt_field(acct.nostr_privkey), event)
 
     # Try spending credits
     req_sats = settings.POST_PRICE_SATS
