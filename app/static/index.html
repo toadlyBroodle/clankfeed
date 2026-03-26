@@ -114,20 +114,23 @@
 
       <!-- Method tabs -->
       <div id="pay-tabs" class="flex gap-2 mb-3 text-xs">
-        <button id="tab-lightning" class="px-3 py-1 rounded" onclick="switchPayTab('lightning')" class="bg-primary">Lightning</button>
+        <button id="tab-lightning" class="px-3 py-1 rounded bg-primary" onclick="switchPayTab('lightning')">Lightning</button>
         <button id="tab-tempo" class="hidden px-3 py-1 rounded bg-alt" onclick="switchPayTab('tempo')">Tempo (USD)</button>
       </div>
 
       <!-- Lightning payment -->
-      <div id="pay-lightning" class="flex gap-4 items-start">
-        <canvas id="qr-canvas" width="160" height="160"></canvas>
-        <div class="flex-1">
-          <p class="text-xs mb-1 c-dim">Lightning Invoice:</p>
-          <div class="flex items-center gap-1">
-            <code id="bolt11-display" class="text-xs break-all c-text"></code>
-            <span class="copy-btn text-xs" onclick="copyBolt11()" title="Copy">[copy]</span>
+      <div id="pay-lightning">
+        <button id="bc-pay-btn" class="hidden w-full px-4 py-2 mb-3 rounded text-sm font-bold" style="background: var(--accent); color: #000;" onclick="">&#9889; Pay with Bitcoin Connect</button>
+        <div class="flex gap-4 items-start">
+          <canvas id="qr-canvas" width="160" height="160"></canvas>
+          <div class="flex-1">
+            <p class="text-xs mb-1 c-dim">Lightning Invoice:</p>
+            <div class="flex items-center gap-1">
+              <code id="bolt11-display" class="text-xs break-all c-text"></code>
+              <span class="copy-btn text-xs" onclick="copyBolt11()" title="Copy">[copy]</span>
+            </div>
+            <p class="text-xs mt-2" id="payment-status-text" class="c-dim">Waiting for payment...</p>
           </div>
-          <p class="text-xs mt-2" id="payment-status-text" class="c-dim">Waiting for payment...</p>
         </div>
       </div>
 
@@ -409,56 +412,7 @@ function showPaymentWidget(data) {
   const payHash = data.payment_hash || (data.lightning && data.lightning.payment_hash) || '';
   const paySats = data.amount_sats || (data.lightning && data.lightning.amount_sats) || 0;
 
-  // Try Bitcoin Connect for Lightning payments
-  if (currentBolt11 && window.__bcLaunchPaymentModal) {
-    const { setPaid } = window.__bcLaunchPaymentModal({
-      invoice: currentBolt11,
-      onPaid: ({ preimage }) => {
-        // Paid via connected wallet (WebLN/NWC), confirm with server
-        clearAllPolls();
-        if (data._deposit) {
-          confirmDeposit(data.token, payHash);
-        } else {
-          confirmPayment(data.token, payHash, 'lightning');
-        }
-      },
-      onCancelled: () => {
-        clearAllPolls();
-        document.getElementById('post-btn').disabled = false;
-        document.getElementById('post-btn').textContent = 'Post Note';
-      },
-    });
-
-    // Also poll server-side for external payments (QR scan without WebLN)
-    if (payHash) {
-      if (paymentPollTimer) clearInterval(paymentPollTimer);
-      paymentPollTimer = setInterval(async () => {
-        try {
-          const resp = await fetch(`/api/v1/payments/status?payment_hash=${payHash}`);
-          const status = await resp.json();
-          if (status.paid) {
-            clearInterval(paymentPollTimer);
-            setPaid({ preimage: 'server-confirmed' });
-            if (data._deposit) {
-              await confirmDeposit(data.token, payHash);
-            } else {
-              await confirmPayment(data.token, payHash, 'lightning');
-            }
-          }
-        } catch (err) {
-          console.error('Poll error:', err);
-        }
-      }, 3000);
-    }
-
-    // If Tempo is also available, show fallback widget with Tempo-only
-    if (methods.includes('tempo') && data.tempo) {
-      showTempoFallback(data);
-    }
-    return;
-  }
-
-  // Fallback: show custom payment widget (no Bitcoin Connect available, or Tempo-only)
+  // Show payment widget with method tabs; Bitcoin Connect launches on Lightning tab click
   widget.classList.remove('hidden');
 
   const title = document.getElementById('payment-widget-title');
@@ -485,6 +439,17 @@ function showPaymentWidget(data) {
   }
 
   switchPayTab(methods[0] || 'lightning');
+
+  // Show "Pay with Bitcoin Connect" button if Lightning is available and BC loaded
+  const bcBtn = document.getElementById('bc-pay-btn');
+  if (bcBtn) {
+    if (methods.includes('lightning') && window.__bcLaunchPaymentModal) {
+      bcBtn.classList.remove('hidden');
+      bcBtn.onclick = () => launchBCForPost(data, payHash);
+    } else {
+      bcBtn.classList.add('hidden');
+    }
+  }
 
   if (currentBolt11) {
     new QRious({
@@ -527,30 +492,85 @@ function showPaymentWidget(data) {
   }
 }
 
-function showTempoFallback(data) {
-  // Show just the Tempo section of the payment widget when Bitcoin Connect handles Lightning
-  const widget = document.getElementById('payment-widget');
-  widget.classList.remove('hidden');
-  document.getElementById('payment-widget-title').textContent = 'Or pay with Tempo (USD):';
-  document.getElementById('tab-lightning').classList.add('hidden');
-  document.getElementById('tab-tempo').classList.remove('hidden');
-  document.getElementById('pay-lightning').classList.add('hidden');
-  document.getElementById('pay-tempo').classList.remove('hidden');
+function launchBCForPost(data, payHash) {
+  const { setPaid } = window.__bcLaunchPaymentModal({
+    invoice: currentBolt11,
+    onPaid: ({ preimage }) => {
+      clearAllPolls();
+      if (data._deposit) {
+        confirmDeposit(data.token, payHash);
+      } else {
+        confirmPayment(data.token, payHash, 'lightning');
+      }
+    },
+    onCancelled: () => {
+      // Modal dismissed; payment widget with tabs still visible behind it
+      clearAllPolls();
+    },
+  });
 
-  document.getElementById('tempo-amount').textContent = data.tempo.amount_usd + ' USD';
-  document.getElementById('tempo-recipient').textContent = data.tempo.recipient;
-  document.getElementById('tempo-token').textContent = data.tempo.currency.slice(0, 10) + '...' + data.tempo.currency.slice(-4);
-  document.getElementById('tempo-network').textContent = data.tempo.testnet ? '(testnet)' : '(mainnet)';
-  document.getElementById('tempo-tx-input').value = '';
-  document.getElementById('tempo-status-text').textContent = '';
+  // Also poll server-side for external payments (QR scan without WebLN)
+  if (payHash) {
+    if (paymentPollTimer) clearInterval(paymentPollTimer);
+    paymentPollTimer = setInterval(async () => {
+      try {
+        const resp = await fetch(`/api/v1/payments/status?payment_hash=${payHash}`);
+        const status = await resp.json();
+        if (status.paid) {
+          clearInterval(paymentPollTimer);
+          setPaid({ preimage: 'server-confirmed' });
+          if (data._deposit) {
+            await confirmDeposit(data.token, payHash);
+          } else {
+            await confirmPayment(data.token, payHash, 'lightning');
+          }
+        }
+      } catch (err) {
+        console.error('Poll error:', err);
+      }
+    }, 3000);
+  }
+}
+
+function launchBCForVote(eventId, direction, token, payHash, amountSats, bolt11) {
+  const { setPaid } = window.__bcLaunchPaymentModal({
+    invoice: bolt11,
+    onPaid: ({ preimage }) => {
+      clearAllPolls();
+      confirmVoteAfterPay(eventId, direction, token, payHash, amountSats);
+    },
+    onCancelled: () => {
+      clearAllPolls();
+    },
+  });
+
+  // Poll server-side for external payments
+  const iv = setInterval(async () => {
+    try {
+      const resp = await fetch(`/api/v1/payments/status?payment_hash=${payHash}`);
+      const s = await resp.json();
+      if (s.paid) {
+        clearInterval(iv);
+        allPollTimers = allPollTimers.filter(t => t !== iv);
+        setPaid({ preimage: 'server-confirmed' });
+        confirmVoteAfterPay(eventId, direction, token, payHash, amountSats);
+      }
+    } catch (e) {}
+  }, 3000);
+  allPollTimers.push(iv);
 }
 
 function switchPayTab(method) {
   activePayMethod = method;
   document.getElementById('pay-lightning').classList.toggle('hidden', method !== 'lightning');
   document.getElementById('pay-tempo').classList.toggle('hidden', method !== 'tempo');
-  document.getElementById('tab-lightning').className = method === 'lightning' ? 'px-3 py-1 rounded bg-primary' : 'px-3 py-1 rounded bg-alt';
-  document.getElementById('tab-tempo').className = method === 'tempo' ? 'px-3 py-1 rounded bg-primary' : 'px-3 py-1 rounded bg-alt';
+  const lnTab = document.getElementById('tab-lightning');
+  const tempoTab = document.getElementById('tab-tempo');
+  // Preserve hidden state (tab may be unavailable for this payment)
+  const lnHidden = lnTab.classList.contains('hidden');
+  const tempoHidden = tempoTab.classList.contains('hidden');
+  lnTab.className = (lnHidden ? 'hidden ' : '') + (method === 'lightning' ? 'px-3 py-1 rounded bg-primary' : 'px-3 py-1 rounded bg-alt');
+  tempoTab.className = (tempoHidden ? 'hidden ' : '') + (method === 'tempo' ? 'px-3 py-1 rounded bg-primary' : 'px-3 py-1 rounded bg-alt');
 }
 
 async function confirmTempo() {
@@ -730,42 +750,7 @@ function showVotePayment(eventId, direction, data) {
   const hasLightning = methods.includes('lightning') && data.lightning;
   const hasTempo = methods.includes('tempo') && data.tempo;
 
-  // Try Bitcoin Connect for Lightning vote payments
-  if (hasLightning && window.__bcLaunchPaymentModal) {
-    const bolt11 = data.lightning.bolt11;
-    const payHash = data.lightning.payment_hash;
-    const amountSats = data.lightning.amount_sats;
-
-    const { setPaid } = window.__bcLaunchPaymentModal({
-      invoice: bolt11,
-      onPaid: ({ preimage }) => {
-        clearAllPolls();
-        confirmVoteAfterPay(eventId, direction, data.token, payHash, amountSats);
-      },
-      onCancelled: () => {
-        clearAllPolls();
-        cancelVote(eventId);
-      },
-    });
-
-    // Poll server-side for external payments
-    const iv = setInterval(async () => {
-      try {
-        const resp = await fetch(`/api/v1/payments/status?payment_hash=${payHash}`);
-        const s = await resp.json();
-        if (s.paid) {
-          clearInterval(iv);
-          allPollTimers = allPollTimers.filter(t => t !== iv);
-          setPaid({ preimage: 'server-confirmed' });
-          confirmVoteAfterPay(eventId, direction, data.token, payHash, amountSats);
-        }
-      } catch (e) {}
-    }, 3000);
-    allPollTimers.push(iv);
-    return;
-  }
-
-  // Fallback: inline payment widget (no Bitcoin Connect, or Tempo-only)
+  // Show inline payment widget with method tabs
   const prompt = document.getElementById(`vote-prompt-${eventId}`);
 
   let html = `<div id="vote-pay-${eventId}" class="mt-2 p-2 rounded text-xs b-accent">`;
@@ -778,6 +763,9 @@ function showVotePayment(eventId, direction, data) {
 
   if (hasLightning) {
     html += `<div id="vpay-ln-${eventId}">`;
+    if (window.__bcLaunchPaymentModal) {
+      html += `<button class="w-full px-3 py-2 mb-2 rounded text-xs font-bold" style="background: var(--accent); color: #000;" onclick="launchBCForVote('${eventId}', ${direction}, '${data.token}', '${data.lightning.payment_hash}', ${data.lightning.amount_sats}, '${data.lightning.bolt11}')">&#9889; Pay with Bitcoin Connect</button>`;
+    }
     html += `<div class="flex items-center gap-1 mb-1"><code class="break-all">${data.lightning.bolt11.slice(0,40)}...</code>`;
     html += `<span class="copy-btn" onclick="navigator.clipboard.writeText('${data.lightning.bolt11}')">[copy]</span></div>`;
     html += `<p class="c-dim">${data.lightning.amount_sats} sats. Polling for payment...</p>`;
