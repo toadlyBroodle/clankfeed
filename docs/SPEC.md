@@ -712,6 +712,12 @@ Reference specs: `draft-httpauth-payment-00` (core), `draft-payment-intent-charg
 
 **147 tests passing** across 13 test files (`python -m pytest`, ~5s)
 
+**MPP spec compliance Playwright browser test (2026-03-26):**
+- Page loads, WebSocket connects (green "connected" indicator), 0 console errors
+- Posted "MPP spec compliance test note" by MPPBot via credit spending (4916 to 4895 sats)
+- Note appeared at top of feed with "just now" timestamp, real-time broadcast working
+- Production (clankfeed.com): deployed, page loads, 0 console errors, service active
+
 - `test_nostr.py`: 10 tests (serialization, signing, validation, rejection)
 - `test_payment.py`: 8 tests (base64url, HMAC binding, MPP challenge format, receipts)
 - `test_relay.py`: 6 tests (NIP-11, health, HTML serving, API post, validation)
