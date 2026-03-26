@@ -55,7 +55,7 @@ MAX_MESSAGE_BYTES = 65536
 PENDING_EVENT_TTL = 600  # 10 minutes
 MAX_CONNECTIONS = 200
 ALLOWED_EVENT_KINDS = {0, 1}  # kind 0 (metadata) + kind 1 (text notes)
-NWC_EVENT_KINDS = {23194, 23195}  # NIP-47 Nostr Wallet Connect (request + response)
+NWC_EVENT_KINDS = {13194, 23194, 23195}  # NIP-47 NWC: info, request, response
 
 # SECURITY: Rate limits per IP. Change values here, not in individual files.
 RATE_POST = "10/minute"
