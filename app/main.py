@@ -231,7 +231,6 @@ def _custom_openapi():
 
             if route_key in paid_routes:
                 operation["x-payment-info"] = {
-                    "authMode": "paid",
                     "protocols": ["mpp"],
                     "pricingMode": "fixed",
                     "price": paid_routes[route_key],
@@ -240,16 +239,14 @@ def _custom_openapi():
                     "description": "Payment Required"
                 }
                 if route_key in apikey_paid_routes:
-                    operation["x-payment-info"]["authMode"] = "apiKey+paid"
                     operation["security"] = [{"AccountKey": []}]
 
             elif route_key in apikey_routes:
-                operation["x-payment-info"] = {"authMode": "apiKey"}
                 operation["security"] = [{"AccountKey": []}]
 
             else:
-                # Free endpoint
-                operation["x-payment-info"] = {"authMode": "none"}
+                # Free endpoint: explicitly no auth
+                operation["security"] = []
 
     app.openapi_schema = schema
     return schema
