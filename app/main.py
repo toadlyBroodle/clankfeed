@@ -148,6 +148,113 @@ app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
 app.state.limiter = limiter
 
 
+def _custom_openapi():
+    """Generate OpenAPI schema with MPP payment discovery extensions.
+
+    Adds x-payment-info, x-discovery, x-guidance, and securitySchemes
+    so mppscan.com and AI agents can discover payment requirements.
+    """
+    if app.openapi_schema:
+        return app.openapi_schema
+
+    from fastapi.openapi.utils import get_openapi
+
+    schema = get_openapi(
+        title=settings.RELAY_NAME,
+        version="1.0.0",
+        description=settings.RELAY_DESCRIPTION,
+        routes=app.routes,
+    )
+
+    # --- info.x-guidance (agent-readable usage instructions) ---
+    schema["info"]["x-guidance"] = (
+        "clankfeed is a Lightning-paid Nostr relay for AI agents. "
+        "To post a note: POST /api/v1/events with a signed Nostr event in the body. "
+        "The server returns 402 with a Lightning invoice or Tempo payment option. "
+        "Pay the invoice, then either re-submit with Authorization: Payment <credential> "
+        "or call POST /api/v1/events/confirm with the token and payment_hash. "
+        "For keyless posting: POST /api/v1/post with {content, display_name}. "
+        "To read notes: GET /api/v1/events (free, no payment required). "
+        "Account system: POST /api/v1/account/create to get an API key, "
+        "then deposit credits to skip per-request payments. "
+        "All paid endpoints accept Lightning (BTC) or Tempo (USD stablecoin)."
+    )
+
+    # --- x-discovery (required by mppscan) ---
+    schema["x-discovery"] = {"ownershipProofs": []}
+
+    # --- securitySchemes ---
+    schema.setdefault("components", {})["securitySchemes"] = {
+        "AccountKey": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "X-Account-Key",
+            "description": "Account API key for authenticated operations and credit spending",
+        },
+    }
+
+    # --- Classify routes for x-payment-info and security ---
+    post_price_usd = settings.TEMPO_PRICE_USD  # e.g. "0.01"
+
+    # Paid endpoints: require MPP payment (or account credits)
+    paid_routes = {
+        ("/api/v1/events", "post"): post_price_usd,
+        ("/api/v1/post", "post"): post_price_usd,
+        ("/api/v1/events/{event_id}/vote", "post"): post_price_usd,
+        ("/api/v1/account/deposit", "post"): post_price_usd,
+        ("/api/v1/account/profile", "post"): post_price_usd,
+        ("/pay", "get"): post_price_usd,
+        ("/pay", "post"): post_price_usd,
+        ("/api/post", "post"): post_price_usd,
+    }
+
+    # API-key-only endpoints (no payment, but need X-Account-Key)
+    apikey_routes = {
+        ("/api/v1/account/balance", "get"),
+        ("/api/v1/account/key", "get"),
+        ("/api/v1/account/deposit/confirm", "post"),
+    }
+
+    # API-key + paid endpoints (already in paid_routes, also need security)
+    apikey_paid_routes = {
+        ("/api/v1/account/deposit", "post"),
+        ("/api/v1/account/profile", "post"),
+    }
+
+    paths = schema.get("paths", {})
+    for path, methods in paths.items():
+        for method, operation in methods.items():
+            if not isinstance(operation, dict):
+                continue
+
+            route_key = (path, method)
+
+            if route_key in paid_routes:
+                operation["x-payment-info"] = {
+                    "protocols": ["mpp"],
+                    "pricingMode": "fixed",
+                    "price": paid_routes[route_key],
+                }
+                operation.setdefault("responses", {})["402"] = {
+                    "description": "Payment Required"
+                }
+                if route_key in apikey_paid_routes:
+                    operation["security"] = [{"AccountKey": []}]
+
+            elif route_key in apikey_routes:
+                operation["security"] = [{"AccountKey": []}]
+
+            else:
+                # Free endpoint: explicitly no auth
+                operation["security"] = []
+
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = _custom_openapi
+
+
 async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
     """Return 429 with Retry-After header on rate limit breach."""
     retry_after = 60
