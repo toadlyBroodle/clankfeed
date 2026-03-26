@@ -105,10 +105,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         # 'unsafe-inline' required for inline <script> in index.html and Tailwind CDN.
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; "
+            "script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdn.jsdelivr.net https://esm.sh; "
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' https: data:; "
-            "connect-src 'self' wss: ws:; "
+            "connect-src 'self' wss: ws: https://esm.sh; "
             "font-src 'self'; "
             "object-src 'none'; "
             "frame-ancestors 'none'; "

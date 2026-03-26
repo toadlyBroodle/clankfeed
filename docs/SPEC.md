@@ -805,3 +805,63 @@ Reference specs: `draft-httpauth-payment-00` (core), `draft-payment-intent-charg
 10. **Phase 9 browser test**: Custom amount post, reply flow, expand replies, sort by value, value filters [DONE]
 11. **Tempo mainnet test**: Switch to mainnet RPC, verify with real USDC [PENDING]
 12. **Stripe SPT test**: End-to-end with Stripe test keys [PENDING]
+13. **Phase 11 browser test**: Bitcoin Connect modal, wallet connection, Lightning payment via NWC [PENDING]
+
+## Phase 11: Bitcoin Connect Integration (Eliminate Accounts)
+
+### Context
+
+The account/credit system adds complexity (account creation, balance management, deposit flow, API key persistence). Real-time per-transaction Lightning payments are now practical via Bitcoin Connect, a JS library that connects web apps to any Lightning wallet (Alby, LNbits, Zeus, etc.) via WebLN or NWC (Nostr Wallet Connect, NIP-47). After one-time wallet connection, payments are zero-click within budget.
+
+For agents, the existing MPP 402 flow already works without accounts. This phase removes the account system and replaces the payment widget with Bitcoin Connect for the web client.
+
+### How It Works
+
+**Web client (humans):**
+1. User clicks "Post Note" or votes
+2. Server returns 402 with BOLT11 invoice (existing MPP flow)
+3. Bitcoin Connect pays the invoice via connected wallet, returns preimage
+4. Client submits MPP credential with preimage to confirm endpoint
+5. Event stored and broadcast
+
+**First visit:** Bitcoin Connect shows a modal with wallet connector options (NWC URL, Alby, LNbits, etc.). User connects once; connection persisted in localStorage.
+
+**Return visits:** Payment is automatic (zero-click if wallet allows budgeted auto-pay).
+
+**Agents (no change):** Full MPP 402 flow via HTTP. No accounts, no Bitcoin Connect.
+
+### Implementation Steps
+
+#### Phase 11a: Add Bitcoin Connect (alongside existing accounts)
+
+- [ ] Add Bitcoin Connect CDN script to index.html
+- [ ] Initialize Bitcoin Connect with `bc.init({ appName: 'clankfeed' })`
+- [ ] Create `payWithBitcoinConnect(invoice)` helper that calls `bc.launchPaymentModal()` and returns preimage
+- [ ] Create `buildMPPCredential(challenge, preimage)` JS helper for MPP credential construction
+- [ ] Modify post flow: when 402 returned, extract BOLT11 from response, pay via Bitcoin Connect, then confirm with preimage
+- [ ] Modify vote flow: same pattern (pay via Bitcoin Connect instead of QR + polling)
+- [ ] Keep existing account system and QR fallback working alongside Bitcoin Connect
+- [ ] Add "Connect Wallet" button in header (Bitcoin Connect provides this)
+- [ ] Test: post with connected wallet, vote with connected wallet, QR fallback still works
+
+#### Phase 11b: Remove Account System
+
+- [ ] Remove `Account` model from models.py
+- [ ] Remove `app/accounts.py`
+- [ ] Remove account endpoints from api_v1.py (create, balance, deposit, deposit/confirm, key, profile)
+- [ ] Remove `_try_spend_credits()` and all credit-check branches from post/vote handlers
+- [ ] Remove account UI from index.html (Create Account, Login, balance, deposit, profile, logout)
+- [ ] Remove localStorage API key management
+- [ ] Remove `X-Account-Key` header handling
+- [ ] Remove `test_accounts.py`
+- [ ] Update all remaining tests for account-free flows
+- [ ] Clean up database migration code for accounts table
+
+#### Phase 11c: Full MPP Web Client Flow
+
+- [ ] Web client POST `/api/v1/post` returns 402 with `WWW-Authenticate: Payment` header (not just JSON body)
+- [ ] JS parses `WWW-Authenticate` header, extracts BOLT11 from base64url request param
+- [ ] After Bitcoin Connect payment, JS builds full MPP `Authorization: Payment` credential
+- [ ] JS submits credential via POST with Authorization header (true MPP flow, not custom confirm endpoint)
+- [ ] Remove legacy `/api/post/confirm` endpoint (replaced by MPP credential flow)
+- [ ] Tempo tab: keep as manual fallback (paste tx hash) since Bitcoin Connect is Lightning-only

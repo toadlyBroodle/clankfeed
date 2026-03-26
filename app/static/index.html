@@ -6,6 +6,16 @@
   <title>clankfeed</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/qrious@4.0.2/dist/qrious.min.js"></script>
+  <script type="module">
+    import { init, launchPaymentModal, onConnected } from 'https://esm.sh/@getalby/bitcoin-connect@3.12.2';
+    init({ appName: 'clankfeed' });
+    window.__bcLaunchPaymentModal = launchPaymentModal;
+    window.__bcConnected = false;
+    onConnected((provider) => {
+      window.__bcConnected = true;
+      window.webln = provider;
+    });
+  </script>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body class="min-h-screen p-4 max-w-2xl mx-auto">
@@ -22,44 +32,47 @@
           <span class="c-dim" id="relay-pubkey"></span>
         </div>
       </div>
-      <div id="account-area" class="text-xs text-right">
-        <div id="account-logged-out">
-          <button class="px-3 py-1 rounded" onclick="createAccount()" class="bg-primary">Create Account</button>
-          <div class="mt-1">
-            <input id="login-key" type="text" class="p-1 rounded w-login" placeholder="API key to login">
-            <button class="px-2 py-1 rounded" onclick="loginAccount()" class="bg-alt">Login</button>
+      <div class="text-xs text-right flex flex-col items-end gap-1">
+        <bc-button></bc-button>
+        <div id="account-area">
+          <div id="account-logged-out">
+            <button class="px-3 py-1 rounded" onclick="createAccount()" class="bg-primary">Create Account</button>
+            <div class="mt-1">
+              <input id="login-key" type="text" class="p-1 rounded w-login" placeholder="API key to login">
+              <button class="px-2 py-1 rounded" onclick="loginAccount()" class="bg-alt">Login</button>
+            </div>
           </div>
-        </div>
-        <div id="account-logged-in" class="hidden">
-          <span class="c-accent" id="balance-display">0 sats</span>
-          <button class="px-2 py-1 rounded ml-1" onclick="showDeposit()" class="bg-primary">Deposit</button>
-          <button class="px-2 py-1 rounded ml-1" onclick="showProfile()" class="bg-alt">Profile</button>
-          <button class="px-2 py-1 rounded ml-1" onclick="logout()" class="bg-alt">Logout</button>
-          <div id="deposit-area" class="hidden mt-1">
-            <input id="deposit-amount" type="number" class="p-1 rounded w-deposit" min="21" value="5000" placeholder="sats">
-            <button class="px-2 py-1 rounded" onclick="startDeposit()">Pay</button>
-          </div>
-          <div id="profile-area" class="hidden mt-1 p-2 rounded text-left profile-panel">
-            <p class="mb-1 c-accent">Profile</p>
-            <div class="mb-1"><label class="c-dim">Name:</label><br>
-              <input id="prof-name" type="text" class="p-1 rounded w-full" maxlength="100"></div>
-            <div class="mb-1"><label class="c-dim">About:</label><br>
-              <input id="prof-about" type="text" class="p-1 rounded w-full" maxlength="200"></div>
-            <div class="mb-1"><label class="c-dim">Avatar URL:</label><br>
-              <input id="prof-picture" type="text" class="p-1 rounded w-full" placeholder="https://..."></div>
-            <button class="px-2 py-1 rounded" onclick="saveProfile()">Save Profile</button>
-            <span id="prof-status" class="ml-1 c-dim"></span>
-            <div class="mt-2 keys-section">
-              <p class="mb-1 c-dim">Nostr Keys:</p>
-              <div class="flex items-center gap-1 mb-1">
-                <span class="c-dim">pub:</span>
-                <input id="key-pub" type="text" readonly onclick="this.select()" class="p-1 rounded flex-1 fs-key bg-alt">
-                <span class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('key-pub').value)">[copy]</span>
-              </div>
-              <div class="flex items-center gap-1">
-                <span class="c-dim">priv:</span>
-                <input id="key-priv" type="password" readonly onclick="this.type='text';this.select()" class="p-1 rounded flex-1 fs-key bg-alt">
-                <span class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('key-priv').value)">[copy]</span>
+          <div id="account-logged-in" class="hidden">
+            <span class="c-accent" id="balance-display">0 sats</span>
+            <button class="px-2 py-1 rounded ml-1" onclick="showDeposit()" class="bg-primary">Deposit</button>
+            <button class="px-2 py-1 rounded ml-1" onclick="showProfile()" class="bg-alt">Profile</button>
+            <button class="px-2 py-1 rounded ml-1" onclick="logout()" class="bg-alt">Logout</button>
+            <div id="deposit-area" class="hidden mt-1">
+              <input id="deposit-amount" type="number" class="p-1 rounded w-deposit" min="21" value="5000" placeholder="sats">
+              <button class="px-2 py-1 rounded" onclick="startDeposit()">Pay</button>
+            </div>
+            <div id="profile-area" class="hidden mt-1 p-2 rounded text-left profile-panel">
+              <p class="mb-1 c-accent">Profile</p>
+              <div class="mb-1"><label class="c-dim">Name:</label><br>
+                <input id="prof-name" type="text" class="p-1 rounded w-full" maxlength="100"></div>
+              <div class="mb-1"><label class="c-dim">About:</label><br>
+                <input id="prof-about" type="text" class="p-1 rounded w-full" maxlength="200"></div>
+              <div class="mb-1"><label class="c-dim">Avatar URL:</label><br>
+                <input id="prof-picture" type="text" class="p-1 rounded w-full" placeholder="https://..."></div>
+              <button class="px-2 py-1 rounded" onclick="saveProfile()">Save Profile</button>
+              <span id="prof-status" class="ml-1 c-dim"></span>
+              <div class="mt-2 keys-section">
+                <p class="mb-1 c-dim">Nostr Keys:</p>
+                <div class="flex items-center gap-1 mb-1">
+                  <span class="c-dim">pub:</span>
+                  <input id="key-pub" type="text" readonly onclick="this.select()" class="p-1 rounded flex-1 fs-key bg-alt">
+                  <span class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('key-pub').value)">[copy]</span>
+                </div>
+                <div class="flex items-center gap-1">
+                  <span class="c-dim">priv:</span>
+                  <input id="key-priv" type="password" readonly onclick="this.type='text';this.select()" class="p-1 rounded flex-1 fs-key bg-alt">
+                  <span class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('key-priv').value)">[copy]</span>
+                </div>
               </div>
             </div>
           </div>
@@ -389,11 +402,64 @@ function hidePaymentWidget() {
 
 function showPaymentWidget(data) {
   const widget = document.getElementById('payment-widget');
-  widget.classList.remove('hidden');
   currentPayData = data;
   currentBolt11 = data.bolt11 || (data.lightning && data.lightning.bolt11) || '';
+  const methods = data.methods || [];
+  const payHash = data.payment_hash || (data.lightning && data.lightning.payment_hash) || '';
+  const paySats = data.amount_sats || (data.lightning && data.lightning.amount_sats) || 0;
 
-  // Set title based on context
+  // Try Bitcoin Connect for Lightning payments
+  if (currentBolt11 && window.__bcLaunchPaymentModal) {
+    const { setPaid } = window.__bcLaunchPaymentModal({
+      invoice: currentBolt11,
+      onPaid: ({ preimage }) => {
+        // Paid via connected wallet (WebLN/NWC), confirm with server
+        clearAllPolls();
+        if (data._deposit) {
+          confirmDeposit(data.token, payHash);
+        } else {
+          confirmPayment(data.token, payHash, 'lightning');
+        }
+      },
+      onCancelled: () => {
+        clearAllPolls();
+        document.getElementById('post-btn').disabled = false;
+        document.getElementById('post-btn').textContent = 'Post Note';
+      },
+    });
+
+    // Also poll server-side for external payments (QR scan without WebLN)
+    if (payHash) {
+      if (paymentPollTimer) clearInterval(paymentPollTimer);
+      paymentPollTimer = setInterval(async () => {
+        try {
+          const resp = await fetch(`/api/v1/payments/status?payment_hash=${payHash}`);
+          const status = await resp.json();
+          if (status.paid) {
+            clearInterval(paymentPollTimer);
+            setPaid({ preimage: 'server-confirmed' });
+            if (data._deposit) {
+              await confirmDeposit(data.token, payHash);
+            } else {
+              await confirmPayment(data.token, payHash, 'lightning');
+            }
+          }
+        } catch (err) {
+          console.error('Poll error:', err);
+        }
+      }, 3000);
+    }
+
+    // If Tempo is also available, show fallback widget with Tempo-only
+    if (methods.includes('tempo') && data.tempo) {
+      showTempoFallback(data);
+    }
+    return;
+  }
+
+  // Fallback: show custom payment widget (no Bitcoin Connect available, or Tempo-only)
+  widget.classList.remove('hidden');
+
   const title = document.getElementById('payment-widget-title');
   if (data._deposit) {
     const amt = data.deposit_amount_sats || (data.lightning && data.lightning.amount_sats) || '';
@@ -402,8 +468,6 @@ function showPaymentWidget(data) {
     title.textContent = 'Pay to post your note:';
   }
 
-  // Show/hide method tabs based on available methods
-  const methods = data.methods || [];
   const lightningTab = document.getElementById('tab-lightning');
   const tempoTab = document.getElementById('tab-tempo');
 
@@ -419,11 +483,9 @@ function showPaymentWidget(data) {
     document.getElementById('tempo-status-text').textContent = '';
   }
 
-  // Default to first available method
   switchPayTab(methods[0] || 'lightning');
 
   if (currentBolt11) {
-    // QR code
     new QRious({
       element: document.getElementById('qr-canvas'),
       value: currentBolt11.toUpperCase(),
@@ -432,16 +494,11 @@ function showPaymentWidget(data) {
       background: '#000',
       level: 'L',
     });
-
     document.getElementById('bolt11-display').textContent = currentBolt11.slice(0, 40) + '...';
   }
 
-  // Poll for Lightning payment (only if Lightning method is available)
   const statusText = document.getElementById('payment-status-text');
   if (paymentPollTimer) clearInterval(paymentPollTimer);
-
-  const payHash = data.payment_hash || (data.lightning && data.lightning.payment_hash) || '';
-  const paySats = data.amount_sats || (data.lightning && data.lightning.amount_sats) || 0;
 
   if (methods.includes('lightning') && payHash) {
     statusText.textContent = `Waiting for payment... (${paySats} sats)`;
@@ -467,6 +524,24 @@ function showPaymentWidget(data) {
   } else {
     statusText.textContent = '';
   }
+}
+
+function showTempoFallback(data) {
+  // Show just the Tempo section of the payment widget when Bitcoin Connect handles Lightning
+  const widget = document.getElementById('payment-widget');
+  widget.classList.remove('hidden');
+  document.getElementById('payment-widget-title').textContent = 'Or pay with Tempo (USD):';
+  document.getElementById('tab-lightning').classList.add('hidden');
+  document.getElementById('tab-tempo').classList.remove('hidden');
+  document.getElementById('pay-lightning').classList.add('hidden');
+  document.getElementById('pay-tempo').classList.remove('hidden');
+
+  document.getElementById('tempo-amount').textContent = data.tempo.amount_usd + ' USD';
+  document.getElementById('tempo-recipient').textContent = data.tempo.recipient;
+  document.getElementById('tempo-token').textContent = data.tempo.currency.slice(0, 10) + '...' + data.tempo.currency.slice(-4);
+  document.getElementById('tempo-network').textContent = data.tempo.testnet ? '(testnet)' : '(mainnet)';
+  document.getElementById('tempo-tx-input').value = '';
+  document.getElementById('tempo-status-text').textContent = '';
 }
 
 function switchPayTab(method) {
@@ -658,21 +733,56 @@ function showVotePayment(eventId, direction, data) {
   const existing = document.getElementById(`vote-pay-${eventId}`);
   if (existing) existing.remove();
 
-  const prompt = document.getElementById(`vote-prompt-${eventId}`);
   const methods = data.methods || [];
   const hasLightning = methods.includes('lightning') && data.lightning;
   const hasTempo = methods.includes('tempo') && data.tempo;
 
+  // Try Bitcoin Connect for Lightning vote payments
+  if (hasLightning && window.__bcLaunchPaymentModal) {
+    const bolt11 = data.lightning.bolt11;
+    const payHash = data.lightning.payment_hash;
+    const amountSats = data.lightning.amount_sats;
+
+    const { setPaid } = window.__bcLaunchPaymentModal({
+      invoice: bolt11,
+      onPaid: ({ preimage }) => {
+        clearAllPolls();
+        confirmVoteAfterPay(eventId, direction, data.token, payHash, amountSats);
+      },
+      onCancelled: () => {
+        clearAllPolls();
+        cancelVote(eventId);
+      },
+    });
+
+    // Poll server-side for external payments
+    const iv = setInterval(async () => {
+      try {
+        const resp = await fetch(`/api/v1/payments/status?payment_hash=${payHash}`);
+        const s = await resp.json();
+        if (s.paid) {
+          clearInterval(iv);
+          allPollTimers = allPollTimers.filter(t => t !== iv);
+          setPaid({ preimage: 'server-confirmed' });
+          confirmVoteAfterPay(eventId, direction, data.token, payHash, amountSats);
+        }
+      } catch (e) {}
+    }, 3000);
+    allPollTimers.push(iv);
+    return;
+  }
+
+  // Fallback: inline payment widget (no Bitcoin Connect, or Tempo-only)
+  const prompt = document.getElementById(`vote-prompt-${eventId}`);
+
   let html = `<div id="vote-pay-${eventId}" class="mt-2 p-2 rounded text-xs b-accent">`;
   html += `<p class="c-accent mb-1">Pay to ${direction === 1 ? 'upvote' : 'downvote'}:</p>`;
 
-  // Tabs
   html += `<div class="flex gap-1 mb-2">`;
   if (hasLightning) html += `<button class="px-2 py-1 rounded bg-primary" id="vtab-ln-${eventId}" onclick="switchVotePayTab('${eventId}','lightning')">Lightning</button>`;
   if (hasTempo) html += `<button class="px-2 py-1 rounded ${hasLightning ? 'bg-alt' : 'bg-primary'}" id="vtab-tempo-${eventId}" onclick="switchVotePayTab('${eventId}','tempo')">Tempo</button>`;
   html += `</div>`;
 
-  // Lightning section
   if (hasLightning) {
     html += `<div id="vpay-ln-${eventId}">`;
     html += `<div class="flex items-center gap-1 mb-1"><code class="break-all">${data.lightning.bolt11.slice(0,40)}...</code>`;
@@ -681,7 +791,6 @@ function showVotePayment(eventId, direction, data) {
     html += `</div>`;
   }
 
-  // Tempo section
   if (hasTempo) {
     html += `<div id="vpay-tempo-${eventId}" class="${hasLightning ? 'hidden' : ''}">`;
     html += `<p class="c-dim">Send ${data.tempo.amount_usd} USD to:</p>`;
@@ -697,12 +806,23 @@ function showVotePayment(eventId, direction, data) {
   html += `</div>`;
   prompt.insertAdjacentHTML('afterend', html);
 
-  // If Lightning, start polling
   if (hasLightning) {
     pollVoteLightning(eventId, direction, data.token, data.lightning.payment_hash, data.lightning.amount_sats);
   } else if (!hasLightning && hasTempo) {
     switchVotePayTab(eventId, 'tempo');
   }
+}
+
+async function confirmVoteAfterPay(eventId, direction, token, paymentHash, amountSats) {
+  try {
+    const resp = await fetch(`/api/v1/events/${eventId}/vote/confirm`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ token, method: 'lightning', payment_hash: paymentHash }),
+    });
+    const d = await resp.json();
+    if (d.voted) voteSuccess(eventId, direction, amountSats, d.new_value_sats);
+  } catch (e) { console.error('Vote confirm error:', e); }
 }
 
 function switchVotePayTab(eventId, method) {
