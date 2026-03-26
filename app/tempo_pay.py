@@ -18,7 +18,7 @@ import logging
 import httpx
 
 from app.config import settings
-from app.mpp import _b64url_encode, _b64url_decode, _compute_challenge_id, _verify_challenge_id, _MPP_REALM, _CHALLENGE_TTL
+from app.mpp import _b64url_encode, _b64url_decode, _compute_challenge_id, _verify_challenge_id, _format_expires, _MPP_REALM, _CHALLENGE_TTL
 
 import time
 
@@ -30,7 +30,7 @@ _TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df52
 
 def build_tempo_challenge(amount_usd: str, description: str = "") -> str:
     """Build WWW-Authenticate: Payment header for Tempo stablecoin payment."""
-    expires = str(int(time.time()) + _CHALLENGE_TTL)
+    expires = _format_expires()
     method = "tempo"
     intent = "charge"
 

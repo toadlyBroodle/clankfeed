@@ -318,7 +318,7 @@ class TestReplayProtection:
             resp = await tempo_client.post("/api/post/confirm", json={
                 "token": token2, "method": "tempo", "tx_hash": "0x" + "d4" * 32,
             })
-        assert resp.status_code == 401
+        assert resp.status_code == 402
         assert "already consumed" in resp.json()["detail"]
 
     @pytest.mark.asyncio
@@ -354,7 +354,7 @@ class TestReplayProtection:
                 "token": data2["token"], "method": "lightning",
                 "payment_hash": fixed_hash,
             })
-        assert resp.status_code == 401
+        assert resp.status_code == 402
         assert "already consumed" in resp.json()["detail"]
 
 

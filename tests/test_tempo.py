@@ -4,7 +4,7 @@ import json
 import time
 import pytest
 from app.tempo_pay import build_tempo_challenge, extract_tempo_tx_hash
-from app.mpp import _b64url_decode, _verify_challenge_id, _MPP_REALM
+from app.mpp import _b64url_decode, _verify_challenge_id, _format_expires, _MPP_REALM
 
 
 class TestTempoChallenge:
@@ -45,7 +45,7 @@ class TestTempoChallenge:
         # Build a challenge, then check it won't verify with a past expiry
         assert not _verify_challenge_id(
             "fake", _MPP_REALM, "tempo", "charge", "fake_request",
-            str(int(time.time()) - 1),
+            _format_expires(-1),
         )
 
 

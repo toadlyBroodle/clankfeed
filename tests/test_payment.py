@@ -12,6 +12,7 @@ from app.mpp import (
     _b64url_decode,
     _compute_challenge_id,
     _verify_challenge_id,
+    _format_expires,
     _MPP_REALM,
     _MPP_METHOD,
     _MPP_INTENT,
@@ -36,21 +37,20 @@ class TestBase64Url:
 class TestChallengeBinding:
     def test_compute_and_verify(self):
         request_b64 = _b64url_encode(b'{"test": true}')
-        expires = str(int(time.time()) + 600)
+        expires = _format_expires(600)
         cid = _compute_challenge_id(_MPP_REALM, _MPP_METHOD, _MPP_INTENT, request_b64, expires)
-        assert len(cid) == 64  # hex SHA256
+        assert len(cid) == 43  # base64url-encoded HMAC-SHA256 (32 bytes)
         assert _verify_challenge_id(cid, _MPP_REALM, _MPP_METHOD, _MPP_INTENT, request_b64, expires)
 
     def test_tampered_challenge_fails(self):
         request_b64 = _b64url_encode(b'{"test": true}')
-        expires = str(int(time.time()) + 600)
+        expires = _format_expires(600)
         cid = _compute_challenge_id(_MPP_REALM, _MPP_METHOD, _MPP_INTENT, request_b64, expires)
-        # Tamper the id
-        assert not _verify_challenge_id("00" * 32, _MPP_REALM, _MPP_METHOD, _MPP_INTENT, request_b64, expires)
+        assert not _verify_challenge_id("tampered_id_value_here", _MPP_REALM, _MPP_METHOD, _MPP_INTENT, request_b64, expires)
 
     def test_expired_challenge_fails(self):
         request_b64 = _b64url_encode(b'{"test": true}')
-        expires = str(int(time.time()) - 1)  # already expired
+        expires = _format_expires(-1)  # already expired
         cid = _compute_challenge_id(_MPP_REALM, _MPP_METHOD, _MPP_INTENT, request_b64, expires)
         assert not _verify_challenge_id(cid, _MPP_REALM, _MPP_METHOD, _MPP_INTENT, request_b64, expires)
 
@@ -74,6 +74,8 @@ class TestReceipt:
         decoded = _b64url_decode(receipt)
         import json
         data = json.loads(decoded)
-        assert data["status"] == "settled"
+        assert data["status"] == "success"
         assert data["method"] == "lightning"
         assert data["reference"] == "abc123"
+        assert "challengeId" in data
+        assert "T" in data["timestamp"]  # RFC 3339 format

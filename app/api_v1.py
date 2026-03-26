@@ -94,6 +94,7 @@ async def _verify_and_store_paid_event(
 ) -> JSONResponse:
     """Verify an MPP credential, consume payment, store event, broadcast."""
     method = credential.get("challenge", {}).get("method", "")
+    challenge_id = credential.get("challenge", {}).get("id", "")
     if method == "tempo":
         valid = await verify_tempo_credential(credential)
         payment_id = extract_tempo_tx_hash(credential)
@@ -101,16 +102,32 @@ async def _verify_and_store_paid_event(
         valid = verify_mpp_credential(credential)
         payment_id = extract_payment_hash(credential)
     else:
-        return JSONResponse(status_code=401, content={"detail": f"Unsupported payment method: {method}"})
+        return JSONResponse(status_code=402, content={
+            "type": "https://paymentauth.org/problems/method-unsupported",
+            "title": "Unsupported payment method",
+            "detail": f"Method '{method}' is not supported",
+        })
 
     if not valid:
-        return JSONResponse(status_code=401, content={"detail": "Invalid payment proof"})
+        return JSONResponse(status_code=402, content={
+            "type": "https://paymentauth.org/problems/verification-failed",
+            "title": "Verification failed",
+            "detail": "Invalid payment proof",
+        })
     if not payment_id:
-        return JSONResponse(status_code=401, content={"detail": "Missing payment identifier"})
+        return JSONResponse(status_code=402, content={
+            "type": "https://paymentauth.org/problems/verification-failed",
+            "title": "Verification failed",
+            "detail": "Missing payment identifier",
+        })
 
     consumed = await check_and_consume_payment(payment_id, db)
     if not consumed:
-        return JSONResponse(status_code=401, content={"detail": "Payment already consumed"})
+        return JSONResponse(status_code=402, content={
+            "type": "https://paymentauth.org/problems/invalid-challenge",
+            "title": "Invalid challenge",
+            "detail": "Payment already consumed",
+        })
 
     event = json.loads(pending.event_json)
     await store_event(db, event)
@@ -118,11 +135,11 @@ async def _verify_and_store_paid_event(
     await db.commit()
     await broadcast_event(event)
 
-    receipt = build_receipt(payment_id)
+    receipt = build_receipt(payment_id, method=method, challenge_id=challenge_id)
     return JSONResponse(
         status_code=200,
         content={"paid": True, "event": event},
-        headers={"Payment-Receipt": receipt},
+        headers={"Payment-Receipt": receipt, "Cache-Control": "private"},
     )
 
 
@@ -209,7 +226,11 @@ async def submit_event(request: Request, db: AsyncSession = Depends(get_db)):
         if not credential:
             await db.delete(pending)
             await db.commit()
-            return JSONResponse(status_code=401, content={"detail": "Malformed Payment credential"})
+            return JSONResponse(status_code=402, content={
+                "type": "https://paymentauth.org/problems/malformed-credential",
+                "title": "Malformed credential",
+                "detail": "Could not decode Payment credential",
+            })
 
         return await _verify_and_store_paid_event(credential, pending, db)
 
@@ -291,7 +312,11 @@ async def confirm_event(request: Request, db: AsyncSession = Depends(get_db)):
 
     consumed = await check_and_consume_payment(payment_id, db)
     if not consumed:
-        return JSONResponse(status_code=401, content={"detail": "Payment already consumed"})
+        return JSONResponse(status_code=402, content={
+            "type": "https://paymentauth.org/problems/invalid-challenge",
+            "title": "Invalid challenge",
+            "detail": "Payment already consumed",
+        })
 
     event = json.loads(pending.event_json)
     v_usd = pending.amount_usd or settings.TEMPO_PRICE_USD
@@ -673,7 +698,11 @@ async def confirm_vote(request: Request, event_id: str, db: AsyncSession = Depen
 
     consumed = await check_and_consume_payment(payment_id, db)
     if not consumed:
-        return JSONResponse(status_code=401, content={"detail": "Payment already consumed"})
+        return JSONResponse(status_code=402, content={
+            "type": "https://paymentauth.org/problems/invalid-challenge",
+            "title": "Invalid challenge",
+            "detail": "Payment already consumed",
+        })
 
     # Parse vote data from pending
     vote_data = json.loads(pending.event_json)
@@ -875,7 +904,11 @@ async def account_deposit_confirm(request: Request, db: AsyncSession = Depends(g
 
     consumed = await check_and_consume_payment(payment_id, db)
     if not consumed:
-        return JSONResponse(status_code=401, content={"detail": "Payment already consumed"})
+        return JSONResponse(status_code=402, content={
+            "type": "https://paymentauth.org/problems/invalid-challenge",
+            "title": "Invalid challenge",
+            "detail": "Payment already consumed",
+        })
 
     # Add credits (convert USD to sats at spot for Tempo)
     dep_usd = pending.amount_usd or "0"

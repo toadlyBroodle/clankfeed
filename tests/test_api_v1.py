@@ -212,7 +212,7 @@ class TestConfirmEvent:
             resp = await agent_client.post("/api/v1/events/confirm", json={
                 "token": t2, "method": "tempo", "tx_hash": "0x" + "cd" * 32,
             })
-        assert resp.status_code == 401
+        assert resp.status_code == 402
 
 
 # ---------------------------------------------------------------------------

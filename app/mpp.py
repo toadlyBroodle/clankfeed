@@ -19,6 +19,7 @@ import hmac
 import json
 import logging
 import time
+from datetime import datetime, timezone, timedelta
 
 from app.config import settings
 
@@ -55,6 +56,18 @@ def _get_mpp_secret() -> str:
     return f"mpp:{settings.AUTH_ROOT_KEY}"
 
 
+def _format_expires(ttl_seconds: int = _CHALLENGE_TTL) -> str:
+    """Return RFC 3339 expiry timestamp (UTC)."""
+    dt = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_expires(expires: str) -> float:
+    """Parse an RFC 3339 expires string to Unix timestamp."""
+    dt = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+    return dt.timestamp()
+
+
 def _compute_challenge_id(
     realm: str,
     method: str,
@@ -62,14 +75,14 @@ def _compute_challenge_id(
     request_b64: str,
     expires: str,
 ) -> str:
-    """HMAC-SHA256 over pipe-delimited challenge fields (per spec)."""
-    message = f"{realm}|{method}|{intent}|{request_b64}|{expires}"
+    """HMAC-SHA256 over pipe-delimited challenge fields (7 slots per spec)."""
+    message = f"{realm}|{method}|{intent}|{request_b64}|{expires}||"
     mac = hmac.new(
         _get_mpp_secret().encode(),
         message.encode(),
         hashlib.sha256,
     )
-    return mac.hexdigest()
+    return _b64url_encode(mac.digest())
 
 
 def _verify_challenge_id(
@@ -85,7 +98,7 @@ def _verify_challenge_id(
     if not hmac.compare_digest(challenge_id, expected):
         return False
     try:
-        if float(expires) < time.time():
+        if _parse_expires(expires) < time.time():
             return False
     except (ValueError, TypeError):
         return False
@@ -104,11 +117,11 @@ def build_mpp_challenge(
     description: str = "",
 ) -> str:
     """Build the WWW-Authenticate: Payment header value."""
-    expires = str(int(time.time()) + _CHALLENGE_TTL)
+    expires = _format_expires()
 
     request_obj = {
         "amount": str(amount_sats),
-        "currency": "BTC",
+        "currency": "sat",
         "recipient": _MPP_REALM,
         "methodDetails": {
             "invoice": invoice,
@@ -187,6 +200,9 @@ def verify_mpp_credential(credential: dict) -> bool:
         if not payment_hash:
             return False
 
+        if len(preimage_hex) != 64 or preimage_hex != preimage_hex.lower():
+            return False
+
         preimage_bytes = bytes.fromhex(preimage_hex)
         computed_hash = hashlib.sha256(preimage_bytes).hexdigest()
         return hmac.compare_digest(computed_hash, payment_hash.lower())
@@ -210,12 +226,14 @@ def extract_payment_hash(credential: dict) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def build_receipt(payment_hash: str) -> str:
+def build_receipt(payment_hash: str, method: str = _MPP_METHOD, challenge_id: str = "") -> str:
     """Build base64url-encoded Payment-Receipt JSON."""
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     receipt = {
-        "status": "settled",
-        "method": _MPP_METHOD,
-        "timestamp": int(time.time()),
+        "status": "success",
+        "method": method,
+        "challengeId": challenge_id,
+        "timestamp": ts,
         "reference": payment_hash,
     }
     return _b64url_encode(json.dumps(receipt, separators=(",", ":")).encode())

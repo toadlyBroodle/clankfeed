@@ -104,14 +104,23 @@ async def pay_post(request: Request, token: str, db: AsyncSession = Depends(get_
 
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Payment "):
-        return JSONResponse(status_code=401, content={"detail": "Missing Payment authorization"})
+        return JSONResponse(status_code=402, content={
+            "type": "https://paymentauth.org/problems/malformed-credential",
+            "title": "Missing Payment authorization",
+            "detail": "Authorization header must start with 'Payment '",
+        })
 
     credential = parse_mpp_credential(auth)
     if not credential:
-        return JSONResponse(status_code=401, content={"detail": "Malformed Payment credential"})
+        return JSONResponse(status_code=402, content={
+            "type": "https://paymentauth.org/problems/malformed-credential",
+            "title": "Malformed credential",
+            "detail": "Could not decode Payment credential",
+        })
 
     # Route verification by payment method
     method = credential.get("challenge", {}).get("method", "")
+    challenge_id = credential.get("challenge", {}).get("id", "")
     if method == "tempo":
         valid = await verify_tempo_credential(credential)
         payment_id = extract_tempo_tx_hash(credential)
@@ -119,17 +128,33 @@ async def pay_post(request: Request, token: str, db: AsyncSession = Depends(get_
         valid = verify_mpp_credential(credential)
         payment_id = extract_payment_hash(credential)
     else:
-        return JSONResponse(status_code=401, content={"detail": f"Unsupported payment method: {method}"})
+        return JSONResponse(status_code=402, content={
+            "type": "https://paymentauth.org/problems/method-unsupported",
+            "title": "Unsupported payment method",
+            "detail": f"Method '{method}' is not supported",
+        })
 
     if not valid:
-        return JSONResponse(status_code=401, content={"detail": "Invalid payment proof"})
+        return JSONResponse(status_code=402, content={
+            "type": "https://paymentauth.org/problems/verification-failed",
+            "title": "Verification failed",
+            "detail": "Invalid payment proof",
+        })
 
     if not payment_id:
-        return JSONResponse(status_code=401, content={"detail": "Missing payment identifier"})
+        return JSONResponse(status_code=402, content={
+            "type": "https://paymentauth.org/problems/verification-failed",
+            "title": "Verification failed",
+            "detail": "Missing payment identifier",
+        })
 
     consumed = await check_and_consume_payment(payment_id, db)
     if not consumed:
-        return JSONResponse(status_code=401, content={"detail": "Payment already consumed"})
+        return JSONResponse(status_code=402, content={
+            "type": "https://paymentauth.org/problems/invalid-challenge",
+            "title": "Invalid challenge",
+            "detail": "Payment already consumed",
+        })
 
     # Store the event
     event = json.loads(pending.event_json)
@@ -142,11 +167,11 @@ async def pay_post(request: Request, token: str, db: AsyncSession = Depends(get_
     # Broadcast to WebSocket subscribers
     await broadcast_event(event)
 
-    receipt = build_receipt(payment_id)
+    receipt = build_receipt(payment_id, method=method, challenge_id=challenge_id)
     return JSONResponse(
         status_code=200,
         content={"event": event},
-        headers={"Payment-Receipt": receipt},
+        headers={"Payment-Receipt": receipt, "Cache-Control": "private"},
     )
 
 
@@ -284,7 +309,11 @@ async def api_post_confirm(request: Request, db: AsyncSession = Depends(get_db))
     # Consume payment (replay protection)
     consumed = await check_and_consume_payment(payment_id, db)
     if not consumed:
-        return JSONResponse(status_code=401, content={"detail": "Payment already consumed"})
+        return JSONResponse(status_code=402, content={
+            "type": "https://paymentauth.org/problems/invalid-challenge",
+            "title": "Invalid challenge",
+            "detail": "Payment already consumed",
+        })
 
     # Store the event
     event = json.loads(pending.event_json)
