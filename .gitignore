@@ -5,9 +5,7 @@ __pycache__/
 .venv/
 venv/
 .env
-db/*.db
-db/*.db-wal
-db/*.db-shm
+db/
 *.egg-info/
 dist/
 build/
@@ -16,3 +14,4 @@ build/
 deploy/
 screenshot*.png
 docs/
+CLAUDE.md

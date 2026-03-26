@@ -135,6 +135,40 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   border: 1px solid var(--accent);
 }
 
+/* Reply UI */
+.reply-btn {
+  color: var(--dim);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  font-family: inherit;
+}
+.reply-btn:hover { color: var(--accent); background: none; }
+
+.reply-indicator {
+  cursor: pointer;
+  padding-left: 2px;
+}
+.reply-indicator:hover { color: var(--accent); }
+
+.reply-card {
+  border-left: 2px solid var(--border);
+  margin-left: 8px;
+  margin-top: 4px;
+}
+.reply-card:hover { border-left-color: var(--accent); }
+
+.replies-container {
+  margin-left: 32px;
+  margin-top: 4px;
+}
+
+/* Filter controls */
+.filter-group { white-space: nowrap; }
+.w-filter { width: 72px; font-size: 11px; }
+.w-amount { width: 72px; }
+
 /* QR code */
 #qr-canvas { image-rendering: pixelated; }
 

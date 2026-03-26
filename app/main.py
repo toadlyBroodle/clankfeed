@@ -241,6 +241,9 @@ def _nip11_response():
             }} if tempo_enabled() else {}),
         },
     }
+    http_base = settings.BASE_URL.replace("wss://", "https://").replace("ws://", "http://")
+    doc["terms_of_service"] = f"{http_base}/terms"
+    doc["privacy_policy"] = f"{http_base}/privacy"
     if _relay_pubkey:
         doc["pubkey"] = _relay_pubkey
     if settings.RELAY_CONTACT:
@@ -252,6 +255,16 @@ def _nip11_response():
             "Content-Type": "application/nostr+json",
         },
     )
+
+
+@app.get("/terms")
+async def terms():
+    return FileResponse(STATIC_DIR / "terms.html")
+
+
+@app.get("/privacy")
+async def privacy():
+    return FileResponse(STATIC_DIR / "privacy.html")
 
 
 @app.get("/favicon.ico")
