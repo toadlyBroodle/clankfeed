@@ -52,7 +52,8 @@ def verify_signature(event: dict) -> bool:
 
         pk = PublicKeyXOnly(pubkey_bytes)
         return pk.verify(sig_bytes, msg_bytes)
-    except Exception:
+    except Exception as e:
+        logger.warning("Signature verification failed: %s", e)
         return False
 
 

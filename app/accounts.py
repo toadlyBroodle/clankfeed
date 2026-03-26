@@ -50,8 +50,9 @@ async def create_account(db: AsyncSession, pubkey: str = "", nostr_privkey: str 
             existing = await get_account_by_nostr_pubkey(db, derived_pubkey)
             if existing:
                 return existing
-        except Exception:
+        except Exception as e:
             # Invalid key, generate fresh
+            logger.warning("Invalid Nostr private key provided, generating fresh: %s", e)
             nostr_privkey, derived_pubkey = _generate_nostr_keypair()
     else:
         nostr_privkey, derived_pubkey = _generate_nostr_keypair()
@@ -96,9 +97,11 @@ async def deposit_credits(db: AsyncSession, api_key: str, amount_sats: int, amou
     acct.balance_sats = (acct.balance_sats or 0) + amount_sats
     try:
         acct.balance_usd = str(float(acct.balance_usd or "0") + float(amount_usd))
-    except (ValueError, TypeError):
-        pass
+    except (ValueError, TypeError) as e:
+        logger.warning("Failed to update USD balance: %s", e)
     await db.commit()
+    logger.info("Credits deposited: account=%s amount=%d sats balance=%d sats",
+                api_key[:12], amount_sats, acct.balance_sats or 0)
     return acct
 
 
@@ -111,7 +114,11 @@ async def spend_credits(db: AsyncSession, api_key: str, amount_sats: int) -> tup
     if not acct:
         return False, 0
     if (acct.balance_sats or 0) < amount_sats:
+        logger.info("Insufficient credits: account=%s balance=%d required=%d",
+                    api_key[:12], acct.balance_sats or 0, amount_sats)
         return False, acct.balance_sats or 0
     acct.balance_sats = (acct.balance_sats or 0) - amount_sats
     await db.commit()
+    logger.info("Credits spent: account=%s amount=%d sats remaining=%d sats",
+                api_key[:12], amount_sats, acct.balance_sats)
     return True, acct.balance_sats

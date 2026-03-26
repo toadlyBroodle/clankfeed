@@ -64,8 +64,8 @@ async def _error_402_with_challenge(
                 invoice_data["payment_request"], description,
             )
             response.headers.append("WWW-Authenticate", challenge)
-        except Exception:
-            logger.debug("Could not generate Lightning challenge for error 402")
+        except Exception as e:
+            logger.warning("Could not generate Lightning challenge for error 402: %s", e)
 
     if tempo_enabled():
         tempo_challenge = build_tempo_challenge(usd, description)
@@ -198,7 +198,8 @@ async def submit_event(request: Request, db: AsyncSession = Depends(get_db)):
     """
     try:
         body = await request.json()
-    except Exception:
+    except Exception as e:
+        logger.warning("Invalid JSON body: %s", e)
         return JSONResponse(status_code=400, content={"detail": "Invalid JSON body"})
 
     event = body.get("event")
@@ -238,7 +239,8 @@ async def submit_event(request: Request, db: AsyncSession = Depends(get_db)):
     try:
         if float(req_usd) < float(settings.TEMPO_PRICE_USD):
             req_usd = settings.TEMPO_PRICE_USD
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logger.warning("Invalid USD amount, using default: %s", e)
         req_usd = settings.TEMPO_PRICE_USD
 
     # No payment configured: store directly with minimum value
@@ -313,7 +315,8 @@ async def confirm_event(request: Request, db: AsyncSession = Depends(get_db)):
     """
     try:
         body = await request.json()
-    except Exception:
+    except Exception as e:
+        logger.warning("Invalid JSON body: %s", e)
         return JSONResponse(status_code=400, content={"detail": "Invalid JSON body"})
 
     token = body.get("token", "")
@@ -370,6 +373,8 @@ async def confirm_event(request: Request, db: AsyncSession = Depends(get_db)):
     await db.delete(pending)
     await db.commit()
     await broadcast_event(event)
+    logger.info("Event confirmed (paid): id=%s method=%s value=%d sats",
+                event["id"][:12], method, v_sats)
 
     return {"paid": True, "event": event, "value_sats": v_sats}
 
@@ -405,7 +410,8 @@ async def read_events(
     if kinds:
         try:
             filt["kinds"] = [int(k) for k in kinds.split(",") if k.strip()]
-        except ValueError:
+        except ValueError as e:
+            logger.warning("Invalid kinds parameter: %s", e)
             return JSONResponse(status_code=400, content={"detail": "kinds must be comma-separated integers"})
     if authors:
         filt["authors"] = [a.strip() for a in authors.split(",") if a.strip()]
@@ -454,7 +460,8 @@ async def relay_post(request: Request, db: AsyncSession = Depends(get_db)):
     """
     try:
         body = await request.json()
-    except Exception:
+    except Exception as e:
+        logger.warning("Invalid JSON body: %s", e)
         return JSONResponse(status_code=400, content={"detail": "Invalid JSON body"})
 
     content = body.get("content", "").strip()
@@ -501,7 +508,8 @@ async def relay_post(request: Request, db: AsyncSession = Depends(get_db)):
     try:
         if float(req_usd) < float(settings.TEMPO_PRICE_USD):
             req_usd = settings.TEMPO_PRICE_USD
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logger.warning("Invalid USD amount, using default: %s", e)
         req_usd = settings.TEMPO_PRICE_USD
 
     # No payment configured: store directly
@@ -619,7 +627,8 @@ async def vote_event(request: Request, event_id: str, db: AsyncSession = Depends
 
     try:
         body = await request.json()
-    except Exception:
+    except Exception as e:
+        logger.warning("Invalid JSON body: %s", e)
         return JSONResponse(status_code=400, content={"detail": "Invalid JSON body"})
 
     direction = body.get("direction", 1)
@@ -635,7 +644,8 @@ async def vote_event(request: Request, event_id: str, db: AsyncSession = Depends
     try:
         if float(req_usd) < float(settings.TEMPO_PRICE_USD):
             req_usd = settings.TEMPO_PRICE_USD
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logger.warning("Invalid USD amount, using default: %s", e)
         req_usd = settings.TEMPO_PRICE_USD
 
     # Build a synthetic pending event for the vote (reuses payment flow)
@@ -661,6 +671,8 @@ async def vote_event(request: Request, event_id: str, db: AsyncSession = Depends
         db.add(vote)
         row.value_sats = (row.value_sats or 0) + (direction * req_sats)
         await db.commit()
+        logger.info("Vote recorded (free): event=%s dir=%+d amount=%d sats new_value=%d",
+                    event_id[:12], direction, req_sats, row.value_sats)
         return {"voted": True, "direction": direction, "amount_sats": req_sats, "new_value_sats": row.value_sats}
 
     # Try spending credits
@@ -679,6 +691,8 @@ async def vote_event(request: Request, event_id: str, db: AsyncSession = Depends
         db.add(vote)
         row.value_sats = (row.value_sats or 0) + (direction * req_sats)
         await db.commit()
+        logger.info("Vote recorded (credits): event=%s dir=%+d amount=%d sats new_value=%d account=%s",
+                    event_id[:12], direction, req_sats, row.value_sats, api_key[:12])
         return {"voted": True, "direction": direction, "amount_sats": req_sats, "new_value_sats": row.value_sats, "credits_used": True}
 
     # Store vote intent as pending event (reuse PendingEvent table)
@@ -727,7 +741,8 @@ async def confirm_vote(request: Request, event_id: str, db: AsyncSession = Depen
     """
     try:
         body = await request.json()
-    except Exception:
+    except Exception as e:
+        logger.warning("Invalid JSON body: %s", e)
         return JSONResponse(status_code=400, content={"detail": "Invalid JSON body"})
 
     token = body.get("token", "")
@@ -801,6 +816,8 @@ async def confirm_vote(request: Request, event_id: str, db: AsyncSession = Depen
     row.value_sats = (row.value_sats or 0) + (direction * v_sats)
     await db.delete(pending)
     await db.commit()
+    logger.info("Vote confirmed (paid): event=%s dir=%+d amount=%d sats method=%s new_value=%d",
+                event_id[:12], direction, v_sats, method, row.value_sats)
 
     return {
         "voted": True,
@@ -825,7 +842,8 @@ async def account_create(request: Request, db: AsyncSession = Depends(get_db)):
     """
     try:
         body = await request.json()
-    except Exception:
+    except Exception as e:
+        logger.warning("Invalid JSON in account create (using empty body): %s", e)
         body = {}
 
     pubkey = body.get("pubkey", "")
@@ -881,7 +899,8 @@ async def account_deposit(request: Request, db: AsyncSession = Depends(get_db)):
 
     try:
         body = await request.json()
-    except Exception:
+    except Exception as e:
+        logger.warning("Invalid JSON body: %s", e)
         return JSONResponse(status_code=400, content={"detail": "Invalid JSON body"})
 
     req_sats = body.get("amount_sats", settings.POST_PRICE_SATS)
@@ -933,7 +952,8 @@ async def account_deposit_confirm(request: Request, db: AsyncSession = Depends(g
 
     try:
         body = await request.json()
-    except Exception:
+    except Exception as e:
+        logger.warning("Invalid JSON body: %s", e)
         return JSONResponse(status_code=400, content={"detail": "Invalid JSON body"})
 
     token = body.get("token", "")
@@ -987,6 +1007,8 @@ async def account_deposit_confirm(request: Request, db: AsyncSession = Depends(g
 
     await db.delete(pending)
     await db.commit()
+    logger.info("Deposit confirmed: account=%s amount=%d sats method=%s balance=%d sats",
+                api_key[:12], dep_sats, method, acct.balance_sats or 0)
 
     return {
         "deposited": True,
@@ -1042,7 +1064,8 @@ async def account_update_profile(request: Request, db: AsyncSession = Depends(ge
 
     try:
         body = await request.json()
-    except Exception:
+    except Exception as e:
+        logger.warning("Invalid JSON body: %s", e)
         return JSONResponse(status_code=400, content={"detail": "Invalid JSON body"})
 
     # Build kind:0 metadata content

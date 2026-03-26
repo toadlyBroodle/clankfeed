@@ -393,7 +393,7 @@ async def websocket_relay(ws: WebSocket):
             async with async_session() as db:
                 await handle_message(conn, raw, db)
     except WebSocketDisconnect:
-        pass
+        logger.debug("WebSocket client disconnected")
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
     finally:

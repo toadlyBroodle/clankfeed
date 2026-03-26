@@ -40,6 +40,7 @@
             <div class="mt-1">
               <input id="login-key" type="text" class="p-1 rounded w-login" placeholder="API key to login">
               <button class="px-2 py-1 rounded" onclick="loginAccount()" class="bg-alt">Login</button>
+              <span id="login-error" class="c-error text-xs hidden"></span>
             </div>
           </div>
           <div id="account-logged-in" class="hidden">
@@ -1092,12 +1093,30 @@ function showApiKey(key) {
   loggedIn.insertAdjacentHTML('beforeend', html);
 }
 
-function loginAccount() {
+async function loginAccount() {
   const key = document.getElementById('login-key').value.trim();
+  const errEl = document.getElementById('login-error');
+  errEl.classList.add('hidden');
+  errEl.textContent = '';
   if (!key) return;
-  apiKey = key;
-  localStorage.setItem('clankfeed_api_key', apiKey);
-  updateAccountUI();
+
+  try {
+    const resp = await fetch('/api/v1/account/balance', {
+      headers: {'X-Account-Key': key},
+    });
+    if (!resp.ok) {
+      const data = await resp.json();
+      errEl.textContent = data.detail || 'Invalid API key';
+      errEl.classList.remove('hidden');
+      return;
+    }
+    apiKey = key;
+    localStorage.setItem('clankfeed_api_key', apiKey);
+    updateAccountUI();
+  } catch (err) {
+    errEl.textContent = 'Login failed';
+    errEl.classList.remove('hidden');
+  }
 }
 
 function logout() {
@@ -1145,7 +1164,7 @@ async function showProfile() {
   document.getElementById('deposit-area').classList.add('hidden');
 
   if (!profArea.classList.contains('hidden')) {
-    // Load keys
+    // Load keys and populate profile fields
     try {
       const resp = await fetch('/api/v1/account/key', {
         headers: {'X-Account-Key': apiKey},
@@ -1153,6 +1172,13 @@ async function showProfile() {
       const data = await resp.json();
       document.getElementById('key-pub').value = data.nostr_pubkey || '';
       document.getElementById('key-priv').value = data.nostr_privkey || '';
+
+      const meta = metadataCache[data.nostr_pubkey];
+      if (meta) {
+        document.getElementById('prof-name').value = meta.name || meta.display_name || '';
+        document.getElementById('prof-about').value = meta.about || '';
+        document.getElementById('prof-picture').value = meta.picture || '';
+      }
     } catch (e) {}
   }
 }

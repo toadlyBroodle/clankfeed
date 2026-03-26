@@ -100,7 +100,8 @@ def _verify_challenge_id(
     try:
         if _parse_expires(expires) < time.time():
             return False
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logger.warning("Invalid challenge expiry format: %s", e)
         return False
     return True
 
@@ -161,7 +162,8 @@ def parse_mpp_credential(auth_value: str) -> dict | None:
         token = auth_value.split(" ", 1)[1]
         decoded = _b64url_decode(token)
         return json.loads(decoded)
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed to parse MPP credential: %s", e)
         return None
 
 
@@ -207,7 +209,8 @@ def verify_mpp_credential(credential: dict) -> bool:
         computed_hash = hashlib.sha256(preimage_bytes).hexdigest()
         return hmac.compare_digest(computed_hash, payment_hash.lower())
 
-    except Exception:
+    except Exception as e:
+        logger.warning("MPP credential verification error: %s", e)
         return False
 
 
@@ -217,7 +220,8 @@ def extract_payment_hash(credential: dict) -> str | None:
         request_b64 = credential.get("challenge", {}).get("request", "")
         request_json = json.loads(_b64url_decode(request_b64))
         return request_json.get("methodDetails", {}).get("paymentHash", "")
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed to extract payment hash: %s", e)
         return None
 
 

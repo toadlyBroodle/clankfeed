@@ -27,7 +27,8 @@ async def check_payment_status(payment_hash: str) -> bool:
             if resp.status_code != 200:
                 return False
             return resp.json().get("paid", False)
-    except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPError):
+    except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPError) as e:
+        logger.warning("LNBits payment status check failed: %s", e)
         return False
 
 
@@ -36,8 +37,10 @@ async def check_and_consume_payment(payment_hash: str, db: AsyncSession) -> bool
     try:
         db.add(ConsumedPayment(payment_hash=payment_hash))
         await db.flush()
+        logger.info("Payment consumed: hash=%s", payment_hash[:16])
         return True
-    except IntegrityError:
+    except IntegrityError as e:
+        logger.warning("Payment replay detected (hash already consumed): %s", e)
         await db.rollback()
         return False
 
@@ -55,9 +58,11 @@ async def create_invoice(amount_sats: int, memo: str = "clankfeed note posting")
                 json={"out": False, "amount": amount_sats, "memo": memo},
             )
             resp.raise_for_status()
-    except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPError):
+    except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPError) as e:
+        logger.error("LNBits invoice creation failed: %s", e)
         raise HTTPException(status_code=502, detail="Payment service unavailable")
     data = resp.json()
+    logger.info("Invoice created: %d sats hash=%s", amount_sats, data["payment_hash"][:16])
     return {
         "payment_hash": data["payment_hash"],
         "payment_request": data["payment_request"],

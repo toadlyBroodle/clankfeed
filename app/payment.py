@@ -56,8 +56,8 @@ async def _error_402_with_challenge(
                 invoice_data["payment_request"], description,
             )
             response.headers.append("WWW-Authenticate", challenge)
-        except Exception:
-            logger.debug("Could not generate Lightning challenge for error 402")
+        except Exception as e:
+            logger.warning("Could not generate Lightning challenge for error 402: %s", e)
 
     if tempo_enabled():
         tempo_challenge = build_tempo_challenge(settings.TEMPO_PRICE_USD, description)
@@ -200,6 +200,8 @@ async def pay_post(request: Request, token: str, db: AsyncSession = Depends(get_
 
     # Broadcast to WebSocket subscribers
     await broadcast_event(event)
+    logger.info("Payment confirmed (legacy): event=%s method=%s payment=%s",
+                event["id"][:12], method, payment_id[:16])
 
     receipt = build_receipt(payment_id, method=method, challenge_id=challenge_id)
     return JSONResponse(
@@ -226,7 +228,8 @@ async def api_post(request: Request, db: AsyncSession = Depends(get_db)):
     """
     try:
         body = await request.json()
-    except Exception:
+    except Exception as e:
+        logger.warning("Invalid JSON body: %s", e)
         return JSONResponse(status_code=400, content={"detail": "Invalid JSON body"})
 
     content = body.get("content", "").strip()
@@ -304,7 +307,8 @@ async def api_post_confirm(request: Request, db: AsyncSession = Depends(get_db))
     """
     try:
         body = await request.json()
-    except Exception:
+    except Exception as e:
+        logger.warning("Invalid JSON body: %s", e)
         return JSONResponse(status_code=400, content={"detail": "Invalid JSON body"})
 
     token = body.get("token", "")
@@ -359,5 +363,7 @@ async def api_post_confirm(request: Request, db: AsyncSession = Depends(get_db))
 
     # Broadcast
     await broadcast_event(event)
+    logger.info("Post confirmed (legacy): event=%s method=%s payment=%s",
+                event["id"][:12], method, payment_id[:16])
 
     return {"event": event, "paid": True}

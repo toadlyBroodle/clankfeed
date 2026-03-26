@@ -54,7 +54,8 @@ async def broadcast_event(event_dict: dict):
             if any(_matches_filter(event_dict, f) for f in filters):
                 try:
                     await conn.send(["EVENT", sub_id, event_dict])
-                except Exception:
+                except Exception as e:
+                    logger.warning("Broadcast to connection failed: %s", e)
                     dead.add(conn)
                 break  # one match per connection is enough
     connections.difference_update(dead)
@@ -205,6 +206,8 @@ async def store_event(db: AsyncSession, event: dict, value_sats: int = 0, value_
     )
     db.add(row)
     await db.commit()
+    logger.info("Event stored: id=%s kind=%d pubkey=%s value=%d sats",
+                event["id"][:12], event["kind"], event["pubkey"][:12], value_sats)
 
 
 async def store_pending_event(
@@ -223,6 +226,7 @@ async def store_pending_event(
     )
     db.add(row)
     await db.commit()
+    logger.info("Pending event stored: token=%s amount=%d sats", token[:12], amount_sats)
     return token
 
 
@@ -234,7 +238,8 @@ async def handle_message(conn: Connection, raw: str, db: AsyncSession):
 
     try:
         msg = json.loads(raw)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        logger.warning("Invalid JSON from WebSocket client: %s", e)
         await conn.send(["NOTICE", "error: invalid JSON"])
         return
 

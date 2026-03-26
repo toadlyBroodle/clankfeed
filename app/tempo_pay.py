@@ -94,7 +94,8 @@ async def verify_tempo_credential(credential: dict) -> bool:
             return False
         try:
             bytes.fromhex(tx_hash[2:])
-        except ValueError:
+        except ValueError as e:
+            logger.warning("Invalid Tempo tx hash hex: %s", e)
             return False
 
         # Decode challenge request to get expected values
@@ -117,7 +118,8 @@ def extract_tempo_tx_hash(credential: dict) -> str | None:
     """Extract the transaction hash from a Tempo credential for replay protection."""
     try:
         return credential.get("payload", {}).get("txHash", "")
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed to extract Tempo tx hash: %s", e)
         return None
 
 
