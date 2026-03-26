@@ -195,6 +195,7 @@ let metadataCache = {};  // pubkey -> {name, about, picture}
 let currentSort = 'newest';
 let apiKey = localStorage.getItem('clankfeed_api_key') || '';
 let allPollTimers = [];  // track all setInterval IDs for cleanup
+let relayPubkey = '';  // set from NIP-11, used to label relay-signed notes as 'anon'
 
 // ---- WebSocket Relay Client ----
 function connect() {
@@ -266,7 +267,7 @@ function renderNotes() {
 
 function renderNoteCard(n, isReply) {
   const displayName = getDisplayName(n);
-  const pk = n.pubkey.slice(0, 8) + '...' + n.pubkey.slice(-4);
+  const pk = (relayPubkey && n.pubkey === relayPubkey) ? 'anon' : n.pubkey.slice(0, 8) + '...' + n.pubkey.slice(-4);
   const timeAgo = relativeTime(n.created_at);
   const pic = getAvatar(n);
   const valueSats = n.value_sats || 0;
@@ -1206,11 +1207,13 @@ fetch('/', { headers: { 'Accept': 'application/nostr+json' }})
   .then(r => r.json())
   .then(info => {
     if (info.pubkey) {
+      relayPubkey = info.pubkey;
       document.getElementById('relay-pubkey').textContent =
         'relay: ' + info.pubkey.slice(0, 12) + '...';
+      renderNotes();  // re-render with 'anon' labels
     }
   })
-  .catch(() => {});
+  .catch(e => console.error('NIP-11 fetch failed:', e));
 </script>
 
 <footer class="mt-8 pt-4 text-xs c-dim text-center" style="border-top: 1px solid var(--border);">
