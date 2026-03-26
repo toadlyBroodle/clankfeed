@@ -123,3 +123,58 @@ async def spend_credits(db: AsyncSession, api_key: str, amount_sats: int) -> tup
     logger.info("Credits spent: account=%s amount=%d sats remaining=%d sats",
                 api_key[:12], amount_sats, acct.balance_sats)
     return True, acct.balance_sats
+
+
+# --- Pubkey-based functions (for NIP-98 auth) ---
+
+async def get_or_create_by_pubkey(db: AsyncSession, pubkey: str) -> Account:
+    """Find an account by nostr_pubkey, or create one with zero balance.
+
+    Used for NIP-98 auth where the client signs with their own key
+    (no server-side private key needed).
+    """
+    acct = await get_account_by_nostr_pubkey(db, pubkey)
+    if acct:
+        return acct
+    # Also check the linked external pubkey field
+    acct = await get_account_by_pubkey(db, pubkey)
+    if acct:
+        return acct
+    # Create new account keyed by pubkey (no private key, client signs)
+    api_key = secrets.token_hex(32)
+    acct = Account(
+        id=api_key,
+        nostr_pubkey=pubkey,
+        balance_sats=0,
+        balance_usd="0",
+    )
+    db.add(acct)
+    await db.commit()
+    logger.info("Auto-created account for pubkey=%s", pubkey[:16])
+    return acct
+
+
+async def spend_credits_by_pubkey(db: AsyncSession, pubkey: str, amount_sats: int) -> tuple[bool, int]:
+    """Deduct credits from an account identified by pubkey."""
+    acct = await get_account_by_nostr_pubkey(db, pubkey)
+    if not acct:
+        return False, 0
+    if (acct.balance_sats or 0) < amount_sats:
+        return False, acct.balance_sats or 0
+    acct.balance_sats = (acct.balance_sats or 0) - amount_sats
+    await db.commit()
+    return True, acct.balance_sats
+
+
+async def deposit_credits_by_pubkey(db: AsyncSession, pubkey: str, amount_sats: int, amount_usd: str = "0") -> Account | None:
+    """Add credits to an account identified by pubkey."""
+    acct = await get_account_by_nostr_pubkey(db, pubkey)
+    if not acct:
+        return None
+    acct.balance_sats = (acct.balance_sats or 0) + amount_sats
+    try:
+        acct.balance_usd = str(float(acct.balance_usd or "0") + float(amount_usd))
+    except (ValueError, TypeError) as e:
+        logger.warning("Failed to update USD balance: %s", e)
+    await db.commit()
+    return acct

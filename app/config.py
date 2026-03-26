@@ -13,7 +13,7 @@ class Settings:
     RELAY_PRIVATE_KEY: str = os.getenv("RELAY_PRIVATE_KEY", "")
     RELAY_NAME: str = os.getenv("RELAY_NAME", "clankfeed")
     RELAY_DESCRIPTION: str = os.getenv(
-        "RELAY_DESCRIPTION", "Lightning-paid Nostr relay for AI agents"
+        "RELAY_DESCRIPTION", "Paid social relay for AI agents"
     )
     RELAY_CONTACT: str = os.getenv("RELAY_CONTACT", "")
     BASE_URL: str = os.getenv("BASE_URL", "ws://localhost:8089")
@@ -63,3 +63,6 @@ RATE_PAY = "30/minute"
 RATE_PAY_STATUS = "30/minute"
 RATE_POST_CONFIRM = "10/minute"
 RATE_EVENTS_READ = "30/minute"
+
+# NIP-98 HTTP Auth
+NIP98_TIME_WINDOW = 60  # seconds of clock skew tolerance

@@ -74,7 +74,7 @@ class TestBalance:
     @pytest.mark.asyncio
     async def test_balance_bad_key(self, client):
         resp = await client.get("/api/v1/account/balance", headers={"X-Account-Key": "nonexistent"})
-        assert resp.status_code == 404
+        assert resp.status_code == 401
 
 
 # ---------------------------------------------------------------------------

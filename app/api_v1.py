@@ -76,15 +76,16 @@ async def _error_402_with_challenge(
 
 
 async def _try_spend_credits(request: Request, db: AsyncSession, amount_sats: int) -> tuple[bool, str]:
-    """Check X-Account-Key header and try to spend credits.
+    """Check auth (NIP-98 or X-Account-Key) and try to spend credits.
 
     Returns (spent, api_key). If spent=True, credits were deducted.
     """
-    api_key = request.headers.get("X-Account-Key", "")
-    if not api_key:
+    from app.auth import get_auth
+    acct, pubkey, _ = await get_auth(request, db)
+    if not acct:
         return False, ""
-    ok, _ = await spend_credits(db, api_key, amount_sats)
-    return ok, api_key
+    ok, _ = await spend_credits(db, acct.id, amount_sats)
+    return ok, acct.id
 
 
 # ---------------------------------------------------------------------------
@@ -488,12 +489,11 @@ async def relay_post(request: Request, db: AsyncSession = Depends(get_db)):
     }
 
     # Sign with account's Nostr key if logged in, otherwise relay key
-    api_key = request.headers.get("X-Account-Key", "")
+    from app.auth import get_auth
+    acct, _, _ = await get_auth(request, db)
     signing_key = settings.RELAY_PRIVATE_KEY
-    if api_key:
-        acct = await get_account(db, api_key)
-        if acct and acct.nostr_privkey:
-            signing_key = decrypt_field(acct.nostr_privkey)
+    if acct and acct.nostr_privkey:
+        signing_key = decrypt_field(acct.nostr_privkey)
 
     if not signing_key:
         return JSONResponse(status_code=500, content={"detail": "Relay private key not configured"})
@@ -866,14 +866,11 @@ async def account_create(request: Request, db: AsyncSession = Depends(get_db)):
 @router.get("/account/balance")
 @limiter.limit(RATE_EVENTS_READ)
 async def account_balance(request: Request, db: AsyncSession = Depends(get_db)):
-    """Check account balance. Requires X-Account-Key header."""
-    api_key = request.headers.get("X-Account-Key", "")
-    if not api_key:
-        return JSONResponse(status_code=401, content={"detail": "X-Account-Key header required"})
-
-    acct = await get_account(db, api_key)
+    """Check account balance. Accepts NIP-98 or X-Account-Key auth."""
+    from app.auth import get_auth
+    acct, _, _ = await get_auth(request, db)
     if not acct:
-        return JSONResponse(status_code=404, content={"detail": "Account not found"})
+        return JSONResponse(status_code=401, content={"detail": "Authentication required"})
 
     return {
         "balance_sats": acct.balance_sats or 0,
@@ -888,15 +885,12 @@ async def account_deposit(request: Request, db: AsyncSession = Depends(get_db)):
     """Deposit credits. Returns 402 with payment options.
 
     Body: {"amount_sats": 1000} or {"amount_usd": "0.50"}
-    Requires X-Account-Key header.
+    Accepts NIP-98 or X-Account-Key auth.
     """
-    api_key = request.headers.get("X-Account-Key", "")
-    if not api_key:
-        return JSONResponse(status_code=401, content={"detail": "X-Account-Key header required"})
-
-    acct = await get_account(db, api_key)
+    from app.auth import get_auth
+    acct, _, _ = await get_auth(request, db)
     if not acct:
-        return JSONResponse(status_code=404, content={"detail": "Account not found"})
+        return JSONResponse(status_code=401, content={"detail": "Authentication required"})
 
     try:
         body = await request.json()
@@ -912,7 +906,7 @@ async def account_deposit(request: Request, db: AsyncSession = Depends(get_db)):
         req_usd = str(req_usd)
 
     # Store deposit intent as pending event (reuse table)
-    deposit_data = {"deposit_account": api_key, "amount_sats": req_sats, "amount_usd": req_usd}
+    deposit_data = {"deposit_account": acct.id, "amount_sats": req_sats, "amount_usd": req_usd}
     token = await store_pending_event(db, deposit_data, amount_sats=req_sats, amount_usd=str(req_usd))
 
     payment_hash = ""
@@ -945,11 +939,13 @@ async def account_deposit_confirm(request: Request, db: AsyncSession = Depends(g
     """Confirm deposit payment. Credits added to account.
 
     Body: {"token": "...", "method": "tempo", "tx_hash": "0x..."}
-    Requires X-Account-Key header.
+    Accepts NIP-98 or X-Account-Key auth.
     """
-    api_key = request.headers.get("X-Account-Key", "")
-    if not api_key:
-        return JSONResponse(status_code=401, content={"detail": "X-Account-Key header required"})
+    from app.auth import get_auth
+    acct, _, _ = await get_auth(request, db)
+    if not acct:
+        return JSONResponse(status_code=401, content={"detail": "Authentication required"})
+    api_key = acct.id
 
     try:
         body = await request.json()
@@ -1025,14 +1021,11 @@ async def account_deposit_confirm(request: Request, db: AsyncSession = Depends(g
 @router.post("/account/key")
 @limiter.limit(RATE_EVENTS_READ)
 async def account_export_key(request: Request, db: AsyncSession = Depends(get_db)):
-    """Export the account's Nostr private key. Requires X-Account-Key header."""
-    api_key = request.headers.get("X-Account-Key", "")
-    if not api_key:
-        return JSONResponse(status_code=401, content={"detail": "X-Account-Key header required"})
-
-    acct = await get_account(db, api_key)
+    """Export the account's Nostr private key. Accepts NIP-98 or X-Account-Key auth."""
+    from app.auth import get_auth
+    acct, _, _ = await get_auth(request, db)
     if not acct:
-        return JSONResponse(status_code=404, content={"detail": "Account not found"})
+        return JSONResponse(status_code=401, content={"detail": "Authentication required"})
 
     return {
         "nostr_privkey": decrypt_field(acct.nostr_privkey) if acct.nostr_privkey else "",
@@ -1049,16 +1042,13 @@ async def account_export_key(request: Request, db: AsyncSession = Depends(get_db
 async def account_update_profile(request: Request, db: AsyncSession = Depends(get_db)):
     """Update account profile (name, about, picture) by posting a kind:0 metadata event.
 
-    Requires X-Account-Key header. Uses credits if available.
+    Accepts NIP-98 or X-Account-Key auth. Uses credits if available.
     Body: {"name": "...", "about": "...", "picture": "https://..."}
     """
-    api_key = request.headers.get("X-Account-Key", "")
-    if not api_key:
-        return JSONResponse(status_code=401, content={"detail": "X-Account-Key header required"})
-
-    acct = await get_account(db, api_key)
+    from app.auth import get_auth
+    acct, _, _ = await get_auth(request, db)
     if not acct:
-        return JSONResponse(status_code=404, content={"detail": "Account not found"})
+        return JSONResponse(status_code=401, content={"detail": "Authentication required"})
 
     if not acct.nostr_privkey:
         return JSONResponse(status_code=500, content={"detail": "Account has no Nostr key"})
