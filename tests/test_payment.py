@@ -59,7 +59,7 @@ class TestBuildChallenge:
     def test_build_returns_payment_header(self):
         header = build_mpp_challenge(21, "abc123", "lnbc210n1...")
         assert header.startswith("Payment ")
-        assert 'realm="clankfeed"' in header
+        assert 'realm="clankfeed.com"' in header
         assert 'method="lightning"' in header
         assert 'intent="charge"' in header
 

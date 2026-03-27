@@ -45,7 +45,7 @@ def _b64url_decode(s: str) -> bytes:
 # HMAC challenge binding (stateless verification)
 # ---------------------------------------------------------------------------
 
-_MPP_REALM = "clankfeed"
+_MPP_REALM = "clankfeed.com"
 _MPP_METHOD = "lightning"
 _MPP_INTENT = "charge"
 _CHALLENGE_TTL = 600  # 10 minutes

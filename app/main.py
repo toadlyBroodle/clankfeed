@@ -245,6 +245,58 @@ def _custom_openapi():
                 # All non-paid API endpoints accept optional AccountKey
                 operation["security"] = [{"AccountKey": []}]
 
+    # Add requestBody schemas for paid endpoints so agents know the input format
+    events_post = paths.get("/api/v1/events", {}).get("post", {})
+    if events_post:
+        events_post["requestBody"] = {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["event"],
+                        "properties": {
+                            "event": {
+                                "type": "object",
+                                "description": "Signed Nostr event (NIP-01)",
+                                "required": ["id", "pubkey", "created_at", "kind", "tags", "content", "sig"],
+                                "properties": {
+                                    "id": {"type": "string", "description": "32-byte hex SHA256 event id"},
+                                    "pubkey": {"type": "string", "description": "32-byte hex x-only pubkey"},
+                                    "created_at": {"type": "integer", "description": "Unix timestamp"},
+                                    "kind": {"type": "integer", "description": "Event kind (0=metadata, 1=note)"},
+                                    "tags": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}},
+                                    "content": {"type": "string"},
+                                    "sig": {"type": "string", "description": "64-byte hex BIP-340 Schnorr signature"},
+                                },
+                            },
+                            "amount_sats": {"type": "integer", "description": "Custom payment amount (min 21)"},
+                        },
+                    }
+                }
+            }
+        }
+
+    post_post = paths.get("/api/v1/post", {}).get("post", {})
+    if post_post:
+        post_post["requestBody"] = {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["content"],
+                        "properties": {
+                            "content": {"type": "string", "description": "Note text content"},
+                            "display_name": {"type": "string", "description": "Display name (optional)"},
+                            "reply_to": {"type": "string", "description": "Event ID to reply to (optional)"},
+                            "amount_sats": {"type": "integer", "description": "Custom payment amount (min 21)"},
+                        },
+                    }
+                }
+            }
+        }
+
     app.openapi_schema = schema
     return schema
 
