@@ -645,6 +645,8 @@ function showVotePayment(eventId, direction, data) {
   if (hasLightning) {
     html += `<div id="vpay-ln-${eventId}">`;
     html += `<p id="vpay-ln-status-${eventId}" class="c-dim mb-1">${data.lightning.amount_sats} sats</p>`;
+    html += `<canvas id="vpay-qr-${eventId}" width="120" height="120"></canvas>`;
+    html += `<code id="vpay-bolt11-${eventId}" class="text-xs break-all c-dim block mt-1"></code>`;
     html += `</div>`;
   }
 
@@ -666,6 +668,8 @@ function showVotePayment(eventId, direction, data) {
   // Use shared payInvoice for Lightning path
   if (hasLightning) {
     const statusEl = document.getElementById(`vpay-ln-status-${eventId}`);
+    const qrEl = document.getElementById(`vpay-qr-${eventId}`);
+    const bolt11El = document.getElementById(`vpay-bolt11-${eventId}`);
     payInvoice(data.lightning.bolt11, data.lightning.payment_hash, statusEl, async () => {
       const resp = await fetch(`/api/v1/events/${eventId}/vote/confirm`, {
         method: 'POST',
@@ -674,7 +678,7 @@ function showVotePayment(eventId, direction, data) {
       });
       const d = await resp.json();
       if (d.voted) voteSuccess(eventId, direction, data.lightning.amount_sats, d.new_value_sats);
-    });
+    }, qrEl, bolt11El);
   }
 }
 
