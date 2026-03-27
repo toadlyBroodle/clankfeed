@@ -1326,28 +1326,64 @@ async function saveProfile() {
   status.textContent = 'Saving...';
   status.style.color = 'var(--dim)';
 
-  const body = {};
-  if (name) body.name = name;
-  if (about) body.about = about;
-  if (picture) body.picture = picture;
+  const metadata = {};
+  if (name) metadata.name = name;
+  if (about) metadata.about = about;
+  if (picture) metadata.picture = picture;
 
   try {
-    const resp = await authFetch('/api/v1/account/profile', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body),
-    });
-    const data = await resp.json();
-    if (data.updated) {
-      status.textContent = 'Saved!';
-      status.style.color = 'var(--accent)';
-      updateAccountUI();
-    } else if (data.status === 'payment_required') {
-      status.textContent = 'Needs payment (deposit credits first)';
-      status.style.color = 'var(--accent)';
+    // If we can sign locally, create and submit a kind:0 event directly
+    if (authMode === 'extension' || (authMode === 'nsec' && userNsec)) {
+      const event = {
+        kind: 0,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [],
+        content: JSON.stringify(metadata),
+      };
+      const signed = await signNostrEvent(event);
+      if (!signed) {
+        status.textContent = 'Signing failed';
+        status.style.color = 'var(--error)';
+        return;
+      }
+      const resp = await authFetch('/api/v1/events', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({event: signed}),
+      });
+      const data = await resp.json();
+      if (data.paid || data.event) {
+        status.textContent = 'Saved!';
+        status.style.color = 'var(--accent)';
+        // Update local metadata cache
+        metadataCache[userPubkey] = metadata;
+        renderNotes();
+      } else if (data.status === 'payment_required' || data.token) {
+        status.textContent = 'Needs payment (deposit credits first)';
+        status.style.color = 'var(--accent)';
+      } else {
+        status.textContent = data.detail || 'Failed';
+        status.style.color = 'var(--error)';
+      }
     } else {
-      status.textContent = data.detail || 'Failed';
-      status.style.color = 'var(--error)';
+      // Fallback: server-side signing via profile endpoint
+      const resp = await authFetch('/api/v1/account/profile', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(metadata),
+      });
+      const data = await resp.json();
+      if (data.updated) {
+        status.textContent = 'Saved!';
+        status.style.color = 'var(--accent)';
+        updateAccountUI();
+      } else if (data.status === 'payment_required') {
+        status.textContent = 'Needs payment (deposit credits first)';
+        status.style.color = 'var(--accent)';
+      } else {
+        status.textContent = data.detail || 'Failed';
+        status.style.color = 'var(--error)';
+      }
     }
   } catch (e) {
     status.textContent = 'Error';
