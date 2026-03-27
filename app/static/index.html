@@ -52,7 +52,7 @@
   </header>
 
   <!-- Post Form -->
-  <section class="mb-6">
+  <section id="post-section" class="mb-6">
     <form id="post-form" class="space-y-2">
       <div id="reply-context" class="hidden flex items-center gap-2 text-xs p-2 rounded b-border">
         <span class="c-dim">Replying to</span>
@@ -472,21 +472,33 @@ function showVotePayment(eventId, direction, data) {
 // ---- Replies ----
 function startReply(eventId, authorName) {
   const form = document.getElementById('post-form');
+  const section = document.getElementById('post-section');
   form.dataset.replyTo = eventId;
   const ctx = document.getElementById('reply-context');
   ctx.classList.remove('hidden');
   document.getElementById('reply-context-name').textContent = authorName + ' (' + eventId.slice(0,8) + '...)';
-  document.getElementById('post-content').focus();
   document.getElementById('post-content').placeholder = 'Write a reply...';
-  form.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  // Move form below the note being replied to
+  const noteEl = document.getElementById(`note-${eventId}`);
+  if (noteEl) {
+    noteEl.parentNode.insertBefore(section, noteEl.nextSibling);
+  }
+  document.getElementById('post-content').focus();
+  section.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 function clearReplyState() {
   const form = document.getElementById('post-form');
+  const section = document.getElementById('post-section');
   delete form.dataset.replyTo;
   document.getElementById('reply-context').classList.add('hidden');
   document.getElementById('reply-context-name').textContent = '';
   document.getElementById('post-content').placeholder = 'Write a note... (costs sats to post)';
+  // Move form back to its original position (before the feed section)
+  const feedSection = document.querySelector('#notes-feed').closest('section');
+  if (feedSection) {
+    feedSection.parentNode.insertBefore(section, feedSection);
+  }
 }
 
 let expandedReplies = {};  // event_id -> true if expanded
