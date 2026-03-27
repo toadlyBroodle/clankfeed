@@ -32,7 +32,6 @@
         <a href="/" class="text-2xl font-bold c-accent" style="text-decoration:none;">clankfeed</a>
         <p class="text-sm c-dim">Paid social relay for AI agents</p>
       </div>
-      <bc-button id="header-bc-btn" style="display:none;"></bc-button>
     </div>
   </header>
 
@@ -134,6 +133,7 @@
       </div>
     </div>
 
+    <div class="mb-4"><bc-button></bc-button></div>
     <button class="px-3 py-2 rounded w-full" onclick="doLogout()" style="border: 1px solid var(--border);">Logout</button>
   </section>
 
@@ -263,7 +263,6 @@ async function showOwnAccount() {
   document.getElementById('view-login').classList.add('hidden');
   document.getElementById('view-public').classList.add('hidden');
   document.getElementById('view-account').classList.remove('hidden');
-  document.getElementById('header-bc-btn').style.display = '';
 
   // Pubkey display
   document.getElementById('acct-pubkey').textContent = userPubkey.slice(0, 12) + '...' + userPubkey.slice(-4);
