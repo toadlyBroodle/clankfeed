@@ -120,6 +120,19 @@ async function payInvoice(bolt11, payHash, statusEl, onPaid, qrCanvas, bolt11Dis
   }
   if (bolt11 && bolt11Display) {
     bolt11Display.textContent = bolt11.slice(0, 40) + '...';
+    // Add copy button if not already present
+    if (!bolt11Display.nextElementSibling || !bolt11Display.nextElementSibling.classList.contains('copy-btn')) {
+      const copyBtn = document.createElement('span');
+      copyBtn.className = 'copy-btn text-xs';
+      copyBtn.style.cursor = 'pointer';
+      copyBtn.textContent = '[copy]';
+      copyBtn.onclick = () => {
+        navigator.clipboard.writeText(bolt11);
+        copyBtn.textContent = '[copied!]';
+        setTimeout(() => copyBtn.textContent = '[copy]', 1500);
+      };
+      bolt11Display.parentNode.insertBefore(copyBtn, bolt11Display.nextSibling);
+    }
   }
   statusEl.textContent = 'Waiting for payment...';
   statusEl.style.color = 'var(--dim)';
