@@ -351,7 +351,7 @@ document.getElementById('post-form').addEventListener('submit', async (e) => {
       }, () => {
         btn.disabled = false;
         btn.textContent = 'Post Note';
-      });
+      }, document.getElementById('post-form'));
     }
   } catch (err) {
     console.error('Post error:', err);
@@ -466,7 +466,7 @@ function showVotePayment(eventId, direction, data) {
       voteSuccess(eventId, direction, amount, d.new_value_sats);
       hidePaymentWidget();
     }
-  });
+  }, null, document.getElementById(`vote-prompt-${eventId}`));
 }
 
 // ---- Replies ----

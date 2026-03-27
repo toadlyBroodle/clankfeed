@@ -92,7 +92,7 @@
     </div>
 
     <!-- Deposit -->
-    <div class="mb-4 p-3 rounded" style="border: 1px solid var(--border);">
+    <div id="section-deposit" class="mb-4 p-3 rounded" style="border: 1px solid var(--border);">
       <h3 class="text-sm font-bold c-accent mb-2">Deposit Credits</h3>
       <div class="flex gap-2 items-center">
         <input id="deposit-amount" type="number" class="p-2 rounded w-deposit" min="21" value="5000" placeholder="sats">
@@ -101,7 +101,7 @@
     </div>
 
     <!-- Profile Edit -->
-    <div class="mb-4 p-3 rounded" style="border: 1px solid var(--border);">
+    <div id="section-profile" class="mb-4 p-3 rounded" style="border: 1px solid var(--border);">
       <h3 class="text-sm font-bold c-accent mb-2">Edit Profile</h3>
       <div class="space-y-2">
         <div><label class="text-xs c-dim">Name</label><input id="prof-name" type="text" class="p-2 rounded w-full mt-1" maxlength="100"></div>
@@ -367,7 +367,7 @@ async function saveProfile() {
           hidePaymentWidget();
           showOwnAccount();
         }
-      });
+      }, null, document.getElementById('section-profile'));
     } else {
       status.textContent = data.detail || 'Failed';
       status.style.color = 'var(--error)';
@@ -405,7 +405,7 @@ async function startDeposit() {
         hidePaymentWidget();
         showOwnAccount();
       }
-    });
+    }, null, document.getElementById('section-deposit'));
   } catch (err) {
     console.error('Deposit error:', err);
   }

@@ -4,10 +4,11 @@
  * Requires: nostr-auth.js (payInvoice, esc), QRious CDN.
  *
  * Usage:
- *   showPaymentWidget(data, onConfirm, onCancel)
+ *   showPaymentWidget(data, onConfirm, onCancel, anchorEl)
  *   - data: server response with token, bolt11/lightning, tempo, methods
  *   - onConfirm(token, paymentId, method): called after payment confirmed
  *   - onCancel: called when user clicks Cancel
+ *   - anchorEl: DOM element to insert widget after (optional)
  */
 
 let _pw_currentData = null;
@@ -60,18 +61,21 @@ function _ensureWidgetDOM() {
       </div>
     </div>
   `;
-  // Insert after the post form or at end of first section
-  const anchor = document.querySelector('form') || document.querySelector('section') || document.body;
-  anchor.parentNode.insertBefore(div, anchor.nextSibling);
+  document.body.appendChild(div);  // temporary; moved by showPaymentWidget
 }
 
-function showPaymentWidget(data, onConfirm, onCancel) {
+function showPaymentWidget(data, onConfirm, onCancel, anchorEl) {
   _ensureWidgetDOM();
   const widget = document.getElementById('pw-widget');
   _pw_currentData = data;
   _pw_currentBolt11 = data.bolt11 || (data.lightning && data.lightning.bolt11) || '';
   const methods = data.methods || [];
   const payHash = data.payment_hash || (data.lightning && data.lightning.payment_hash) || '';
+
+  // Move widget to anchor position
+  if (anchorEl) {
+    anchorEl.parentNode.insertBefore(widget, anchorEl.nextSibling);
+  }
 
   widget.classList.remove('hidden');
 
