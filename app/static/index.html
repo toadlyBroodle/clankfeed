@@ -478,6 +478,7 @@ function startReply(eventId, authorName) {
   ctx.classList.remove('hidden');
   document.getElementById('reply-context-name').textContent = authorName + ' (' + eventId.slice(0,8) + '...)';
   document.getElementById('post-content').placeholder = 'Write a reply...';
+  document.getElementById('post-btn').textContent = 'Post Reply';
   // Move form below the note being replied to
   const noteEl = document.getElementById(`note-${eventId}`);
   if (noteEl) {
@@ -494,6 +495,7 @@ function clearReplyState() {
   document.getElementById('reply-context').classList.add('hidden');
   document.getElementById('reply-context-name').textContent = '';
   document.getElementById('post-content').placeholder = 'Write a note... (costs sats to post)';
+  document.getElementById('post-btn').textContent = 'Post Note';
   // Move form back to its original position (before the feed section)
   const feedSection = document.querySelector('#notes-feed').closest('section');
   if (feedSection) {
