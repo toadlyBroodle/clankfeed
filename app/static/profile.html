@@ -79,7 +79,8 @@
         <div class="font-bold c-accent" id="acct-name">Loading...</div>
         <div class="text-xs c-dim" id="acct-pubkey"></div>
       </div>
-      <div class="text-right">
+      <div class="text-right flex flex-col items-end gap-1">
+        <bc-button></bc-button>
         <div class="c-accent font-bold" id="acct-balance">0 sats</div>
       </div>
     </div>
@@ -133,7 +134,6 @@
       </div>
     </div>
 
-    <div class="mb-4"><bc-button></bc-button></div>
     <button class="px-3 py-2 rounded w-full" onclick="doLogout()" style="border: 1px solid var(--border);">Logout</button>
   </section>
 
@@ -165,7 +165,6 @@
 // ---- Page Logic ----
 const urlParams = new URLSearchParams(window.location.search);
 const viewPubkey = urlParams.get('pubkey');
-let depositPollTimer = null;
 
 async function initPage() {
   // Detect NIP-07 extension
@@ -349,10 +348,32 @@ async function saveProfile() {
     if (data.paid || data.event) {
       status.textContent = 'Saved!';
       status.style.color = 'var(--accent)';
-      showOwnAccount();  // refresh
-    } else if (data.status === 'payment_required' || data.token) {
-      status.textContent = 'Needs payment (deposit credits first)';
-      status.style.color = 'var(--accent)';
+      showOwnAccount();
+    } else if (data.token) {
+      // Payment required: pay the invoice to confirm the profile update
+      const bolt11 = data.bolt11 || (data.lightning && data.lightning.bolt11) || '';
+      const payHash = data.payment_hash || (data.lightning && data.lightning.payment_hash) || '';
+      const widget = document.getElementById('deposit-widget');
+      const depStatus = document.getElementById('deposit-status');
+      widget.classList.remove('hidden');
+
+      await payInvoice(bolt11, payHash, depStatus, async () => {
+        const cr = await fetch(`/api/post/confirm`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({token: data.token, payment_hash: payHash}),
+        });
+        const cd = await cr.json();
+        if (cd.paid || cd.event) {
+          status.textContent = 'Saved!';
+          status.style.color = 'var(--accent)';
+          widget.classList.add('hidden');
+          showOwnAccount();
+        } else {
+          status.textContent = cd.detail || 'Confirmation failed';
+          status.style.color = 'var(--error)';
+        }
+      }, document.getElementById('deposit-qr'), document.getElementById('deposit-bolt11'));
     } else {
       status.textContent = data.detail || 'Failed';
       status.style.color = 'var(--error)';
@@ -387,46 +408,19 @@ async function startDeposit() {
     const bolt11 = data.bolt11 || (data.lightning && data.lightning.bolt11) || '';
     const payHash = data.payment_hash || (data.lightning && data.lightning.payment_hash) || '';
 
-    if (bolt11) {
-      new QRious({
-        element: document.getElementById('deposit-qr'),
-        value: bolt11.toUpperCase(),
-        size: 160,
-        foreground: '#4ade80',
-        background: '#000',
-        level: 'L',
+    await payInvoice(bolt11, payHash, status, async () => {
+      const cr = await authFetch('/api/v1/account/deposit/confirm', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({token: data.token, method: 'lightning', payment_hash: payHash}),
       });
-      document.getElementById('deposit-bolt11').textContent = bolt11.slice(0, 40) + '...';
-    }
-
-    status.textContent = `Waiting for payment... (${amount} sats)`;
-    status.style.color = 'var(--dim)';
-
-    if (depositPollTimer) clearInterval(depositPollTimer);
-    if (payHash) {
-      depositPollTimer = setInterval(async () => {
-        try {
-          const pr = await fetch(`/api/v1/payments/status?payment_hash=${payHash}`);
-          const ps = await pr.json();
-          if (ps.paid) {
-            clearInterval(depositPollTimer);
-            status.textContent = 'Payment received! Confirming...';
-            status.style.color = 'var(--accent)';
-            const cr = await authFetch('/api/v1/account/deposit/confirm', {
-              method: 'POST',
-              headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({token: data.token, method: 'lightning', payment_hash: payHash}),
-            });
-            const cd = await cr.json();
-            if (cd.deposited) {
-              status.textContent = `Deposited ${cd.amount_sats} sats!`;
-              widget.classList.add('hidden');
-              showOwnAccount();  // refresh balance
-            }
-          }
-        } catch (e) {}
-      }, 3000);
-    }
+      const cd = await cr.json();
+      if (cd.deposited) {
+        status.textContent = `Deposited ${cd.amount_sats} sats!`;
+        widget.classList.add('hidden');
+        showOwnAccount();
+      }
+    }, document.getElementById('deposit-qr'), document.getElementById('deposit-bolt11'));
   } catch (err) {
     status.textContent = 'Error';
     status.style.color = 'var(--error)';
