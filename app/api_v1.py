@@ -857,7 +857,6 @@ async def account_create(request: Request, db: AsyncSession = Depends(get_db)):
 
     acct = await create_account(db, pubkey, nostr_privkey=nostr_privkey)
     return {
-        "api_key": acct.id,
         "nostr_pubkey": acct.nostr_pubkey or "",
         "balance_sats": acct.balance_sats or 0,
     }

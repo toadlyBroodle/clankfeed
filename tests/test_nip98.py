@@ -42,7 +42,7 @@ async def client():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     transport = ASGITransport(app=app, root_path="")
-    async with AsyncClient(transport=transport, base_url="http://localhost:8089") as c:
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
@@ -54,7 +54,7 @@ class TestNip98Auth:
     @pytest.mark.asyncio
     async def test_valid_nip98_creates_account(self, client):
         """Valid NIP-98 auth should auto-create an account."""
-        url = "http://localhost:8089/api/v1/account/balance"
+        url = "http://test/api/v1/account/balance"
         auth = _make_nip98_header(url, "GET")
         resp = await client.get("/api/v1/account/balance", headers={"Authorization": auth})
         assert resp.status_code == 200
@@ -65,7 +65,7 @@ class TestNip98Auth:
     @pytest.mark.asyncio
     async def test_valid_nip98_returns_same_account(self, client):
         """Repeated NIP-98 auth with same key returns the same account."""
-        url = "http://localhost:8089/api/v1/account/balance"
+        url = "http://test/api/v1/account/balance"
         auth1 = _make_nip98_header(url, "GET")
         resp1 = await client.get("/api/v1/account/balance", headers={"Authorization": auth1})
         pk1 = resp1.json()["nostr_pubkey"]
@@ -78,14 +78,14 @@ class TestNip98Auth:
     @pytest.mark.asyncio
     async def test_wrong_url(self, client):
         """NIP-98 with wrong URL in 'u' tag should fail."""
-        auth = _make_nip98_header("http://localhost:8089/api/v1/wrong", "GET")
+        auth = _make_nip98_header("http://test/api/v1/wrong", "GET")
         resp = await client.get("/api/v1/account/balance", headers={"Authorization": auth})
         assert resp.status_code == 401
 
     @pytest.mark.asyncio
     async def test_wrong_method(self, client):
         """NIP-98 with wrong method tag should fail."""
-        url = "http://localhost:8089/api/v1/account/balance"
+        url = "http://test/api/v1/account/balance"
         auth = _make_nip98_header(url, "POST")  # endpoint is GET
         resp = await client.get("/api/v1/account/balance", headers={"Authorization": auth})
         assert resp.status_code == 401
@@ -93,7 +93,7 @@ class TestNip98Auth:
     @pytest.mark.asyncio
     async def test_expired_timestamp(self, client):
         """NIP-98 with timestamp too far in the past should fail."""
-        url = "http://localhost:8089/api/v1/account/balance"
+        url = "http://test/api/v1/account/balance"
         auth = _make_nip98_header(url, "GET", created_at=int(time.time()) - 120)
         resp = await client.get("/api/v1/account/balance", headers={"Authorization": auth})
         assert resp.status_code == 401
@@ -104,7 +104,7 @@ class TestNip98Auth:
         event = {
             "kind": 27235,
             "created_at": int(time.time()),
-            "tags": [["u", "http://localhost:8089/api/v1/account/balance"], ["method", "GET"]],
+            "tags": [["u", "http://test/api/v1/account/balance"], ["method", "GET"]],
             "content": "",
         }
         signed = sign_event(TEST_SK, event)
@@ -133,7 +133,7 @@ class TestNip98Auth:
         event = {
             "kind": 27235,
             "created_at": int(time.time()),
-            "tags": [["u", "http://localhost:8089/api/v1/account/balance"]],
+            "tags": [["u", "http://test/api/v1/account/balance"]],
             "content": "",
         }
         signed = sign_event(TEST_SK, event)
@@ -147,7 +147,7 @@ class TestNip98Auth:
         event = {
             "kind": 1,  # wrong kind
             "created_at": int(time.time()),
-            "tags": [["u", "http://localhost:8089/api/v1/account/balance"], ["method", "GET"]],
+            "tags": [["u", "http://test/api/v1/account/balance"], ["method", "GET"]],
             "content": "",
         }
         signed = sign_event(TEST_SK, event)
@@ -156,18 +156,11 @@ class TestNip98Auth:
         assert resp.status_code == 401
 
     @pytest.mark.asyncio
-    async def test_legacy_api_key_still_works(self, client):
-        """Legacy X-Account-Key auth should still work during transition."""
-        # Create account first
-        resp = await client.post("/api/v1/account/create",
-                                 json={}, headers={"Content-Type": "application/json"})
-        assert resp.status_code == 200
-        api_key = resp.json()["api_key"]
-
-        # Use legacy auth
+    async def test_legacy_api_key_rejected(self, client):
+        """Legacy X-Account-Key auth should no longer work."""
         resp = await client.get("/api/v1/account/balance",
-                                headers={"X-Account-Key": api_key})
-        assert resp.status_code == 200
+                                headers={"X-Account-Key": "a" * 64})
+        assert resp.status_code == 401
 
     @pytest.mark.asyncio
     async def test_no_auth_returns_401(self, client):

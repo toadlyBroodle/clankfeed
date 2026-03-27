@@ -213,11 +213,9 @@ let relayPubkey = '';  // set from NIP-11, used to label relay-signed notes as '
 let authMode = localStorage.getItem('cf_auth_mode') || '';
 let userPubkey = localStorage.getItem('cf_pubkey') || '';
 let userNsec = localStorage.getItem('cf_nsec') || '';  // hex privkey (only for nsec mode)
-// Legacy API key support (transition period)
-let apiKey = localStorage.getItem('clankfeed_api_key') || '';
 
 function isLoggedIn() {
-  return !!(authMode && userPubkey) || !!apiKey;
+  return !!(authMode && userPubkey);
 }
 
 // ---- Nostr Signing Helpers ----
@@ -263,15 +261,9 @@ async function makeNip98Auth(url, method) {
 
 async function authHeaders(url, method, extra) {
   const headers = extra ? {...extra} : {};
-  // Try NIP-98 first
   const nip98 = await makeNip98Auth(url, method);
   if (nip98) {
     headers['Authorization'] = nip98;
-    return headers;
-  }
-  // Fall back to legacy API key
-  if (apiKey) {
-    headers['X-Account-Key'] = apiKey;
   }
   return headers;
 }
@@ -1150,7 +1142,6 @@ async function loginWithExtension() {
     localStorage.setItem('cf_pubkey', userPubkey);
     localStorage.removeItem('cf_nsec');
     localStorage.removeItem('clankfeed_api_key');
-    apiKey = '';
     updateAccountUI();
   } catch (err) {
     errEl.textContent = 'Extension login failed';
@@ -1185,7 +1176,6 @@ async function loginWithNsec() {
     localStorage.setItem('cf_pubkey', userPubkey);
     localStorage.setItem('cf_nsec', userNsec);
     localStorage.removeItem('clankfeed_api_key');
-    apiKey = '';
     document.getElementById('login-nsec').value = '';
     updateAccountUI();
   } catch (err) {
@@ -1209,7 +1199,6 @@ function createIdentity() {
     localStorage.setItem('cf_pubkey', userPubkey);
     localStorage.setItem('cf_nsec', userNsec);
     localStorage.removeItem('clankfeed_api_key');
-    apiKey = '';
     updateAccountUI();
     showNewIdentity(privhex, pubkey);
   } catch (err) {
@@ -1249,11 +1238,10 @@ function logout() {
   authMode = '';
   userPubkey = '';
   userNsec = '';
-  apiKey = '';
   localStorage.removeItem('cf_auth_mode');
   localStorage.removeItem('cf_pubkey');
   localStorage.removeItem('cf_nsec');
-  localStorage.removeItem('clankfeed_api_key');
+  localStorage.removeItem('clankfeed_api_key');  // clean up legacy
   updateAccountUI();
 }
 
