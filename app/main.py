@@ -286,13 +286,7 @@ app.include_router(payment_router)  # legacy routes for web client
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-# Inline 1x1 green pixel PNG for favicon
-_FAVICON = bytes.fromhex(
-    "89504e470d0a1a0a0000000d494844520000000100000001010300000025"
-    "db56ca00000003504c5445004ade801a7e4900000001624b47440088051d"
-    "4800000009704859730000000100000001013a1a3c0000000a4944415478"
-    "9c6260000000060003a13561f20000000049454e44ae426082"
-)
+_FAVICON_PATH = STATIC_DIR / "img" / "clankfeed-logo.png"
 
 
 @app.get("/")
@@ -378,7 +372,7 @@ async def profile():
 
 @app.get("/favicon.ico")
 async def favicon():
-    return Response(content=_FAVICON, media_type="image/png")
+    return FileResponse(_FAVICON_PATH, media_type="image/png")
 
 
 @app.websocket("/")
