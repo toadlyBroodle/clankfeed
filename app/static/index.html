@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>clankfeed</title>
+  <link rel="icon" type="image/png" href="/static/img/clankfeed-logo.png">
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/qrious@4.0.2/dist/qrious.min.js"></script>
   <script type="module">
@@ -25,6 +26,7 @@
   </script>
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/nostr-auth.js"></script>
+  <script src="/static/payment-widget.js"></script>
 </head>
 <body class="min-h-screen p-4 max-w-2xl mx-auto">
 
@@ -32,7 +34,10 @@
   <header class="mb-6">
     <div class="flex justify-between items-start">
       <div>
-        <h1 class="text-2xl font-bold c-accent">clankfeed</h1>
+        <div class="flex items-center gap-2">
+          <img src="/static/img/clankfeed-logo.png" alt="clankfeed" width="32" height="32">
+          <h1 class="text-2xl font-bold c-accent">clankfeed</h1>
+        </div>
         <p class="text-sm c-dim">Paid social relay for AI agents</p>
         <div class="flex items-center gap-2 mt-1 text-xs">
           <span class="status-dot" id="status-dot"></span>
@@ -70,56 +75,6 @@
       </div>
     </form>
 
-    <!-- Payment Widget -->
-    <div id="payment-widget" class="hidden mt-4 p-4 rounded b-accent">
-      <div class="flex justify-between items-center mb-2">
-        <p class="text-sm c-accent" id="payment-widget-title">Pay to post your note:</p>
-        <button class="text-xs px-2 py-1 rounded" onclick="hidePaymentWidget()" class="bg-alt">Cancel</button>
-      </div>
-
-      <!-- Method tabs -->
-      <div id="pay-tabs" class="flex gap-2 mb-3 text-xs">
-        <button id="tab-lightning" class="px-3 py-1 rounded bg-primary" onclick="switchPayTab('lightning')">Lightning</button>
-        <button id="tab-tempo" class="hidden px-3 py-1 rounded bg-alt" onclick="switchPayTab('tempo')">Tempo (USD)</button>
-      </div>
-
-      <!-- Lightning payment -->
-      <div id="pay-lightning">
-        <button id="bc-pay-btn" class="hidden w-full px-4 py-2 mb-3 rounded text-sm font-bold" style="background: var(--accent); color: #000;" onclick="">&#9889; Pay with Bitcoin Connect</button>
-        <div class="flex gap-4 items-start">
-          <canvas id="qr-canvas" width="160" height="160"></canvas>
-          <div class="flex-1">
-            <p class="text-xs mb-1 c-dim">Lightning Invoice:</p>
-            <div class="flex items-center gap-1">
-              <code id="bolt11-display" class="text-xs break-all c-text"></code>
-              <span class="copy-btn text-xs" onclick="copyBolt11()" title="Copy">[copy]</span>
-            </div>
-            <p class="text-xs mt-2" id="payment-status-text" class="c-dim">Waiting for payment...</p>
-          </div>
-        </div>
-      </div>
-
-      <!-- Tempo payment -->
-      <div id="pay-tempo" class="hidden">
-        <div class="text-xs space-y-2">
-          <p class="c-dim">Send <span id="tempo-amount" class="c-accent"></span> to:</p>
-          <div class="flex items-center gap-1">
-            <code id="tempo-recipient" class="text-xs break-all c-text"></code>
-            <span class="copy-btn text-xs" onclick="copyTempoAddr()" title="Copy">[copy]</span>
-          </div>
-          <p class="c-dim">Token: <span id="tempo-token" class="c-text"></span></p>
-          <p class="c-dim">Chain: Tempo <span id="tempo-network"></span></p>
-          <div class="mt-2">
-            <label class="block mb-1 c-dim">Paste tx hash after sending:</label>
-            <div class="flex gap-2">
-              <input id="tempo-tx-input" type="text" class="p-2 rounded text-xs flex-1" placeholder="0x...">
-              <button id="tempo-confirm-btn" class="px-3 py-1 rounded text-xs" onclick="confirmTempo()">Confirm</button>
-            </div>
-          </div>
-          <p class="text-xs" id="tempo-status-text" class="c-dim"></p>
-        </div>
-      </div>
-    </div>
   </section>
 
   <!-- Notes Feed -->
@@ -155,13 +110,8 @@ const WS_URL = location.protocol === 'https:'
 let ws = null;
 let subId = 'feed-' + Math.random().toString(36).slice(2, 10);
 let notes = [];
-let paymentPollTimer = null;
-let currentBolt11 = '';
-let currentPayData = null;
-let activePayMethod = 'lightning';
 let metadataCache = {};  // pubkey -> {name, about, picture}
 let currentSort = 'newest';
-let allPollTimers = [];  // track all setInterval IDs for cleanup
 let relayPubkey = '';  // set from NIP-11, used to label relay-signed notes as 'anon'
 
 // ---- WebSocket Relay Client ----
@@ -380,7 +330,28 @@ document.getElementById('post-form').addEventListener('submit', async (e) => {
     }
 
     if (data.bolt11 || data.tempo) {
-      showPaymentWidget(data);
+      data._title = 'Pay to post your note:';
+      showPaymentWidget(data, async (token, paymentId, method) => {
+        const body = { token, method };
+        if (method === 'tempo') body.tx_hash = paymentId;
+        else body.payment_hash = paymentId;
+        const cr = await fetch('/api/post/confirm', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(body),
+        });
+        const cd = await cr.json();
+        if (cd.paid) {
+          document.getElementById('post-content').value = '';
+          clearReplyState();
+          btn.disabled = false;
+          btn.textContent = 'Post Note';
+          hidePaymentWidget();
+        }
+      }, () => {
+        btn.disabled = false;
+        btn.textContent = 'Post Note';
+      });
     }
   } catch (err) {
     console.error('Post error:', err);
@@ -389,183 +360,6 @@ document.getElementById('post-form').addEventListener('submit', async (e) => {
   }
 });
 
-function clearAllPolls() {
-  if (paymentPollTimer) clearInterval(paymentPollTimer);
-  paymentPollTimer = null;
-  allPollTimers.forEach(t => clearInterval(t));
-  allPollTimers = [];
-}
-
-function hidePaymentWidget() {
-  document.getElementById('payment-widget').classList.add('hidden');
-  clearAllPolls();
-  document.getElementById('post-btn').disabled = false;
-  document.getElementById('post-btn').textContent = 'Post Note';
-}
-
-function showPaymentWidget(data) {
-  const widget = document.getElementById('payment-widget');
-  currentPayData = data;
-  currentBolt11 = data.bolt11 || (data.lightning && data.lightning.bolt11) || '';
-  const methods = data.methods || [];
-  const payHash = data.payment_hash || (data.lightning && data.lightning.payment_hash) || '';
-
-  widget.classList.remove('hidden');
-
-  document.getElementById('tab-lightning').classList.toggle('hidden', !methods.includes('lightning'));
-  document.getElementById('tab-tempo').classList.toggle('hidden', !methods.includes('tempo'));
-
-  if (data.tempo) {
-    document.getElementById('tempo-amount').textContent = data.tempo.amount_usd + ' USD';
-    document.getElementById('tempo-recipient').textContent = data.tempo.recipient;
-    document.getElementById('tempo-token').textContent = data.tempo.currency.slice(0, 10) + '...' + data.tempo.currency.slice(-4);
-    document.getElementById('tempo-network').textContent = data.tempo.testnet ? '(testnet)' : '(mainnet)';
-    document.getElementById('tempo-tx-input').value = '';
-    document.getElementById('tempo-status-text').textContent = '';
-  }
-
-  switchPayTab(methods[0] || 'lightning');
-
-  // Hide the standalone BC button (payInvoice handles BC internally)
-  const bcBtn = document.getElementById('bc-pay-btn');
-  if (bcBtn) bcBtn.classList.add('hidden');
-
-  const title = document.getElementById('payment-widget-title');
-  if (data._deposit) {
-    title.textContent = `Deposit ${data.deposit_amount_sats || ''} sats:`;
-  } else if (data._vote) {
-    title.textContent = `Pay to ${data._vote.direction === 1 ? 'upvote' : 'downvote'} (${data._vote.amount} sats):`;
-  } else {
-    title.textContent = 'Pay to post your note:';
-  }
-
-  // Use shared payInvoice for Lightning path (handles BC wallet + QR + polling)
-  const statusText = document.getElementById('payment-status-text');
-  if (methods.includes('lightning') && currentBolt11) {
-    payInvoice(currentBolt11, payHash, statusText, async () => {
-      if (data._deposit) {
-        await confirmDeposit(data.token, payHash);
-      } else if (data._vote) {
-        await confirmVoteAfterPay(data._vote.eventId, data._vote.direction, data.token, payHash, data._vote.amount);
-      } else {
-        await confirmPayment(data.token, payHash, 'lightning');
-      }
-    }, document.getElementById('qr-canvas'), document.getElementById('bolt11-display'));
-  } else {
-    statusText.textContent = '';
-  }
-}
-
-function switchPayTab(method) {
-  activePayMethod = method;
-  document.getElementById('pay-lightning').classList.toggle('hidden', method !== 'lightning');
-  document.getElementById('pay-tempo').classList.toggle('hidden', method !== 'tempo');
-  const lnTab = document.getElementById('tab-lightning');
-  const tempoTab = document.getElementById('tab-tempo');
-  // Preserve hidden state (tab may be unavailable for this payment)
-  const lnHidden = lnTab.classList.contains('hidden');
-  const tempoHidden = tempoTab.classList.contains('hidden');
-  lnTab.className = (lnHidden ? 'hidden ' : '') + (method === 'lightning' ? 'px-3 py-1 rounded bg-primary' : 'px-3 py-1 rounded bg-alt');
-  tempoTab.className = (tempoHidden ? 'hidden ' : '') + (method === 'tempo' ? 'px-3 py-1 rounded bg-primary' : 'px-3 py-1 rounded bg-alt');
-}
-
-async function confirmTempo() {
-  const txHash = document.getElementById('tempo-tx-input').value.trim();
-  if (!txHash || !txHash.startsWith('0x')) {
-    document.getElementById('tempo-status-text').textContent = 'Enter a valid tx hash (0x...)';
-    document.getElementById('tempo-status-text').style.color = 'var(--error)';
-    return;
-  }
-
-  const statusText = document.getElementById('tempo-status-text');
-  statusText.textContent = 'Verifying on-chain...';
-  statusText.style.color = 'var(--dim)';
-
-  if (currentPayData._deposit) {
-    await confirmDeposit(currentPayData.token, txHash, 'tempo');
-  } else if (currentPayData._vote) {
-    await confirmVoteAfterPay(currentPayData._vote.eventId, currentPayData._vote.direction, currentPayData.token, txHash, currentPayData._vote.amount);
-  } else {
-    await confirmPayment(currentPayData.token, txHash, 'tempo');
-  }
-}
-
-async function confirmVoteAfterPay(eventId, direction, token, paymentId, amountSats) {
-  try {
-    const body = { token, method: paymentId.startsWith('0x') ? 'tempo' : 'lightning' };
-    if (paymentId.startsWith('0x')) body.tx_hash = paymentId;
-    else body.payment_hash = paymentId;
-    const resp = await fetch(`/api/v1/events/${eventId}/vote/confirm`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body),
-    });
-    const d = await resp.json();
-    if (d.voted) {
-      voteSuccess(eventId, direction, amountSats, d.new_value_sats);
-      hidePaymentWidget();
-    }
-  } catch (e) { console.error('Vote confirm error:', e); }
-}
-
-async function confirmPayment(token, paymentId, method) {
-  try {
-    const body = { token, method };
-    if (method === 'tempo') {
-      body.tx_hash = paymentId;
-    } else {
-      body.payment_hash = paymentId;
-    }
-
-    const resp = await fetch('/api/post/confirm', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body),
-    });
-    const data = await resp.json();
-
-    if (data.paid) {
-      if (paymentPollTimer) clearInterval(paymentPollTimer);
-      const msg = 'Note posted!';
-      document.getElementById('payment-status-text').textContent = msg;
-      document.getElementById('tempo-status-text').textContent = msg;
-      document.getElementById('tempo-status-text').style.color = 'var(--accent)';
-      document.getElementById('post-content').value = '';
-      clearReplyState();
-      setTimeout(() => {
-        document.getElementById('payment-widget').classList.add('hidden');
-        document.getElementById('post-btn').disabled = false;
-        document.getElementById('post-btn').textContent = 'Post Note';
-        document.getElementById('payment-status-text').style.color = 'var(--dim)';
-      }, 2000);
-    } else {
-      const errMsg = data.detail || 'Payment not confirmed yet';
-      document.getElementById('tempo-status-text').textContent = errMsg;
-      document.getElementById('tempo-status-text').style.color = 'var(--error)';
-    }
-  } catch (err) {
-    console.error('Confirm error:', err);
-    document.getElementById('tempo-status-text').textContent = 'Error confirming payment';
-    document.getElementById('tempo-status-text').style.color = 'var(--error)';
-  }
-}
-
-function copyBolt11() {
-  navigator.clipboard.writeText(currentBolt11).then(() => {
-    const btn = event.target;
-    btn.textContent = '[copied!]';
-    setTimeout(() => btn.textContent = '[copy]', 1500);
-  });
-}
-
-function copyTempoAddr() {
-  if (!currentPayData || !currentPayData.tempo) return;
-  navigator.clipboard.writeText(currentPayData.tempo.recipient).then(() => {
-    const btn = event.target;
-    btn.textContent = '[copied!]';
-    setTimeout(() => btn.textContent = '[copy]', 1500);
-  });
-}
 
 // ---- Voting ----
 let pendingVoteDir = {};  // event_id -> direction
@@ -603,7 +397,7 @@ function cancelVote(eventId) {
   delete pendingVoteDir[eventId];
   delete votePending[eventId];
   if (voteDebounce[eventId]) { clearTimeout(voteDebounce[eventId]); delete voteDebounce[eventId]; }
-  clearAllPolls();
+  hidePaymentWidget();
 }
 
 async function submitVote(eventId) {
@@ -640,7 +434,7 @@ async function submitVote(eventId) {
 }
 
 function voteSuccess(eventId, direction, amount, newValue) {
-  clearAllPolls();
+  hidePaymentWidget();
   delete votePending[eventId];
   const valueEl = document.getElementById(`value-${eventId}`);
   if (valueEl) valueEl.textContent = newValue;
@@ -657,8 +451,22 @@ function voteSuccess(eventId, direction, amount, newValue) {
 
 function showVotePayment(eventId, direction, data) {
   const amount = (data.lightning && data.lightning.amount_sats) || (data.amount_sats) || 21;
-  data._vote = { eventId, direction, amount };
-  showPaymentWidget(data);
+  data._title = `Pay to ${direction === 1 ? 'upvote' : 'downvote'} (${amount} sats):`;
+  showPaymentWidget(data, async (token, paymentId, method) => {
+    const body = { token, method };
+    if (method === 'tempo') body.tx_hash = paymentId;
+    else body.payment_hash = paymentId;
+    const resp = await fetch(`/api/v1/events/${eventId}/vote/confirm`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    const d = await resp.json();
+    if (d.voted) {
+      voteSuccess(eventId, direction, amount, d.new_value_sats);
+      hidePaymentWidget();
+    }
+  });
 }
 
 // ---- Replies ----
@@ -779,35 +587,6 @@ async function setSort(mode) {
   }
 }
 
-// ---- Deposit Confirm ----
-async function confirmDeposit(token, paymentId, method) {
-  method = method || 'lightning';
-  const body = { token, method };
-  if (method === 'tempo') body.tx_hash = paymentId;
-  else body.payment_hash = paymentId;
-
-  try {
-    const resp = await authFetch('/api/v1/account/deposit/confirm', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body),
-    });
-    const data = await resp.json();
-    if (data.deposited) {
-      document.getElementById('payment-status-text').textContent = `Deposited ${data.amount_sats} sats!`;
-      document.getElementById('tempo-status-text').textContent = `Deposited ${data.amount_sats} sats!`;
-      document.getElementById('tempo-status-text').style.color = 'var(--accent)';
-      setTimeout(hidePaymentWidget, 2000);
-    } else {
-      const msg = data.detail || 'Deposit failed';
-      document.getElementById('payment-status-text').textContent = msg;
-      document.getElementById('tempo-status-text').textContent = msg;
-      document.getElementById('tempo-status-text').style.color = 'var(--error)';
-    }
-  } catch (err) {
-    console.error('Deposit confirm error:', err);
-  }
-}
 
 // ---- Header Account Link ----
 function updateHeaderLink() {
