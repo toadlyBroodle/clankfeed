@@ -40,8 +40,7 @@
           <span class="c-dim" id="relay-pubkey"></span>
         </div>
       </div>
-      <div class="text-xs text-right flex flex-col items-end gap-1">
-        <bc-button></bc-button>
+      <div class="text-xs text-right">
         <a href="/profile" id="header-account-link" class="px-2 py-1 rounded inline-block" style="border: 1px solid var(--border); text-decoration: none;">Login</a>
       </div>
     </div>
@@ -185,6 +184,7 @@ function connect() {
           try {
             metadataCache[event.pubkey] = JSON.parse(event.content);
             renderNotes();  // re-render to show updated names
+            updateHeaderLink();  // update if this is the logged-in user's metadata
           } catch (err) {}
         } else {
           addNote(event);
