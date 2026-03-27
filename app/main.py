@@ -371,6 +371,11 @@ async def privacy():
     return FileResponse(STATIC_DIR / "privacy.html")
 
 
+@app.get("/profile")
+async def profile():
+    return FileResponse(STATIC_DIR / "profile.html")
+
+
 @app.get("/favicon.ico")
 async def favicon():
     return Response(content=_FAVICON, media_type="image/png")

@@ -24,6 +24,7 @@
     window.__nostrCrypto = { schnorr, sha256, bytesToHex, hexToBytes, getPublicKey: schnorr.getPublicKey };
   </script>
   <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/nostr-auth.js"></script>
 </head>
 <body class="min-h-screen p-4 max-w-2xl mx-auto">
 
@@ -41,51 +42,7 @@
       </div>
       <div class="text-xs text-right flex flex-col items-end gap-1">
         <bc-button></bc-button>
-        <div id="account-area">
-          <div id="account-logged-out">
-            <button class="px-2 py-1 rounded" id="btn-ext-login" onclick="loginWithExtension()" style="display:none">Login with Extension</button>
-            <div class="mt-1">
-              <input id="login-nsec" type="password" class="p-1 rounded w-login" placeholder="nsec or hex privkey">
-              <button class="px-2 py-1 rounded" onclick="loginWithNsec()" class="bg-alt">Login</button>
-            </div>
-            <button class="px-2 py-1 rounded mt-1" onclick="createIdentity()">New Identity</button>
-            <span id="login-error" class="c-error text-xs hidden block mt-1"></span>
-          </div>
-          <div id="account-logged-in" class="hidden">
-            <span class="c-accent" id="balance-display">0 sats</span>
-            <button class="px-2 py-1 rounded ml-1" onclick="showDeposit()" class="bg-primary">Deposit</button>
-            <button class="px-2 py-1 rounded ml-1" onclick="showProfile()" class="bg-alt">Profile</button>
-            <button class="px-2 py-1 rounded ml-1" onclick="logout()" class="bg-alt">Logout</button>
-            <div id="deposit-area" class="hidden mt-1">
-              <input id="deposit-amount" type="number" class="p-1 rounded w-deposit" min="21" value="5000" placeholder="sats">
-              <button class="px-2 py-1 rounded" onclick="startDeposit()">Pay</button>
-            </div>
-            <div id="profile-area" class="hidden mt-1 p-2 rounded text-left profile-panel">
-              <p class="mb-1 c-accent">Profile</p>
-              <div class="mb-1"><label class="c-dim">Name:</label><br>
-                <input id="prof-name" type="text" class="p-1 rounded w-full" maxlength="100"></div>
-              <div class="mb-1"><label class="c-dim">About:</label><br>
-                <input id="prof-about" type="text" class="p-1 rounded w-full" maxlength="200"></div>
-              <div class="mb-1"><label class="c-dim">Avatar URL:</label><br>
-                <input id="prof-picture" type="text" class="p-1 rounded w-full" placeholder="https://..."></div>
-              <button class="px-2 py-1 rounded" onclick="saveProfile()">Save Profile</button>
-              <span id="prof-status" class="ml-1 c-dim"></span>
-              <div class="mt-2 keys-section">
-                <p class="mb-1 c-dim">Nostr Keys:</p>
-                <div class="flex items-center gap-1 mb-1">
-                  <span class="c-dim">pub:</span>
-                  <input id="key-pub" type="text" readonly onclick="this.select()" class="p-1 rounded flex-1 fs-key bg-alt">
-                  <span class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('key-pub').value)">[copy]</span>
-                </div>
-                <div class="flex items-center gap-1">
-                  <span class="c-dim">priv:</span>
-                  <input id="key-priv" type="password" readonly onclick="this.type='text';this.select()" class="p-1 rounded flex-1 fs-key bg-alt">
-                  <span class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('key-priv').value)">[copy]</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
+        <a href="/profile" id="header-account-link" class="px-2 py-1 rounded inline-block" style="border: 1px solid var(--border); text-decoration: none;">Login</a>
       </div>
     </div>
   </header>
@@ -207,73 +164,6 @@ let metadataCache = {};  // pubkey -> {name, about, picture}
 let currentSort = 'newest';
 let allPollTimers = [];  // track all setInterval IDs for cleanup
 let relayPubkey = '';  // set from NIP-11, used to label relay-signed notes as 'anon'
-
-// ---- Nostr Auth State ----
-// Auth modes: 'extension' (NIP-07), 'nsec' (local key), or '' (logged out)
-let authMode = localStorage.getItem('cf_auth_mode') || '';
-let userPubkey = localStorage.getItem('cf_pubkey') || '';
-let userNsec = localStorage.getItem('cf_nsec') || '';  // hex privkey (only for nsec mode)
-
-function isLoggedIn() {
-  return !!(authMode && userPubkey);
-}
-
-// ---- Nostr Signing Helpers ----
-function computeEventId(event) {
-  const { sha256, bytesToHex } = window.__nostrCrypto;
-  const canonical = JSON.stringify([0, event.pubkey, event.created_at, event.kind, event.tags, event.content]);
-  return bytesToHex(sha256(new TextEncoder().encode(canonical)));
-}
-
-function signEventLocally(privkeyHex, event) {
-  const { schnorr, bytesToHex, hexToBytes, getPublicKey } = window.__nostrCrypto;
-  event.pubkey = bytesToHex(getPublicKey(privkeyHex));
-  event.id = computeEventId(event);
-  event.sig = bytesToHex(schnorr.sign(event.id, privkeyHex));
-  return event;
-}
-
-function derivePubkey(privkeyHex) {
-  const { bytesToHex, getPublicKey } = window.__nostrCrypto;
-  return bytesToHex(getPublicKey(privkeyHex));
-}
-
-async function signNostrEvent(event) {
-  if (authMode === 'extension' && window.nostr) {
-    return await window.nostr.signEvent(event);
-  } else if (authMode === 'nsec' && userNsec) {
-    return signEventLocally(userNsec, event);
-  }
-  return null;
-}
-
-async function makeNip98Auth(url, method) {
-  const event = {
-    kind: 27235,
-    created_at: Math.floor(Date.now() / 1000),
-    tags: [["u", url], ["method", method.toUpperCase()]],
-    content: "",
-  };
-  const signed = await signNostrEvent(event);
-  if (!signed) return null;
-  return "Nostr " + btoa(JSON.stringify(signed));
-}
-
-async function authHeaders(url, method, extra) {
-  const headers = extra ? {...extra} : {};
-  const nip98 = await makeNip98Auth(url, method);
-  if (nip98) {
-    headers['Authorization'] = nip98;
-  }
-  return headers;
-}
-
-async function authFetch(url, options = {}) {
-  const method = (options.method || 'GET').toUpperCase();
-  const fullUrl = new URL(url, window.location.origin).href;
-  const hdrs = await authHeaders(fullUrl, method, options.headers || {});
-  return fetch(url, {...options, headers: hdrs});
-}
 
 // ---- WebSocket Relay Client ----
 function connect() {
@@ -407,8 +297,8 @@ function renderNoteCard(n, isReply) {
       <div class="flex-1">
         ${replyIndicator}
         <div class="flex items-center gap-2 mb-1">
-          ${avatarHtml}
-          <span class="text-xs font-bold c-accent">${esc(displayName || pk)}</span>${displayName && pk !== 'anon' ? `<span class="text-xs c-dim ml-1">${pk}</span>` : ''}
+          <a href="/profile?pubkey=${n.pubkey}" style="text-decoration:none;display:contents;">${avatarHtml}</a>
+          <a href="/profile?pubkey=${n.pubkey}" class="text-xs font-bold c-accent" style="text-decoration:none;">${esc(displayName || pk)}</a>${displayName && pk !== 'anon' ? `<span class="text-xs c-dim ml-1">${pk}</span>` : ''}
           <span class="flex-1"></span>
           <span class="text-xs c-dim">${timeAgo}</span>
         </div>
@@ -451,11 +341,7 @@ function relativeTime(ts) {
   return Math.floor(diff / 86400) + 'd ago';
 }
 
-function esc(s) {
-  const d = document.createElement('div');
-  d.textContent = s;
-  return d.innerHTML;
-}
+
 
 // ---- Post Form + Payment ----
 document.getElementById('post-form').addEventListener('submit', async (e) => {
@@ -489,7 +375,7 @@ document.getElementById('post-form').addEventListener('submit', async (e) => {
       clearReplyState();
       btn.disabled = false;
       btn.textContent = 'Post Note';
-      if (isLoggedIn()) updateAccountUI();  // refresh balance
+      // balance updated on profile page
       return;
     }
 
@@ -848,7 +734,7 @@ function voteSuccess(eventId, direction, amount, newValue) {
   status.style.color = 'var(--accent)';
   const vpay = document.getElementById(`vote-pay-${eventId}`);
   if (vpay) vpay.remove();
-  if (isLoggedIn()) updateAccountUI();
+  // balance updated on profile page
   setTimeout(() => cancelVote(eventId), 2000);
 }
 
@@ -1115,7 +1001,6 @@ async function confirmDeposit(token, paymentId, method) {
       document.getElementById('payment-status-text').textContent = `Deposited ${data.amount_sats} sats!`;
       document.getElementById('tempo-status-text').textContent = `Deposited ${data.amount_sats} sats!`;
       document.getElementById('tempo-status-text').style.color = 'var(--accent)';
-      updateAccountUI();
       setTimeout(hidePaymentWidget, 2000);
     } else {
       const msg = data.detail || 'Deposit failed';
@@ -1128,292 +1013,25 @@ async function confirmDeposit(token, paymentId, method) {
   }
 }
 
-// ---- Account ----
-async function loginWithExtension() {
-  const errEl = document.getElementById('login-error');
-  errEl.classList.add('hidden');
-  try {
-    if (!window.nostr) { errEl.textContent = 'No extension found'; errEl.classList.remove('hidden'); return; }
-    const pubkey = await window.nostr.getPublicKey();
-    authMode = 'extension';
-    userPubkey = pubkey;
-    userNsec = '';
-    localStorage.setItem('cf_auth_mode', authMode);
-    localStorage.setItem('cf_pubkey', userPubkey);
-    localStorage.removeItem('cf_nsec');
-    localStorage.removeItem('clankfeed_api_key');
-    updateAccountUI();
-  } catch (err) {
-    errEl.textContent = 'Extension login failed';
-    errEl.classList.remove('hidden');
-  }
-}
-
-async function loginWithNsec() {
-  const input = document.getElementById('login-nsec').value.trim();
-  const errEl = document.getElementById('login-error');
-  errEl.classList.add('hidden');
-  if (!input) return;
-
-  try {
-    // Support hex (64 chars) or nsec (bech32 starting with nsec1)
-    let privhex = input;
-    if (input.startsWith('nsec1')) {
-      errEl.textContent = 'Paste hex private key (bech32 nsec not yet supported)';
-      errEl.classList.remove('hidden');
-      return;
-    }
-    if (!/^[0-9a-f]{64}$/i.test(privhex)) {
-      errEl.textContent = 'Invalid key: must be 64-char hex';
-      errEl.classList.remove('hidden');
-      return;
-    }
-    const pubkey = derivePubkey(privhex);
-    authMode = 'nsec';
-    userPubkey = pubkey;
-    userNsec = privhex;
-    localStorage.setItem('cf_auth_mode', authMode);
-    localStorage.setItem('cf_pubkey', userPubkey);
-    localStorage.setItem('cf_nsec', userNsec);
-    localStorage.removeItem('clankfeed_api_key');
-    document.getElementById('login-nsec').value = '';
-    updateAccountUI();
-  } catch (err) {
-    errEl.textContent = 'Invalid private key';
-    errEl.classList.remove('hidden');
-  }
-}
-
-function createIdentity() {
-  const errEl = document.getElementById('login-error');
-  errEl.classList.add('hidden');
-  try {
-    const { bytesToHex } = window.__nostrCrypto;
-    const privBytes = crypto.getRandomValues(new Uint8Array(32));
-    const privhex = bytesToHex(privBytes);
-    const pubkey = derivePubkey(privhex);
-    authMode = 'nsec';
-    userPubkey = pubkey;
-    userNsec = privhex;
-    localStorage.setItem('cf_auth_mode', authMode);
-    localStorage.setItem('cf_pubkey', userPubkey);
-    localStorage.setItem('cf_nsec', userNsec);
-    localStorage.removeItem('clankfeed_api_key');
-    updateAccountUI();
-    showNewIdentity(privhex, pubkey);
-  } catch (err) {
-    errEl.textContent = 'Failed to generate identity';
-    errEl.classList.remove('hidden');
-  }
-}
-
-function showNewIdentity(privhex, pubkey) {
-  const old = document.getElementById('api-key-display');
-  if (old) old.remove();
-  const loggedIn = document.getElementById('account-logged-in');
-  const el = document.createElement('div');
-  el.id = 'api-key-display';
-  el.className = 'mt-1 p-2 rounded b-accent profile-panel';
-  el.innerHTML = `<p class="c-accent mb-1">Save your private key!</p>
-    <div class="flex items-center gap-1 mb-1">
-      <span class="c-dim text-xs">pub:</span>
-      <input type="text" value="${esc(pubkey)}" readonly onclick="this.select()" class="p-1 rounded text-xs flex-1 bg-alt">
-    </div>
-    <div class="flex items-center gap-1">
-      <span class="c-dim text-xs">priv:</span>
-      <input type="text" value="${esc(privhex)}" readonly onclick="this.select()" class="p-1 rounded text-xs flex-1 bg-alt">
-      <span class="copy-btn text-xs" id="copy-new-priv">[copy]</span>
-    </div>
-    <button class="text-xs mt-1 px-2 py-1 rounded bg-alt" id="dismiss-new-id">Dismiss</button>`;
-  loggedIn.appendChild(el);
-  document.getElementById('copy-new-priv').onclick = () => {
-    navigator.clipboard.writeText(privhex);
-    document.getElementById('copy-new-priv').textContent = '[copied!]';
-    setTimeout(() => { document.getElementById('copy-new-priv').textContent = '[copy]'; }, 1500);
-  };
-  document.getElementById('dismiss-new-id').onclick = () => el.remove();
-}
-
-function logout() {
-  authMode = '';
-  userPubkey = '';
-  userNsec = '';
-  localStorage.removeItem('cf_auth_mode');
-  localStorage.removeItem('cf_pubkey');
-  localStorage.removeItem('cf_nsec');
-  localStorage.removeItem('clankfeed_api_key');  // clean up legacy
-  updateAccountUI();
-}
-
-async function updateAccountUI() {
-  const loggedOut = document.getElementById('account-logged-out');
-  const loggedIn = document.getElementById('account-logged-in');
-
-  // Detect NIP-07 extension
-  const extBtn = document.getElementById('btn-ext-login');
-  if (extBtn) extBtn.style.display = window.nostr ? '' : 'none';
-
-  if (!isLoggedIn()) {
-    loggedOut.classList.remove('hidden');
-    loggedIn.classList.add('hidden');
-    return;
-  }
-
-  try {
-    const resp = await authFetch('/api/v1/account/balance');
-    if (!resp.ok) {
-      logout();
-      return;
-    }
-    const data = await resp.json();
-    document.getElementById('balance-display').textContent = data.balance_sats + ' sats';
-    loggedOut.classList.add('hidden');
-    loggedIn.classList.remove('hidden');
-  } catch (err) {
-    logout();
-  }
-}
-
-function showDeposit() {
-  document.getElementById('deposit-area').classList.toggle('hidden');
-  document.getElementById('profile-area').classList.add('hidden');
-}
-
-async function showProfile() {
-  const profArea = document.getElementById('profile-area');
-  profArea.classList.toggle('hidden');
-  document.getElementById('deposit-area').classList.add('hidden');
-
-  if (!profArea.classList.contains('hidden')) {
-    // Load keys and populate profile fields
-    try {
-      // Populate keys from local state or server
-      document.getElementById('key-pub').value = userPubkey || '';
-      if (authMode === 'nsec') {
-        document.getElementById('key-priv').value = userNsec || '';
-      } else if (authMode === 'extension') {
-        document.getElementById('key-priv').value = '(managed by extension)';
-      } else {
-        // Legacy: fetch from server
-        const resp = await authFetch('/api/v1/account/key', { method: 'POST' });
-        const data = await resp.json();
-        document.getElementById('key-pub').value = data.nostr_pubkey || '';
-        document.getElementById('key-priv').value = data.nostr_privkey || '';
-      }
-      const pk = userPubkey || document.getElementById('key-pub').value;
-      const meta = metadataCache[pk];
-      if (meta) {
-        document.getElementById('prof-name').value = meta.name || meta.display_name || '';
-        document.getElementById('prof-about').value = meta.about || '';
-        document.getElementById('prof-picture').value = meta.picture || '';
-      }
-    } catch (e) {}
-  }
-}
-
-async function saveProfile() {
-  const name = document.getElementById('prof-name').value.trim();
-  const about = document.getElementById('prof-about').value.trim();
-  const picture = document.getElementById('prof-picture').value.trim();
-  const status = document.getElementById('prof-status');
-
-  if (!name && !about && !picture) {
-    status.textContent = 'Fill at least one field';
-    status.style.color = 'var(--error)';
-    return;
-  }
-
-  status.textContent = 'Saving...';
-  status.style.color = 'var(--dim)';
-
-  const metadata = {};
-  if (name) metadata.name = name;
-  if (about) metadata.about = about;
-  if (picture) metadata.picture = picture;
-
-  try {
-    // If we can sign locally, create and submit a kind:0 event directly
-    if (authMode === 'extension' || (authMode === 'nsec' && userNsec)) {
-      const event = {
-        kind: 0,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: [],
-        content: JSON.stringify(metadata),
-      };
-      const signed = await signNostrEvent(event);
-      if (!signed) {
-        status.textContent = 'Signing failed';
-        status.style.color = 'var(--error)';
-        return;
-      }
-      const resp = await authFetch('/api/v1/events', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({event: signed}),
-      });
-      const data = await resp.json();
-      if (data.paid || data.event) {
-        status.textContent = 'Saved!';
-        status.style.color = 'var(--accent)';
-        // Update local metadata cache
-        metadataCache[userPubkey] = metadata;
-        renderNotes();
-      } else if (data.status === 'payment_required' || data.token) {
-        status.textContent = 'Needs payment (deposit credits first)';
-        status.style.color = 'var(--accent)';
-      } else {
-        status.textContent = data.detail || 'Failed';
-        status.style.color = 'var(--error)';
-      }
-    } else {
-      // Fallback: server-side signing via profile endpoint
-      const resp = await authFetch('/api/v1/account/profile', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(metadata),
-      });
-      const data = await resp.json();
-      if (data.updated) {
-        status.textContent = 'Saved!';
-        status.style.color = 'var(--accent)';
-        updateAccountUI();
-      } else if (data.status === 'payment_required') {
-        status.textContent = 'Needs payment (deposit credits first)';
-        status.style.color = 'var(--accent)';
-      } else {
-        status.textContent = data.detail || 'Failed';
-        status.style.color = 'var(--error)';
-      }
-    }
-  } catch (e) {
-    status.textContent = 'Error';
-    status.style.color = 'var(--error)';
-  }
-}
-
-async function startDeposit() {
-  const amount = parseInt(document.getElementById('deposit-amount').value) || 100;
-  try {
-    const resp = await authFetch('/api/v1/account/deposit', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({amount_sats: amount}),
-    });
-    const data = await resp.json();
-    if (data.status === 'payment_required') {
-      // Show the main payment widget for the deposit
-      showPaymentWidget({...data, _deposit: true});
-    }
-  } catch (err) {
-    console.error('Deposit error:', err);
+// ---- Header Account Link ----
+function updateHeaderLink() {
+  const link = document.getElementById('header-account-link');
+  if (!link) return;
+  if (isLoggedIn()) {
+    const meta = metadataCache[userPubkey];
+    const name = (meta && (meta.name || meta.display_name)) || userPubkey.slice(0, 8) + '...';
+    link.textContent = name;
+    link.style.color = 'var(--accent)';
+  } else {
+    link.textContent = 'Login';
+    link.style.color = '';
   }
 }
 
 // ---- Init ----
 connect();
-updateAccountUI();
-// NIP-07 extensions inject window.nostr after page load; re-check after delay
-setTimeout(() => { updateAccountUI(); }, 500);
+updateHeaderLink();
+setTimeout(updateHeaderLink, 500);
 
 // Fetch relay info for pubkey display
 fetch('/', { headers: { 'Accept': 'application/nostr+json' }})
@@ -1424,6 +1042,7 @@ fetch('/', { headers: { 'Accept': 'application/nostr+json' }})
       document.getElementById('relay-pubkey').textContent =
         'relay: ' + info.pubkey.slice(0, 12) + '...';
       renderNotes();  // re-render with 'anon' labels
+      updateHeaderLink();  // update with user's display name if available
     }
   })
   .catch(e => console.error('NIP-11 fetch failed:', e));
