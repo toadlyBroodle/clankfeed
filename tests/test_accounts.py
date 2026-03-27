@@ -200,6 +200,7 @@ class TestCreditSpendingPaymentMode:
             json={"content": "no credits"},
             headers=_nip98_json(url, "POST", TEST_SK2),
         )
+        # Authenticated but insufficient credits: returns payment options
         assert resp.status_code == 200
         assert "token" in resp.json()
         assert "tempo" in resp.json().get("methods", [])

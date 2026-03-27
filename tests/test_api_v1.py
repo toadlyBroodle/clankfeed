@@ -1,5 +1,6 @@
 """Tests for the v1 REST API for agents."""
 
+import base64
 import json
 import time
 import pytest
@@ -11,6 +12,16 @@ from httpx import AsyncClient, ASGITransport
 from app.database import engine, Base
 from app.limiter import limiter
 from app.nostr import sign_event
+
+
+TEST_AUTH_SK = "bb" * 32
+
+def _nip98(url: str, method: str) -> dict:
+    """Build NIP-98 Authorization header."""
+    event = {"kind": 27235, "created_at": int(time.time()), "tags": [["u", url], ["method", method.upper()]], "content": ""}
+    signed = sign_event(TEST_AUTH_SK, event)
+    token = base64.b64encode(json.dumps(signed).encode()).decode()
+    return {"Authorization": f"Nostr {token}", "Content-Type": "application/json"}
 
 
 TEST_SK = "b" * 64
@@ -105,48 +116,39 @@ async def full_agent_client(monkeypatch):
 
 class TestSubmitEvent:
     @pytest.mark.asyncio
-    async def test_submit_returns_402_with_tempo(self, agent_client):
-        """Agent-signed event returns 402 with Tempo payment options."""
-        event = _make_signed_event("agent says hi")
-        resp = await agent_client.post("/api/v1/events", json={"event": event})
+    async def test_submit_returns_402_without_auth(self, agent_client):
+        """No auth header returns 402 with WWW-Authenticate for payment discovery."""
+        resp = await agent_client.post("/api/v1/events", json={})
         assert resp.status_code == 402
-        data = resp.json()
-        assert data["status"] == "payment_required"
-        assert "tempo" in data["methods"]
-        assert data["tempo"]["recipient"] == "0xTestRecipient"
-        assert data["token"]
-        assert data["event_id"] == event["id"]
+        assert "payment-required" in resp.json().get("type", "")
 
     @pytest.mark.asyncio
     async def test_submit_returns_402_with_both_methods(self, full_agent_client):
-        """With both enabled, returns Lightning + Tempo options."""
-        event = _make_signed_event("both methods")
+        """With both enabled, no auth returns 402 with WWW-Authenticate."""
         with _mock_create_invoice("both"):
-            resp = await full_agent_client.post("/api/v1/events", json={"event": event})
+            resp = await full_agent_client.post("/api/v1/events", json={})
         assert resp.status_code == 402
-        data = resp.json()
-        assert "lightning" in data["methods"]
-        assert "tempo" in data["methods"]
-        assert "bolt11" in data.get("lightning", {})
+        assert "payment-required" in resp.json().get("type", "")
 
     @pytest.mark.asyncio
-    async def test_submit_rejects_bad_signature(self, agent_client):
+    async def test_submit_rejects_bad_signature(self, client):
+        """Body validation works in no-payment mode."""
         event = _make_signed_event()
         event["sig"] = "00" * 64
-        resp = await agent_client.post("/api/v1/events", json={"event": event})
+        resp = await client.post("/api/v1/events", json={"event": event})
         assert resp.status_code == 400
         assert "bad signature" in resp.json()["detail"]
 
     @pytest.mark.asyncio
-    async def test_submit_rejects_blocked_kind(self, agent_client):
+    async def test_submit_rejects_blocked_kind(self, client):
         event = _make_signed_event(kind=3)  # kind 3 (contacts) not in ALLOWED_EVENT_KINDS
-        resp = await agent_client.post("/api/v1/events", json={"event": event})
+        resp = await client.post("/api/v1/events", json={"event": event})
         assert resp.status_code == 400
         assert "kind 3" in resp.json()["detail"]
 
     @pytest.mark.asyncio
-    async def test_submit_missing_event_field(self, agent_client):
-        resp = await agent_client.post("/api/v1/events", json={"content": "no event"})
+    async def test_submit_missing_event_field(self, client):
+        resp = await client.post("/api/v1/events", json={"content": "no event"})
         assert resp.status_code == 400
 
     @pytest.mark.asyncio
@@ -167,7 +169,8 @@ class TestConfirmEvent:
     @pytest.mark.asyncio
     async def test_tempo_confirm(self, agent_client):
         event = _make_signed_event("confirm me")
-        resp = await agent_client.post("/api/v1/events", json={"event": event})
+        hdrs = _nip98("http://test/api/v1/events", "POST")
+        resp = await agent_client.post("/api/v1/events", json={"event": event}, headers=hdrs)
         token = resp.json()["token"]
 
         with _mock_tempo_verify(paid=True):
@@ -181,8 +184,9 @@ class TestConfirmEvent:
     @pytest.mark.asyncio
     async def test_lightning_confirm(self, full_agent_client):
         event = _make_signed_event("ln confirm")
+        hdrs = _nip98("http://test/api/v1/events", "POST")
         with _mock_create_invoice("lnconf"):
-            resp = await full_agent_client.post("/api/v1/events", json={"event": event})
+            resp = await full_agent_client.post("/api/v1/events", json={"event": event}, headers=hdrs)
         data = resp.json()
 
         with _mock_check_payment(paid=True):
@@ -196,8 +200,9 @@ class TestConfirmEvent:
     @pytest.mark.asyncio
     async def test_confirm_replay_rejected(self, agent_client):
         """Same tx_hash rejected on second use."""
+        hdrs = _nip98("http://test/api/v1/events", "POST")
         e1 = _make_signed_event("first")
-        resp = await agent_client.post("/api/v1/events", json={"event": e1})
+        resp = await agent_client.post("/api/v1/events", json={"event": e1}, headers=hdrs)
         t1 = resp.json()["token"]
         with _mock_tempo_verify(paid=True):
             resp = await agent_client.post("/api/v1/events/confirm", json={
@@ -206,7 +211,8 @@ class TestConfirmEvent:
         assert resp.status_code == 200
 
         e2 = _make_signed_event("second")
-        resp = await agent_client.post("/api/v1/events", json={"event": e2})
+        hdrs2 = _nip98("http://test/api/v1/events", "POST")
+        resp = await agent_client.post("/api/v1/events", json={"event": e2}, headers=hdrs2)
         t2 = resp.json()["token"]
         with _mock_tempo_verify(paid=True):
             resp = await agent_client.post("/api/v1/events/confirm", json={
@@ -295,7 +301,8 @@ class TestRelayPost:
     @pytest.mark.asyncio
     async def test_relay_post_with_tempo(self, agent_client):
         """Tempo enabled: returns payment options."""
-        resp = await agent_client.post("/api/v1/post", json={"content": "needs payment"})
+        hdrs = _nip98("http://test/api/v1/post", "POST")
+        resp = await agent_client.post("/api/v1/post", json={"content": "needs payment"}, headers=hdrs)
         assert resp.status_code == 200
         data = resp.json()
         assert "tempo" in data["methods"]

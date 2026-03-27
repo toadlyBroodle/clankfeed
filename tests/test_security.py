@@ -1,5 +1,7 @@
 """Security tests: input validation, injection attempts, malformed payloads."""
 
+import base64
+import json
 import time
 import pytest
 import pytest_asyncio
@@ -13,6 +15,13 @@ from app.nostr import sign_event
 
 
 TEST_SK = "b" * 64
+
+
+def _nip98(url: str, method: str) -> dict:
+    event = {"kind": 27235, "created_at": int(time.time()), "tags": [["u", url], ["method", method.upper()]], "content": ""}
+    signed = sign_event(TEST_SK, event)
+    token = base64.b64encode(json.dumps(signed).encode()).decode()
+    return {"Authorization": f"Nostr {token}", "Content-Type": "application/json"}
 
 
 @pytest.fixture(autouse=True)
@@ -187,7 +196,7 @@ class TestPaymentInputValidation:
     async def test_invalid_tx_hash_format(self, sec_client):
         """tx_hash must be 0x + 64 hex chars."""
         event = _make_event("tx test")
-        resp = await sec_client.post("/api/v1/events", json={"event": event})
+        resp = await sec_client.post("/api/v1/events", json={"event": event}, headers=_nip98("http://test/api/v1/events", "POST"))
         token = resp.json()["token"]
 
         # Too short
@@ -201,7 +210,7 @@ class TestPaymentInputValidation:
     async def test_tx_hash_non_hex(self, sec_client):
         """tx_hash with non-hex characters rejected."""
         event = _make_event("hex test")
-        resp = await sec_client.post("/api/v1/events", json={"event": event})
+        resp = await sec_client.post("/api/v1/events", json={"event": event}, headers=_nip98("http://test/api/v1/events", "POST"))
         token = resp.json()["token"]
 
         resp = await sec_client.post("/api/v1/events/confirm", json={
@@ -214,7 +223,7 @@ class TestPaymentInputValidation:
     async def test_payment_hash_non_hex(self, sec_client):
         """payment_hash with non-hex characters rejected."""
         event = _make_event("ln hex test")
-        resp = await sec_client.post("/api/v1/events", json={"event": event})
+        resp = await sec_client.post("/api/v1/events", json={"event": event}, headers=_nip98("http://test/api/v1/events", "POST"))
         token = resp.json()["token"]
 
         resp = await sec_client.post("/api/v1/events/confirm", json={
@@ -238,7 +247,7 @@ class TestPaymentInputValidation:
     async def test_method_injection(self, sec_client):
         """Unknown payment method handled gracefully."""
         event = _make_event("method test")
-        resp = await sec_client.post("/api/v1/events", json={"event": event})
+        resp = await sec_client.post("/api/v1/events", json={"event": event}, headers=_nip98("http://test/api/v1/events", "POST"))
         token = resp.json()["token"]
 
         resp = await sec_client.post("/api/v1/events/confirm", json={

@@ -198,6 +198,17 @@ async def submit_event(request: Request, db: AsyncSession = Depends(get_db)):
 
     Body: {"event": {id, pubkey, created_at, kind, tags, content, sig}}
     """
+    # Early 402 for payment discovery: if payment is required and there's
+    # no Authorization header at all, return 402 before body validation.
+    # This lets mppscan probe the endpoint without needing a valid body.
+    auth_header = request.headers.get("authorization", "")
+    if (payments_enabled() or tempo_enabled()) and not auth_header:
+        return await _error_402_with_challenge({
+            "type": "https://paymentauth.org/problems/payment-required",
+            "title": "Payment required",
+            "detail": "Submit with Authorization: Payment header or fund your account",
+        })
+
     try:
         body = await request.json()
     except Exception as e:
@@ -460,6 +471,15 @@ async def relay_post(request: Request, db: AsyncSession = Depends(get_db)):
 
     Body: {"content": "...", "display_name": "...", "reply_to": "...", "amount_sats": 21}
     """
+    # Early 402 for payment discovery (no auth header = probe request)
+    auth_header = request.headers.get("authorization", "")
+    if (payments_enabled() or tempo_enabled()) and not auth_header:
+        return await _error_402_with_challenge({
+            "type": "https://paymentauth.org/problems/payment-required",
+            "title": "Payment required",
+            "detail": "Submit with Authorization: Payment header or fund your account",
+        })
+
     try:
         body = await request.json()
     except Exception as e:
