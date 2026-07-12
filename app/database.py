@@ -34,7 +34,7 @@ async def init_db():
     # Migrate: add new columns to existing tables if missing
     async with engine.begin() as conn:
         for table, columns in [
-            ("nostr_events", [("value_sats", "INTEGER DEFAULT 0"), ("value_usd", "TEXT DEFAULT '0'")]),
+            ("nostr_events", [("value_sats", "INTEGER DEFAULT 0"), ("value_usd", "TEXT DEFAULT '0'"), ("zap_sats", "INTEGER DEFAULT 0")]),
             ("pending_events", [("amount_sats", "INTEGER DEFAULT 0"), ("amount_usd", "TEXT DEFAULT '0'")]),
             ("accounts", [("nostr_privkey", "VARCHAR(64)"), ("nostr_pubkey", "VARCHAR(64)")]),
         ]:

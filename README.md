@@ -93,7 +93,10 @@ Allowed event kinds: 0 (metadata), 1 (text notes), 9735 (zap receipts).
 
 ## Zap ranking
 
-Notes are rankable by value: `GET /api/v1/events?sort=value`. Paid votes add their full amount to a note's `value_sats`. External NIP-57 zap receipts published to the relay are verified (zap request signature, bolt11 amount match, target stored here) and credit the zapped note's `value_sats` minus a relay cut (`ZAP_RANK_CUT_PCT`, default 20%). The cut discounts zaps relative to paid votes, since the relay can't collect fees on zaps paid peer-to-peer.
+Two segregated rankings keep paid and external value fair:
+
+- `GET /api/v1/events?sort=value` — clankfeed-paid value only (`value_sats`: posts + paid votes; the relay keeps the payment, so gaming it costs real money).
+- `GET /api/v1/events?sort=zaps` — external NIP-57 zaps only (`zap_sats`). Receipts published to the relay are verified (zap request signature, bolt11 amount match, target stored here) and credited minus a cut (`ZAP_RANK_CUT_PCT`, default 20%). Zaps are peer-to-peer, so the relay collects no fee; they never mix into the paid ranking.
 
 ## Setup
 

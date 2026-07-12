@@ -16,8 +16,9 @@ class NostrEvent(Base):
     content = Column(Text, nullable=False)
     sig = Column(String(128), nullable=False)  # 64-byte hex Schnorr sig
     stored_at = Column(DateTime, default=lambda: datetime.utcnow())
-    value_sats = Column(Integer, default=0)
+    value_sats = Column(Integer, default=0)  # clankfeed-paid value (posts + votes)
     value_usd = Column(Text, default="0")
+    zap_sats = Column(Integer, default=0)  # external NIP-57 zaps, kept separate for fair ranking
 
     __table_args__ = (
         Index("ix_nostr_events_pubkey", "pubkey"),
@@ -25,6 +26,7 @@ class NostrEvent(Base):
         Index("ix_nostr_events_created_at", "created_at"),
         Index("ix_nostr_events_kind_created_at", "kind", "created_at"),
         Index("ix_nostr_events_value_sats", "value_sats"),
+        Index("ix_nostr_events_zap_sats", "zap_sats"),
     )
 
 

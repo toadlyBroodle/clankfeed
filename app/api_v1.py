@@ -414,7 +414,7 @@ async def read_events(
 ):
     """Query stored events with optional filters.
 
-    sort: "newest" (default) or "value" (highest value first)
+    sort: "newest" (default), "value" (paid value first), or "zaps" (external zaps first)
     min_value/max_value: filter by value_sats range
     reply_to: filter replies to a specific event ID
     """
@@ -439,7 +439,7 @@ async def read_events(
 
     filt["limit"] = min(max(limit, 1), 500)
 
-    if sort not in ("newest", "value"):
+    if sort not in ("newest", "value", "zaps"):
         sort = "newest"
 
     events = await query_events(db, [filt], sort=sort, min_value=min_value, max_value=max_value)
