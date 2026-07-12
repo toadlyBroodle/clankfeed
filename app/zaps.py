@@ -1,8 +1,9 @@
 """NIP-57 zap receipt (kind 9735) verification.
 
 Zap receipts are accepted without payment. A verified receipt credits the
-zapped note's value_sats with the zap amount minus ZAP_RANK_CUT_PCT, so
-external zaps influence value-ranked feeds at a discount.
+zapped note's sats_ext with the full zap amount — the fair combined ranking
+shared with clankfeed votes. sats_clank (money paid to clankfeed) is
+untouched by zaps.
 
 Verification enforced here: receipt signature (upstream via validate_event),
 embedded kind-9734 zap request id + signature, bolt11 amount == zap request

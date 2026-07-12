@@ -19,9 +19,13 @@ class Settings:
     BASE_URL: str = os.getenv("BASE_URL", "ws://localhost:8089")
     APP_PORT: int = int(os.getenv("APP_PORT", "8089"))
 
-    # Percentage of a zap's amount withheld from ranking credit (anti self-zap).
-    # A 100-sat zap credits value_sats with 100 * (100 - cut) / 100.
-    ZAP_RANK_CUT_PCT: int = min(100, max(0, int(os.getenv("ZAP_RANK_CUT_PCT", "20"))))
+    # External feed ingestion: subscribe to zap receipts on public relays and
+    # store the zapped notes with sats_ext credit (see app/ingest.py).
+    EXTERNAL_INGEST: bool = os.getenv("EXTERNAL_INGEST", "true").lower() == "true"
+    EXTERNAL_RELAYS: str = os.getenv(
+        "EXTERNAL_RELAYS",
+        "wss://relay.damus.io,wss://nos.lol,wss://relay.primal.net",
+    )
 
 
     # Tempo stablecoin settings
@@ -60,11 +64,13 @@ PENDING_EVENT_TTL = 600  # 10 minutes
 MAX_CONNECTIONS = 200
 ALLOWED_EVENT_KINDS = {0, 1}  # kind 0 (metadata) + kind 1 (text notes)
 NWC_EVENT_KINDS = {13194, 23194, 23195}  # NIP-47 NWC: info, request, response
-ZAP_EVENT_KINDS = {9735}  # NIP-57 zap receipts: free, verified, credit value_sats minus cut
+ZAP_EVENT_KINDS = {9735}  # NIP-57 zap receipts: free, verified, credit sats_ext at face value
 MAX_ZAP_TAG_VALUE_LENGTH = 4096  # description tag holds a full JSON zap request
 
 # SECURITY: Rate limits per IP. Change values here, not in individual files.
 RATE_POST = "10/minute"
+RATE_ACCOUNT_CREATE = "3/hour"  # account rows + keypair generation are unauthenticated
+RATE_INVOICE = "10/minute"  # endpoints that mint LNBits invoices / pending rows pre-payment
 RATE_PAY = "30/minute"
 RATE_PAY_STATUS = "30/minute"
 RATE_POST_CONFIRM = "10/minute"

@@ -31,10 +31,18 @@ async def init_db():
     # Enable WAL mode for concurrent reads
     async with engine.begin() as conn:
         await conn.execute(sqlalchemy.text("PRAGMA journal_mode=WAL"))
+    # Migrate: rename legacy rank columns (value_sats/zap_sats era)
+    async with engine.begin() as conn:
+        result = await conn.execute(sqlalchemy.text("PRAGMA table_info(nostr_events)"))
+        existing = {row[1] for row in result.fetchall()}
+        for old, new in [("value_sats", "sats_clank"), ("zap_sats", "sats_ext")]:
+            if old in existing and new not in existing:
+                await conn.execute(sqlalchemy.text(f"ALTER TABLE nostr_events RENAME COLUMN {old} TO {new}"))
+
     # Migrate: add new columns to existing tables if missing
     async with engine.begin() as conn:
         for table, columns in [
-            ("nostr_events", [("value_sats", "INTEGER DEFAULT 0"), ("value_usd", "TEXT DEFAULT '0'"), ("zap_sats", "INTEGER DEFAULT 0")]),
+            ("nostr_events", [("sats_clank", "INTEGER DEFAULT 0"), ("value_usd", "TEXT DEFAULT '0'"), ("sats_ext", "INTEGER DEFAULT 0")]),
             ("pending_events", [("amount_sats", "INTEGER DEFAULT 0"), ("amount_usd", "TEXT DEFAULT '0'")]),
             ("accounts", [("nostr_privkey", "VARCHAR(64)"), ("nostr_pubkey", "VARCHAR(64)")]),
         ]:

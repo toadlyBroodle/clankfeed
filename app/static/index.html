@@ -227,7 +227,7 @@ function renderNoteCard(n, isReply) {
   const pk = (relayPubkey && n.pubkey === relayPubkey) ? 'anon' : n.pubkey.slice(0, 4) + '...' + n.pubkey.slice(-4);
   const timeAgo = relativeTime(n.created_at);
   const pic = getAvatar(n);
-  const valueSats = n.value_sats || 0;
+  const valueSats = n.sats_clank || 0;
   const avatarHtml = pic
     ? `<img class="avatar" src="${esc(pic)}" onerror="this.outerHTML='<div class=\\'avatar-placeholder\\'>${esc(displayName || pk).charAt(0).toUpperCase()}</div>'">`
     : `<div class="avatar-placeholder">${esc(displayName || pk).charAt(0).toUpperCase()}</div>`;
@@ -418,7 +418,7 @@ async function submitVote(eventId) {
     const data = await resp.json();
 
     if (data.voted) {
-      voteSuccess(eventId, direction, amount, data.new_value_sats);
+      voteSuccess(eventId, direction, amount, data.new_sats_clank);
     } else if (data.status === 'payment_required') {
       // Show payment widget for the vote
       status.textContent = '';
@@ -439,7 +439,7 @@ function voteSuccess(eventId, direction, amount, newValue) {
   const valueEl = document.getElementById(`value-${eventId}`);
   if (valueEl) valueEl.textContent = newValue;
   const note = notes.find(n => n.id === eventId);
-  if (note) note.value_sats = newValue;
+  if (note) note.sats_clank = newValue;
   const status = document.getElementById(`vote-status-${eventId}`);
   status.textContent = (direction === 1 ? '+' : '-') + amount + ' sats';
   status.style.color = 'var(--accent)';
@@ -463,7 +463,7 @@ function showVotePayment(eventId, direction, data) {
     });
     const d = await resp.json();
     if (d.voted) {
-      voteSuccess(eventId, direction, amount, d.new_value_sats);
+      voteSuccess(eventId, direction, amount, d.new_sats_clank);
       hidePaymentWidget();
     }
   }, null, document.getElementById(`vote-prompt-${eventId}`));

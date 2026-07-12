@@ -2,6 +2,7 @@ import os
 
 # Force test mode before any app imports
 os.environ["AUTH_ROOT_KEY"] = "test-mode"
+os.environ["EXTERNAL_INGEST"] = "false"  # no network in unit tests
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite://"  # in-memory
 os.environ["RELAY_PRIVATE_KEY"] = "a" * 64  # test key
 os.environ["TEMPO_RECIPIENT"] = ""  # disable Tempo in unit tests (no-payment mode)

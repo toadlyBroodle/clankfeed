@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import (
     settings, payments_enabled, tempo_enabled,
     RATE_POST, RATE_POST_CONFIRM, RATE_EVENTS_READ, RATE_PAY_STATUS,
+    RATE_ACCOUNT_CREATE, RATE_INVOICE,
     ALLOWED_EVENT_KINDS, MAX_CONTENT_LENGTH, MAX_EVENT_TAGS,
     MAX_DISPLAY_NAME, MAX_TAG_VALUE_LENGTH,
 )
@@ -258,16 +259,16 @@ async def submit_event(request: Request, db: AsyncSession = Depends(get_db)):
 
     # No payment configured: store directly with minimum value
     if not payments_enabled() and not tempo_enabled():
-        await store_event(db, event, value_sats=req_sats, value_usd=req_usd)
+        await store_event(db, event, sats_clank=req_sats, value_usd=req_usd)
         await broadcast_event(event)
-        return {"paid": True, "event": event, "value_sats": req_sats}
+        return {"paid": True, "event": event, "sats_clank": req_sats}
 
     # Try spending credits (X-Account-Key header)
     spent, _ = await _try_spend_credits(request, db, req_sats)
     if spent:
-        await store_event(db, event, value_sats=req_sats, value_usd=req_usd)
+        await store_event(db, event, sats_clank=req_sats, value_usd=req_usd)
         await broadcast_event(event)
-        return {"paid": True, "event": event, "value_sats": req_sats, "credits_used": True}
+        return {"paid": True, "event": event, "sats_clank": req_sats, "credits_used": True}
 
     # Check for inline MPP credential (one-shot payment)
     auth = request.headers.get("Authorization", "")
@@ -354,7 +355,7 @@ async def confirm_event(request: Request, db: AsyncSession = Depends(get_db)):
         payment_id = tx_hash
     else:
         payment_hash = body.get("payment_hash", "")
-        if not payment_hash or not re.fullmatch(r"[0-9a-fA-F]+", payment_hash):
+        if not payment_hash or not re.fullmatch(r"[0-9a-fA-F]{64}", payment_hash):
             return JSONResponse(status_code=400, content={"detail": "payment_hash must be hex"})
         if pending.payment_hash and not _hmac.compare_digest(pending.payment_hash, payment_hash):
             return JSONResponse(status_code=400, content={"detail": "Payment hash mismatch"})
@@ -382,14 +383,14 @@ async def confirm_event(request: Request, db: AsyncSession = Depends(get_db)):
     else:
         v_sats = pending.amount_sats or settings.POST_PRICE_SATS
 
-    await store_event(db, event, value_sats=v_sats, value_usd=v_usd)
+    await store_event(db, event, sats_clank=v_sats, value_usd=v_usd)
     await db.delete(pending)
     await db.commit()
     await broadcast_event(event)
     logger.info("Event confirmed (paid): id=%s method=%s value=%d sats",
                 event["id"][:12], method, v_sats)
 
-    return {"paid": True, "event": event, "value_sats": v_sats}
+    return {"paid": True, "event": event, "sats_clank": v_sats}
 
 
 # ---------------------------------------------------------------------------
@@ -415,7 +416,7 @@ async def read_events(
     """Query stored events with optional filters.
 
     sort: "newest" (default), "value" (paid value first), or "zaps" (external zaps first)
-    min_value/max_value: filter by value_sats range
+    min_value/max_value: filter by sats_clank range
     reply_to: filter replies to a specific event ID
     """
     filt = {}
@@ -439,7 +440,7 @@ async def read_events(
 
     filt["limit"] = min(max(limit, 1), 500)
 
-    if sort not in ("newest", "value", "zaps"):
+    if sort not in ("newest", "value", "clank", "zaps", "ext"):
         sort = "newest"
 
     events = await query_events(db, [filt], sort=sort, min_value=min_value, max_value=max_value)
@@ -535,16 +536,16 @@ async def relay_post(request: Request, db: AsyncSession = Depends(get_db)):
 
     # No payment configured: store directly
     if not payments_enabled() and not tempo_enabled():
-        await store_event(db, signed, value_sats=req_sats, value_usd=req_usd)
+        await store_event(db, signed, sats_clank=req_sats, value_usd=req_usd)
         await broadcast_event(signed)
-        return {"paid": True, "event": signed, "value_sats": req_sats}
+        return {"paid": True, "event": signed, "sats_clank": req_sats}
 
     # Try spending credits
     spent, _ = await _try_spend_credits(request, db, req_sats)
     if spent:
-        await store_event(db, signed, value_sats=req_sats, value_usd=req_usd)
+        await store_event(db, signed, sats_clank=req_sats, value_usd=req_usd)
         await broadcast_event(signed)
-        return {"paid": True, "event": signed, "value_sats": req_sats, "credits_used": True}
+        return {"paid": True, "event": signed, "sats_clank": req_sats, "credits_used": True}
 
     # Store as pending
     token = await store_pending_event(db, signed, amount_sats=req_sats, amount_usd=req_usd)
@@ -634,7 +635,7 @@ async def get_replies(
 # ---------------------------------------------------------------------------
 
 @router.post("/events/{event_id}/vote")
-@limiter.limit(RATE_POST)
+@limiter.limit(RATE_INVOICE)
 async def vote_event(request: Request, event_id: str, db: AsyncSession = Depends(get_db)):
     """Vote on a note. Requires payment.
 
@@ -690,11 +691,12 @@ async def vote_event(request: Request, event_id: str, db: AsyncSession = Depends
             payment_id="free",
         )
         db.add(vote)
-        row.value_sats = (row.value_sats or 0) + (direction * req_sats)
+        row.sats_clank = (row.sats_clank or 0) + (direction * req_sats)
+        row.sats_ext = (row.sats_ext or 0) + (direction * req_sats)
         await db.commit()
         logger.info("Vote recorded (free): event=%s dir=%+d amount=%d sats new_value=%d",
-                    event_id[:12], direction, req_sats, row.value_sats)
-        return {"voted": True, "direction": direction, "amount_sats": req_sats, "new_value_sats": row.value_sats}
+                    event_id[:12], direction, req_sats, row.sats_clank)
+        return {"voted": True, "direction": direction, "amount_sats": req_sats, "new_sats_clank": row.sats_clank, "new_sats_ext": row.sats_ext}
 
     # Try spending credits
     spent, api_key = await _try_spend_credits(request, db, req_sats)
@@ -710,11 +712,12 @@ async def vote_event(request: Request, event_id: str, db: AsyncSession = Depends
             payment_id=f"credits:{api_key[:16]}",
         )
         db.add(vote)
-        row.value_sats = (row.value_sats or 0) + (direction * req_sats)
+        row.sats_clank = (row.sats_clank or 0) + (direction * req_sats)
+        row.sats_ext = (row.sats_ext or 0) + (direction * req_sats)
         await db.commit()
         logger.info("Vote recorded (credits): event=%s dir=%+d amount=%d sats new_value=%d account=%s",
-                    event_id[:12], direction, req_sats, row.value_sats, api_key[:12])
-        return {"voted": True, "direction": direction, "amount_sats": req_sats, "new_value_sats": row.value_sats, "credits_used": True}
+                    event_id[:12], direction, req_sats, row.sats_clank, api_key[:12])
+        return {"voted": True, "direction": direction, "amount_sats": req_sats, "new_sats_clank": row.sats_clank, "new_sats_ext": row.sats_ext, "credits_used": True}
 
     # Store vote intent as pending event (reuse PendingEvent table)
     token = await store_pending_event(
@@ -786,7 +789,7 @@ async def confirm_vote(request: Request, event_id: str, db: AsyncSession = Depen
         payment_id = tx_hash
     else:
         pay_hash = body.get("payment_hash", "")
-        if not pay_hash or not re.fullmatch(r"[0-9a-fA-F]+", pay_hash):
+        if not pay_hash or not re.fullmatch(r"[0-9a-fA-F]{64}", pay_hash):
             return JSONResponse(status_code=400, content={"detail": "payment_hash must be hex"})
         if pending.payment_hash and not _hmac.compare_digest(pending.payment_hash, pay_hash):
             return JSONResponse(status_code=400, content={"detail": "Payment hash mismatch"})
@@ -834,17 +837,19 @@ async def confirm_vote(request: Request, event_id: str, db: AsyncSession = Depen
         payment_id=payment_id,
     )
     db.add(vote)
-    row.value_sats = (row.value_sats or 0) + (direction * v_sats)
+    row.sats_clank = (row.sats_clank or 0) + (direction * v_sats)
+    row.sats_ext = (row.sats_ext or 0) + (direction * v_sats)
     await db.delete(pending)
     await db.commit()
     logger.info("Vote confirmed (paid): event=%s dir=%+d amount=%d sats method=%s new_value=%d",
-                event_id[:12], direction, v_sats, method, row.value_sats)
+                event_id[:12], direction, v_sats, method, row.sats_clank)
 
     return {
         "voted": True,
         "direction": direction,
         "amount_sats": v_sats,
-        "new_value_sats": row.value_sats,
+        "new_sats_clank": row.sats_clank,
+        "new_sats_ext": row.sats_ext,
     }
 
 
@@ -853,7 +858,7 @@ async def confirm_vote(request: Request, event_id: str, db: AsyncSession = Depen
 # ---------------------------------------------------------------------------
 
 @router.post("/account/create")
-@limiter.limit(RATE_POST)
+@limiter.limit(RATE_ACCOUNT_CREATE)
 async def account_create(request: Request, db: AsyncSession = Depends(get_db)):
     """Create a new account or import an existing Nostr key.
 
@@ -899,7 +904,7 @@ async def account_balance(request: Request, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/account/deposit")
-@limiter.limit(RATE_POST)
+@limiter.limit(RATE_INVOICE)
 async def account_deposit(request: Request, db: AsyncSession = Depends(get_db)):
     """Deposit credits. Returns 402 with payment options.
 
@@ -979,6 +984,15 @@ async def account_deposit_confirm(request: Request, db: AsyncSession = Depends(g
     if not pending or pending.expires_at.replace(tzinfo=None) < datetime.utcnow():
         return JSONResponse(status_code=404, content={"detail": "Token expired or not found"})
 
+    # SECURITY (H6): the deposit token must belong to the confirming account,
+    # and must actually be a deposit token (not an event/vote token).
+    try:
+        deposit_data = json.loads(pending.event_json)
+    except (json.JSONDecodeError, ValueError):
+        deposit_data = {}
+    if not isinstance(deposit_data, dict) or deposit_data.get("deposit_account") != api_key:
+        return JSONResponse(status_code=403, content={"detail": "Deposit token does not belong to this account"})
+
     # Verify payment (same logic as event confirm)
     if method == "tempo":
         tx_hash = body.get("tx_hash", "")
@@ -992,7 +1006,7 @@ async def account_deposit_confirm(request: Request, db: AsyncSession = Depends(g
         payment_id = tx_hash
     else:
         pay_hash = body.get("payment_hash", "")
-        if not pay_hash or not re.fullmatch(r"[0-9a-fA-F]+", pay_hash):
+        if not pay_hash or not re.fullmatch(r"[0-9a-fA-F]{64}", pay_hash):
             return JSONResponse(status_code=400, content={"detail": "payment_hash must be hex"})
         if pending.payment_hash and not _hmac.compare_digest(pending.payment_hash, pay_hash):
             return JSONResponse(status_code=400, content={"detail": "Payment hash mismatch"})
@@ -1103,13 +1117,13 @@ async def account_update_profile(request: Request, db: AsyncSession = Depends(ge
     req_sats = settings.POST_PRICE_SATS
     spent, _ = await _try_spend_credits(request, db, req_sats)
     if spent:
-        await store_event(db, signed, value_sats=req_sats)
+        await store_event(db, signed, sats_clank=req_sats)
         await broadcast_event(signed)
         return {"updated": True, "event": signed, "metadata": metadata}
 
     # No payment configured: store directly
     if not payments_enabled() and not tempo_enabled():
-        await store_event(db, signed, value_sats=req_sats)
+        await store_event(db, signed, sats_clank=req_sats)
         await broadcast_event(signed)
         return {"updated": True, "event": signed, "metadata": metadata}
 

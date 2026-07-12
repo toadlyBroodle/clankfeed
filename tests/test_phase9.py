@@ -39,19 +39,19 @@ def _make_event(content="test", kind=1, tags=None):
 class TestVariableAmounts:
     @pytest.mark.asyncio
     async def test_custom_amount_stored(self, client):
-        """Post with custom amount stores value_sats."""
+        """Post with custom amount stores sats_clank."""
         resp = await client.post("/api/v1/post", json={
             "content": "expensive note", "amount_sats": 100,
         })
         assert resp.status_code == 200
-        assert resp.json()["value_sats"] == 100
+        assert resp.json()["sats_clank"] == 100
 
     @pytest.mark.asyncio
     async def test_default_amount(self, client):
         """Post without amount uses minimum (21 sats)."""
         resp = await client.post("/api/v1/post", json={"content": "cheap note"})
         assert resp.status_code == 200
-        assert resp.json()["value_sats"] == 21
+        assert resp.json()["sats_clank"] == 21
 
     @pytest.mark.asyncio
     async def test_below_minimum_uses_minimum(self, client):
@@ -60,18 +60,18 @@ class TestVariableAmounts:
             "content": "too cheap", "amount_sats": 5,
         })
         assert resp.status_code == 200
-        assert resp.json()["value_sats"] == 21
+        assert resp.json()["sats_clank"] == 21
 
     @pytest.mark.asyncio
     async def test_value_in_read_response(self, client):
-        """GET /events returns value_sats on each event."""
+        """GET /events returns sats_clank on each event."""
         await client.post("/api/v1/post", json={
             "content": "valued note", "amount_sats": 500,
         })
         resp = await client.get("/api/v1/events?kinds=1&limit=1")
         events = resp.json()["events"]
         assert len(events) >= 1
-        assert events[0]["value_sats"] == 500
+        assert events[0]["sats_clank"] == 500
 
     @pytest.mark.asyncio
     async def test_agent_event_custom_amount(self, client):
@@ -81,7 +81,7 @@ class TestVariableAmounts:
             "event": event, "amount_sats": 200,
         })
         assert resp.status_code == 200
-        assert resp.json()["value_sats"] == 200
+        assert resp.json()["sats_clank"] == 200
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +98,7 @@ class TestSortAndFilter:
 
         resp = await client.get("/api/v1/events?sort=value&kinds=1")
         events = resp.json()["events"]
-        assert events[0]["value_sats"] >= events[-1]["value_sats"]
+        assert events[0]["sats_clank"] >= events[-1]["sats_clank"]
         assert events[0]["content"] == "high"
 
     @pytest.mark.asyncio
@@ -119,7 +119,7 @@ class TestSortAndFilter:
 
         resp = await client.get("/api/v1/events?min_value=100&kinds=1")
         events = resp.json()["events"]
-        assert all(e["value_sats"] >= 100 for e in events)
+        assert all(e["sats_clank"] >= 100 for e in events)
         assert any(e["content"] == "pricey" for e in events)
 
     @pytest.mark.asyncio
@@ -130,7 +130,7 @@ class TestSortAndFilter:
 
         resp = await client.get("/api/v1/events?max_value=100&kinds=1")
         events = resp.json()["events"]
-        assert all(e["value_sats"] <= 100 for e in events)
+        assert all(e["sats_clank"] <= 100 for e in events)
 
     @pytest.mark.asyncio
     async def test_combined_filters(self, client):
@@ -213,14 +213,14 @@ class TestVoting:
         """Upvote increases note value."""
         resp = await client.post("/api/v1/post", json={"content": "vote me"})
         event_id = resp.json()["event"]["id"]
-        initial_value = resp.json()["value_sats"]
+        initial_value = resp.json()["sats_clank"]
 
         resp = await client.post(f"/api/v1/events/{event_id}/vote", json={
             "direction": 1, "amount_sats": 50,
         })
         assert resp.status_code == 200
         assert resp.json()["voted"] is True
-        assert resp.json()["new_value_sats"] == initial_value + 50
+        assert resp.json()["new_sats_clank"] == initial_value + 50
 
     @pytest.mark.asyncio
     async def test_downvote(self, client):
@@ -234,7 +234,7 @@ class TestVoting:
             "direction": -1, "amount_sats": 30,
         })
         assert resp.status_code == 200
-        assert resp.json()["new_value_sats"] == 70  # 100 - 30
+        assert resp.json()["new_sats_clank"] == 70  # 100 - 30
 
     @pytest.mark.asyncio
     async def test_vote_invalid_direction(self, client):
@@ -259,4 +259,4 @@ class TestVoting:
         resp = await client.post(f"/api/v1/events/{eid}/vote", json={"direction": -1, "amount_sats": 25})
 
         # 21 (initial) + 50 + 100 - 25 = 146
-        assert resp.json()["new_value_sats"] == 146
+        assert resp.json()["new_sats_clank"] == 146

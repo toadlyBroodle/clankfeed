@@ -451,7 +451,7 @@ async function showPublicProfile(pubkey) {
     } else {
       container.innerHTML = notes.map(n => {
         const time = new Date(n.created_at * 1000).toLocaleDateString();
-        const sats = n.value_sats || 0;
+        const sats = n.sats_clank || 0;
         return `<div class="note-card p-3 rounded">
           <div class="flex justify-between items-start mb-1">
             <span class="text-xs c-dim">${time}</span>

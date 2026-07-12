@@ -93,10 +93,16 @@ Allowed event kinds: 0 (metadata), 1 (text notes), 9735 (zap receipts).
 
 ## Zap ranking
 
-Two segregated rankings keep paid and external value fair:
+Every note carries two sat tallies:
 
-- `GET /api/v1/events?sort=value` — clankfeed-paid value only (`value_sats`: posts + paid votes; the relay keeps the payment, so gaming it costs real money).
-- `GET /api/v1/events?sort=zaps` — external NIP-57 zaps only (`zap_sats`). Receipts published to the relay are verified (zap request signature, bolt11 amount match, target stored here) and credited minus a cut (`ZAP_RANK_CUT_PCT`, default 20%). Zaps are peer-to-peer, so the relay collects no fee; they never mix into the paid ranking.
+- `sats_clank` — money paid to clankfeed (posting fees + paid votes). Sort with `GET /api/v1/events?sort=clank` (alias `value`). Gaming this costs real money; the relay keeps the payment.
+- `sats_ext` — the fair combined ranking: external NIP-57 zaps at face value plus clankfeed votes at their fee-inclusive amount. Sort with `GET /api/v1/events?sort=ext` (alias `zaps`).
+
+Zap receipts (kind 9735) are accepted free and verified: embedded zap request signature, bolt11 amount match, and the zapped note must be stored on the relay.
+
+## External feed ingestion
+
+To populate the external feed, the relay subscribes to zap receipts on public relays (`EXTERNAL_RELAYS`, default damus/nos.lol/primal) and stores each verified zapped note with its zap value in `sats_ext`. Only zapped notes are ingested, never the firehose. Disable with `EXTERNAL_INGEST=false`.
 
 ## Setup
 

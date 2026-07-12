@@ -100,9 +100,10 @@ async def query_events(
 ) -> list[dict]:
     """Query stored events matching any of the given filters.
 
-    sort: "newest" (created_at DESC), "value" (value_sats DESC),
-    or "zaps" (zap_sats DESC — external NIP-57 zaps, ranked separately)
-    min_value/max_value: filter by value_sats range
+    sort: "newest" (created_at DESC), "clank"/"value" (sats_clank DESC:
+    money paid to clankfeed), or "ext"/"zaps" (sats_ext DESC: fair ranking
+    of zaps + votes at face value)
+    min_value/max_value: filter by sats_clank range
     """
     results = []
     seen_ids = set()
@@ -125,9 +126,9 @@ async def query_events(
 
         # Value filters
         if min_value is not None:
-            conditions.append(NostrEvent.value_sats >= min_value)
+            conditions.append(NostrEvent.sats_clank >= min_value)
         if max_value is not None:
-            conditions.append(NostrEvent.value_sats <= max_value)
+            conditions.append(NostrEvent.sats_clank <= max_value)
 
         # Reply filter
         if "reply_to" in filt:
@@ -136,10 +137,10 @@ async def query_events(
             conditions.append(NostrEvent.tags.contains(f'"e", "{filt["reply_to"]}"'))
 
         # Sort order
-        if sort == "value":
-            stmt = select(NostrEvent).order_by(NostrEvent.value_sats.desc(), NostrEvent.created_at.desc())
-        elif sort == "zaps":
-            stmt = select(NostrEvent).order_by(NostrEvent.zap_sats.desc(), NostrEvent.created_at.desc())
+        if sort in ("clank", "value"):
+            stmt = select(NostrEvent).order_by(NostrEvent.sats_clank.desc(), NostrEvent.created_at.desc())
+        elif sort in ("ext", "zaps"):
+            stmt = select(NostrEvent).order_by(NostrEvent.sats_ext.desc(), NostrEvent.created_at.desc())
         else:
             stmt = select(NostrEvent).order_by(NostrEvent.created_at.desc())
 
@@ -169,16 +170,16 @@ def row_to_event(row: NostrEvent) -> dict:
         "content": row.content,
         "sig": row.sig,
     }
-    if row.value_sats:
-        d["value_sats"] = row.value_sats
-    if row.zap_sats:
-        d["zap_sats"] = row.zap_sats
+    if row.sats_clank:
+        d["sats_clank"] = row.sats_clank
+    if row.sats_ext:
+        d["sats_ext"] = row.sats_ext
     if row.value_usd and row.value_usd != "0":
         d["value_usd"] = row.value_usd
     return d
 
 
-async def store_event(db: AsyncSession, event: dict, value_sats: int = 0, value_usd: str = "0"):
+async def store_event(db: AsyncSession, event: dict, sats_clank: int = 0, value_usd: str = "0"):
     """Store a validated, paid event in the database.
 
     Kind 0 (metadata) is replaceable: only the latest per pubkey is kept.
@@ -209,13 +210,13 @@ async def store_event(db: AsyncSession, event: dict, value_sats: int = 0, value_
         tags=json.dumps(event["tags"]),
         content=event["content"],
         sig=event["sig"],
-        value_sats=value_sats,
+        sats_clank=sats_clank,
         value_usd=value_usd,
     )
     db.add(row)
     await db.commit()
     logger.info("Event stored: id=%s kind=%d pubkey=%s value=%d sats",
-                event["id"][:12], event["kind"], event["pubkey"][:12], value_sats)
+                event["id"][:12], event["kind"], event["pubkey"][:12], sats_clank)
 
 
 async def store_pending_event(
@@ -347,7 +348,7 @@ async def _handle_event(conn: Connection, msg: list, db: AsyncSession):
 
 async def _handle_zap_receipt(conn: Connection, event: dict, db: AsyncSession):
     """Store a verified NIP-57 zap receipt without payment and credit the
-    zapped note's value_sats with the amount minus ZAP_RANK_CUT_PCT."""
+    zapped note's sats_ext with the full zap amount."""
     event_id = event["id"]
 
     if len(event["content"]) > MAX_CONTENT_LENGTH:
@@ -378,10 +379,19 @@ async def _handle_zap_receipt(conn: Connection, event: dict, db: AsyncSession):
         await conn.send(["OK", event_id, False, "invalid: zapped event not found on this relay"])
         return
 
-    # Segregated from value_sats: external zaps are peer-to-peer (no relay
-    # fee deters self-zaps), so they rank in their own column at a discount.
-    credited = info["amount_sats"] * (100 - settings.ZAP_RANK_CUT_PCT) // 100
-    target.zap_sats = (target.zap_sats or 0) + credited
+    await apply_zap_receipt(db, event, info, target)
+    await conn.send(["OK", event_id, True, ""])
+    await broadcast_event(event)
+
+
+async def apply_zap_receipt(db: AsyncSession, event: dict, info: dict, target: NostrEvent):
+    """Credit a verified zap receipt to its target note and store the receipt.
+
+    sats_ext is the fair combined ranking: external zaps at face value,
+    alongside clankfeed votes (whose amount includes the relay fee).
+    sats_clank (money paid to clankfeed) is never touched by zaps.
+    """
+    target.sats_ext = (target.sats_ext or 0) + info["amount_sats"]
     db.add(Vote(
         id=secrets.token_hex(32),
         event_id=target.id,
@@ -389,15 +399,13 @@ async def _handle_zap_receipt(conn: Connection, event: dict, db: AsyncSession):
         direction=1,
         amount_sats=info["amount_sats"],
         amount_usd="0",
-        payment_id=f"zap:{event_id}",
+        payment_id=f"zap:{event['id']}",
     ))
     await store_event(db, event)  # commits the vote + value credit too
-    await conn.send(["OK", event_id, True, ""])
-    await broadcast_event(event)
     logger.info(
-        "Zap receipt: id=%s target=%s sender=%s amount=%d sats credited=%d (cut=%d%%) new_zap_sats=%d",
-        event_id[:12], target.id[:12], info["sender_pubkey"][:12],
-        info["amount_sats"], credited, settings.ZAP_RANK_CUT_PCT, target.zap_sats,
+        "Zap receipt: id=%s target=%s sender=%s amount=%d sats new_sats_ext=%d",
+        event["id"][:12], target.id[:12], info["sender_pubkey"][:12],
+        info["amount_sats"], target.sats_ext,
     )
 
 

@@ -1,4 +1,4 @@
-"""Tests for NIP-57 zap receipt ingestion and value ranking credit."""
+"""Tests for NIP-57 zap receipt ingestion and the sats_ext fair ranking."""
 
 import json
 import time
@@ -62,7 +62,7 @@ def _make_receipt(zap_request: dict, bolt11: str = "lnbc210n1fakedata"):
 
 async def _store_note(note: dict):
     async with async_session() as db:
-        await store_event(db, note, value_sats=0)
+        await store_event(db, note, sats_clank=0)
 
 
 async def _send(event: dict) -> FakeConn:
@@ -73,10 +73,10 @@ async def _send(event: dict) -> FakeConn:
 
 
 async def _get_sats(event_id: str) -> tuple[int, int]:
-    """Return (value_sats, zap_sats) for an event."""
+    """Return (sats_clank, sats_ext) for an event."""
     async with async_session() as db:
         row = await db.get(NostrEvent, event_id)
-        return row.value_sats, row.zap_sats
+        return row.sats_clank, row.sats_ext
 
 
 def test_bolt11_amounts():
@@ -91,7 +91,7 @@ def test_bolt11_amounts():
 
 
 @pytest.mark.asyncio
-async def test_zap_receipt_credits_value_with_cut(client):
+async def test_zap_receipt_credits_sats_ext_full(client):
     note = _make_note()
     await _store_note(note)
 
@@ -99,10 +99,10 @@ async def test_zap_receipt_credits_value_with_cut(client):
     conn = await _send(receipt)
 
     assert conn.sent[-1][:3] == ["OK", receipt["id"], True]
-    # 21 sats zapped, default 20% cut -> 16 credited, segregated from paid value
-    value, zaps = await _get_sats(note["id"])
-    assert zaps == 16
-    assert value == 0  # external zaps never touch paid value ranking
+    # 21 sats zapped -> 21 credited at face value, segregated from paid value
+    clank, ext = await _get_sats(note["id"])
+    assert ext == 21
+    assert clank == 0  # external zaps never touch the clankfeed-paid ranking
 
     async with async_session() as db:
         vote = (await db.execute(
@@ -112,7 +112,7 @@ async def test_zap_receipt_credits_value_with_cut(client):
         assert vote.direction == 1
         stored = await db.get(NostrEvent, receipt["id"])
         assert stored is not None
-        assert stored.zap_sats == 0  # receipt itself carries no rank value
+        assert stored.sats_ext == 0  # receipt itself carries no rank value
 
 
 @pytest.mark.asyncio
@@ -125,7 +125,7 @@ async def test_duplicate_receipt_credits_once(client):
     conn = await _send(receipt)
 
     assert conn.sent[-1][2] is True  # duplicate acked
-    assert (await _get_sats(note["id"]))[1] == 16  # not 32
+    assert (await _get_sats(note["id"]))[1] == 21  # not 42
 
 
 @pytest.mark.asyncio
@@ -166,19 +166,35 @@ async def test_tampered_zap_request_rejected(client):
 
 
 @pytest.mark.asyncio
-async def test_sort_by_zaps_segregated_from_value(client):
+async def test_sort_ext_segregated_from_clank(client):
     zapped = _make_note("zapped note")
     unzapped = _make_note("plain note")
     await _store_note(zapped)
     await _store_note(unzapped)
     await _send(_make_receipt(_make_zap_request(zapped["id"])))
 
-    resp = await client.get("/api/v1/events?sort=zaps")
+    resp = await client.get("/api/v1/events?sort=ext")
     assert resp.status_code == 200
     events = resp.json()["events"]
     assert events[0]["id"] == zapped["id"]
-    assert events[0]["zap_sats"] == 16
-    assert "value_sats" not in events[0]  # paid ranking untouched
+    assert events[0]["sats_ext"] == 21
+    assert "sats_clank" not in events[0]  # paid ranking untouched
+
+
+@pytest.mark.asyncio
+async def test_vote_credits_both_rankings(client):
+    note = _make_note("voted note")
+    await _store_note(note)
+
+    resp = await client.post(f"/api/v1/events/{note['id']}/vote",
+                             json={"direction": 1, "amount_sats": 50})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["new_sats_clank"] == 50
+    assert data["new_sats_ext"] == 50  # fee-inclusive amount joins the fair ranking
+
+    clank, ext = await _get_sats(note["id"])
+    assert (clank, ext) == (50, 50)
 
 
 @pytest.mark.asyncio

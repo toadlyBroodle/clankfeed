@@ -281,3 +281,23 @@ class TestDeposit:
     async def test_deposit_no_auth(self, tempo_client):
         resp = await tempo_client.post("/api/v1/account/deposit", json={"amount_sats": 100})
         assert resp.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_deposit_confirm_rejects_foreign_token(self, tempo_client):
+        """H6: a deposit token minted by account A cannot be confirmed by account B."""
+        url = "http://test/api/v1/account/deposit"
+        resp = await tempo_client.post(
+            "/api/v1/account/deposit",
+            json={"amount_sats": 1000},
+            headers=_nip98_json(url, "POST", TEST_SK),
+        )
+        token = resp.json()["token"]
+
+        confirm_url = "http://test/api/v1/account/deposit/confirm"
+        resp = await tempo_client.post(
+            "/api/v1/account/deposit/confirm",
+            json={"token": token, "method": "tempo", "tx_hash": "0x" + "a" * 64},
+            headers=_nip98_json(confirm_url, "POST", TEST_SK2),
+        )
+        assert resp.status_code == 403
+        assert "does not belong" in resp.json()["detail"]

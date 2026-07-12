@@ -334,7 +334,7 @@ async def api_post_confirm(request: Request, db: AsyncSession = Depends(get_db))
 
     else:
         payment_hash = body.get("payment_hash", "")
-        if not payment_hash or not re.fullmatch(r"[0-9a-fA-F]+", payment_hash):
+        if not payment_hash or not re.fullmatch(r"[0-9a-fA-F]{64}", payment_hash):
             return JSONResponse(status_code=400, content={"detail": "payment_hash must be hex"})
         if not _hmac.compare_digest(pending.payment_hash, payment_hash):
             return JSONResponse(status_code=400, content={"detail": "Payment hash mismatch"})

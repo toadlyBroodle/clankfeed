@@ -91,10 +91,14 @@ async def lifespan(app: FastAPI):
     _derive_relay_pubkey()
     await init_db()
     cleanup_task = asyncio.create_task(_cleanup_expired_pending())
+    from app.ingest import start_ingest_tasks
+    ingest_tasks = start_ingest_tasks()
     logger.info(f"clankfeed relay started (pubkey: {_relay_pubkey[:16]}...)")
     yield
     # Shutdown
     cleanup_task.cancel()
+    for t in ingest_tasks:
+        t.cancel()
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
