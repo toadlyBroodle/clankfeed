@@ -22,9 +22,12 @@ from app.config import (
     PENDING_EVENT_TTL,
     ALLOWED_EVENT_KINDS,
     NWC_EVENT_KINDS,
+    ZAP_EVENT_KINDS,
+    MAX_ZAP_TAG_VALUE_LENGTH,
 )
-from app.models import NostrEvent, PendingEvent
+from app.models import NostrEvent, PendingEvent, Vote
 from app.nostr import validate_event, verify_event_id, verify_signature
+from app.zaps import verify_zap_receipt
 
 logger = logging.getLogger("clankfeed.relay")
 
@@ -280,9 +283,18 @@ async def _handle_event(conn: Connection, msg: list, db: AsyncSession):
 
     event_id = event["id"]
 
-    # Enforce allowed event kinds (paid notes + metadata + NWC)
-    if event["kind"] not in ALLOWED_EVENT_KINDS and event["kind"] not in NWC_EVENT_KINDS:
+    # Enforce allowed event kinds (paid notes + metadata + NWC + zap receipts)
+    if (
+        event["kind"] not in ALLOWED_EVENT_KINDS
+        and event["kind"] not in NWC_EVENT_KINDS
+        and event["kind"] not in ZAP_EVENT_KINDS
+    ):
         await conn.send(["OK", event_id, False, f"blocked: kind {event['kind']} not accepted"])
+        return
+
+    # Zap receipts (NIP-57): free, verified, credit the zapped note's value
+    if event["kind"] in ZAP_EVENT_KINDS:
+        await _handle_zap_receipt(conn, event, db)
         return
 
     # NWC events (NIP-47): store and broadcast without payment, but validate size
@@ -326,6 +338,60 @@ async def _handle_event(conn: Connection, msg: list, db: AsyncSession):
     base = settings.BASE_URL.replace("ws://", "http://").replace("wss://", "https://")
     pay_url = f"{base}/pay?token={token}"
     await conn.send(["OK", event_id, False, f"payment-required:{pay_url}"])
+
+
+async def _handle_zap_receipt(conn: Connection, event: dict, db: AsyncSession):
+    """Store a verified NIP-57 zap receipt without payment and credit the
+    zapped note's value_sats with the amount minus ZAP_RANK_CUT_PCT."""
+    event_id = event["id"]
+
+    if len(event["content"]) > MAX_CONTENT_LENGTH:
+        await conn.send(["OK", event_id, False, f"invalid: content exceeds {MAX_CONTENT_LENGTH} chars"])
+        return
+    if len(event["tags"]) > MAX_EVENT_TAGS:
+        await conn.send(["OK", event_id, False, f"invalid: too many tags (max {MAX_EVENT_TAGS})"])
+        return
+    for tag in event["tags"]:
+        if isinstance(tag, list):
+            for val in tag:
+                if isinstance(val, str) and len(val) > MAX_ZAP_TAG_VALUE_LENGTH:
+                    await conn.send(["OK", event_id, False, f"invalid: tag value exceeds {MAX_ZAP_TAG_VALUE_LENGTH} chars"])
+                    return
+
+    err, info = verify_zap_receipt(event)
+    if err:
+        await conn.send(["OK", event_id, False, f"invalid: {err}"])
+        return
+
+    existing = await db.get(NostrEvent, event_id)
+    if existing:
+        await conn.send(["OK", event_id, True, "duplicate: already have this event"])
+        return
+
+    target = await db.get(NostrEvent, info["target_event_id"])
+    if not target:
+        await conn.send(["OK", event_id, False, "invalid: zapped event not found on this relay"])
+        return
+
+    credited = info["amount_sats"] * (100 - settings.ZAP_RANK_CUT_PCT) // 100
+    target.value_sats = (target.value_sats or 0) + credited
+    db.add(Vote(
+        id=secrets.token_hex(32),
+        event_id=target.id,
+        pubkey=info["sender_pubkey"],
+        direction=1,
+        amount_sats=info["amount_sats"],
+        amount_usd="0",
+        payment_id=f"zap:{event_id}",
+    ))
+    await store_event(db, event)  # commits the vote + value credit too
+    await conn.send(["OK", event_id, True, ""])
+    await broadcast_event(event)
+    logger.info(
+        "Zap receipt: id=%s target=%s sender=%s amount=%d sats credited=%d (cut=%d%%) new_value=%d",
+        event_id[:12], target.id[:12], info["sender_pubkey"][:12],
+        info["amount_sats"], credited, settings.ZAP_RANK_CUT_PCT, target.value_sats,
+    )
 
 
 async def _handle_req(conn: Connection, msg: list, db: AsyncSession):

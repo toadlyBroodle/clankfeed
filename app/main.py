@@ -358,7 +358,7 @@ def _nip11_response():
     doc = {
         "name": settings.RELAY_NAME,
         "description": settings.RELAY_DESCRIPTION,
-        "supported_nips": [1, 11, 42, 98],
+        "supported_nips": [1, 11, 42, 57, 98],
         "software": "https://github.com/toadlyBroodle/clankfeed",
         "version": "0.1.0",
         "limitation": {

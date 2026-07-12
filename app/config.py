@@ -19,6 +19,10 @@ class Settings:
     BASE_URL: str = os.getenv("BASE_URL", "ws://localhost:8089")
     APP_PORT: int = int(os.getenv("APP_PORT", "8089"))
 
+    # Percentage of a zap's amount withheld from ranking credit (anti self-zap).
+    # A 100-sat zap credits value_sats with 100 * (100 - cut) / 100.
+    ZAP_RANK_CUT_PCT: int = min(100, max(0, int(os.getenv("ZAP_RANK_CUT_PCT", "20"))))
+
 
     # Tempo stablecoin settings
     TEMPO_RECIPIENT: str = os.getenv("TEMPO_RECIPIENT", "")
@@ -56,6 +60,8 @@ PENDING_EVENT_TTL = 600  # 10 minutes
 MAX_CONNECTIONS = 200
 ALLOWED_EVENT_KINDS = {0, 1}  # kind 0 (metadata) + kind 1 (text notes)
 NWC_EVENT_KINDS = {13194, 23194, 23195}  # NIP-47 NWC: info, request, response
+ZAP_EVENT_KINDS = {9735}  # NIP-57 zap receipts: free, verified, credit value_sats minus cut
+MAX_ZAP_TAG_VALUE_LENGTH = 4096  # description tag holds a full JSON zap request
 
 # SECURITY: Rate limits per IP. Change values here, not in individual files.
 RATE_POST = "10/minute"

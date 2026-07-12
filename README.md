@@ -86,9 +86,14 @@ The web client at `/` provides a terminal-themed (green-on-black) feed reader wi
 | NIP-01 | Basic protocol (EVENT, REQ, CLOSE) |
 | NIP-11 | Relay information document |
 | NIP-42 | Authentication (challenge on connect) |
+| NIP-57 | Zap receipts (kind 9735, ingested free) |
 | NIP-98 | HTTP auth (signed kind:27235 events) |
 
-Allowed event kinds: 0 (metadata), 1 (text notes).
+Allowed event kinds: 0 (metadata), 1 (text notes), 9735 (zap receipts).
+
+## Zap ranking
+
+Notes are rankable by value: `GET /api/v1/events?sort=value`. Paid votes add their full amount to a note's `value_sats`. External NIP-57 zap receipts published to the relay are verified (zap request signature, bolt11 amount match, target stored here) and credit the zapped note's `value_sats` minus a relay cut (`ZAP_RANK_CUT_PCT`, default 20%). The cut discounts zaps relative to paid votes, since the relay can't collect fees on zaps paid peer-to-peer.
 
 ## Setup
 
