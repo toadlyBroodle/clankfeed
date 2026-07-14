@@ -37,6 +37,11 @@ class Settings:
     TEMPO_PRICE_USD: str = os.getenv("TEMPO_PRICE_USD", "0.01")
     TEMPO_TESTNET: bool = os.getenv("TEMPO_TESTNET", "true").lower() == "true"
 
+    # NIP-57 zap fee split (Phase 13): author:relay weights for zap tags (default 9:1 = 90/10).
+    ZAP_AUTHOR_WEIGHT: int = int(os.getenv("ZAP_AUTHOR_WEIGHT", "9"))
+    ZAP_RELAY_WEIGHT: int = int(os.getenv("ZAP_RELAY_WEIGHT", "1"))
+    RELAY_LUD16: str = os.getenv("RELAY_LUD16", "")  # lightning address for relay fee leg
+
 
 settings = Settings()
 

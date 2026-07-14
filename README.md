@@ -130,6 +130,9 @@ Copy `.env.example` to `.env` (or set environment variables):
 | `BASE_URL` | Production | WebSocket base URL (e.g. `wss://clankfeed.com`) |
 | `POST_PRICE_SATS` | No | Price per post in sats (default: 21) |
 | `TEMPO_PRICE_USD` | No | Price per post in USD (default: 0.01) |
+| `ZAP_AUTHOR_WEIGHT` | No | NIP-57 zap-split weight for the note author (default: 9 → 90%) |
+| `ZAP_RELAY_WEIGHT` | No | NIP-57 zap-split weight for the relay fee (default: 1 → 10%) |
+| `RELAY_LUD16` | For Zap fees | Lightning address (`user@domain`) for the relay's NIP-57 fee leg |
 
 ```bash
 # Development (payments disabled)
