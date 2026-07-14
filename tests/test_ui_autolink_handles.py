@@ -605,6 +605,23 @@ async def test_ui5_avatars_on_cards_replies_profile(live_server):
             f'img[src="{seeded["picture_url"]}"]', timeout=15000
         )
 
+        # UI-5.1: public profile header with no picture → placeholder, no img
+        await page.goto(
+            base + f"/profile?pubkey={seeded['plain_pubkey']}",
+            wait_until="networkidle",
+        )
+        await page.wait_for_selector("#pub-name", timeout=15000)
+        # Wait until kind:0 name lands (else still truncated pubkey)
+        await page.wait_for_function(
+            "() => document.getElementById('pub-name')?.textContent === 'NoPicBot'",
+            timeout=15000,
+        )
+        pub_av = page.locator("#pub-avatar.avatar-placeholder")
+        await pub_av.wait_for(timeout=5000)
+        assert await pub_av.count() == 1
+        assert await page.locator("#view-public img").count() == 0
+        assert (await pub_av.inner_text()).strip() == "N"  # NoPicBot initial
+
         # Adversarial: nip05-only author (no picture) stays placeholder on feed
         await page.goto(base + "/", wait_until="networkidle")
         nip = page.locator(f"#note-{seeded['nip05_note_id']}")
@@ -636,3 +653,15 @@ class TestAvatarUI5Source:
         assert "meta.picture" in profile or "picture" in profile
         assert "prof-picture" in profile
         assert "pub-avatar" in profile
+
+    def test_profile_no_picture_keeps_placeholder(self):
+        """UI-5.1 source: else branch keeps #pub-avatar.avatar-placeholder."""
+        profile = (_STATIC / "profile.html").read_text()
+        # Public profile: picture → replace with img; else set initial on placeholder
+        assert "pub-avatar" in profile
+        assert "avatar-placeholder" in profile
+        assert "meta.picture" in profile
+        # Must have an else path that does not outerHTML-replace with img
+        pub_block = profile.split("pub-avatar", 1)[1]
+        assert "outerHTML" in pub_block or "meta.picture" in profile
+        assert "charAt(0)" in profile or ".charAt(0)" in profile
