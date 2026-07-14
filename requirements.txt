@@ -9,4 +9,5 @@ coincurve
 slowapi
 cryptography
 pytest
+pytest-asyncio
 playwright>=1.49.0
