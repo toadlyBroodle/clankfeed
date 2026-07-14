@@ -872,7 +872,7 @@ async def auth_login(request: Request, db: AsyncSession = Depends(get_db)):
         )
     body = {"pubkey": pubkey, "auth_method": "session"}
     response = JSONResponse(content=body)
-    set_session_cookie(response, pubkey)
+    set_session_cookie(response, pubkey, request)
     return response
 
 
@@ -883,7 +883,7 @@ async def auth_logout(request: Request):
     from app.session_auth import clear_session_cookie
 
     response = JSONResponse(content={"ok": True})
-    clear_session_cookie(response)
+    clear_session_cookie(response, request)
     return response
 
 

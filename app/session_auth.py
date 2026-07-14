@@ -56,28 +56,36 @@ def verify_session_token(token: str) -> str | None:
     return pubkey
 
 
-def _cookie_secure() -> bool:
-    return settings.BASE_URL.startswith("wss://")
+def _request_is_https(request: Request) -> bool:
+    """True when the client connection is HTTPS (nginx X-Forwarded-Proto or scheme).
+
+    Do not key off BASE_URL alone: prod may set BASE_URL=ws://localhost while
+    TLS terminates at the reverse proxy.
+    """
+    fwd = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+    if fwd:
+        return fwd == "https"
+    return (request.url.scheme or "").lower() == "https"
 
 
-def set_session_cookie(response: Response, pubkey: str) -> None:
+def set_session_cookie(response: Response, pubkey: str, request: Request) -> None:
     token = mint_session_token(pubkey)
     response.set_cookie(
         key=SESSION_COOKIE,
         value=token,
         httponly=True,
-        secure=_cookie_secure(),
+        secure=_request_is_https(request),
         samesite="lax",
         max_age=SESSION_MAX_AGE,
         path=SESSION_COOKIE_PATH,
     )
 
 
-def clear_session_cookie(response: Response) -> None:
+def clear_session_cookie(response: Response, request: Request) -> None:
     response.delete_cookie(
         key=SESSION_COOKIE,
         path=SESSION_COOKIE_PATH,
-        secure=_cookie_secure(),
+        secure=_request_is_https(request),
         httponly=True,
         samesite="lax",
     )

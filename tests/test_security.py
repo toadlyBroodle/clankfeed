@@ -675,6 +675,84 @@ class TestSessionCookieH2:
 
 
 # ---------------------------------------------------------------------------
+# S-H2a: Secure flag from request HTTPS (X-Forwarded-Proto / scheme)
+# ---------------------------------------------------------------------------
+
+class TestSessionSecureH2a:
+    """H2a: cf_session Secure follows request HTTPS, not only BASE_URL wss://."""
+
+    @pytest.mark.asyncio
+    async def test_h2a_secure_when_x_forwarded_proto_https(self, client, monkeypatch):
+        """Prod-like: BASE_URL is ws://localhost but nginx sends X-Forwarded-Proto: https."""
+        from app import config
+
+        monkeypatch.setattr(config.settings, "BASE_URL", "ws://localhost:8089")
+        headers = _nip98("http://test/api/v1/auth/login", "POST")
+        headers["X-Forwarded-Proto"] = "https"
+        resp = await client.post("/api/v1/auth/login", headers=headers)
+        assert resp.status_code == 200
+        set_cookie = resp.headers.get("set-cookie", "")
+        assert "cf_session=" in set_cookie.lower()
+        assert "secure" in set_cookie.lower(), (
+            "Secure must be set when X-Forwarded-Proto is https even if BASE_URL is ws://; "
+            f"got Set-Cookie: {set_cookie!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_h2a_insecure_on_plain_http_without_forwarded(self, client, monkeypatch):
+        """Local http://test: no Secure when neither scheme nor X-Forwarded-Proto is https."""
+        from app import config
+
+        monkeypatch.setattr(config.settings, "BASE_URL", "ws://localhost:8089")
+        headers = _nip98("http://test/api/v1/auth/login", "POST")
+        resp = await client.post("/api/v1/auth/login", headers=headers)
+        assert resp.status_code == 200
+        set_cookie = resp.headers.get("set-cookie", "")
+        assert "cf_session=" in set_cookie.lower()
+        assert "secure" not in set_cookie.lower(), (
+            f"Secure must be absent on plain HTTP; got Set-Cookie: {set_cookie!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_h2a_adversarial_forwarded_http_not_secure(self, client, monkeypatch):
+        """Adversarial: X-Forwarded-Proto: http must not mint a Secure cookie."""
+        from app import config
+
+        monkeypatch.setattr(config.settings, "BASE_URL", "wss://clankfeed.com")
+        headers = _nip98("http://test/api/v1/auth/login", "POST")
+        headers["X-Forwarded-Proto"] = "http"
+        resp = await client.post("/api/v1/auth/login", headers=headers)
+        assert resp.status_code == 200
+        set_cookie = resp.headers.get("set-cookie", "")
+        assert "cf_session=" in set_cookie.lower()
+        # Request says http — Secure follows the request, not BASE_URL alone
+        assert "secure" not in set_cookie.lower(), (
+            "X-Forwarded-Proto: http must win over BASE_URL=wss://; "
+            f"got Set-Cookie: {set_cookie!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_h2a_logout_secure_matches_forwarded_https(self, client, monkeypatch):
+        """Logout delete_cookie must use Secure when clearing over HTTPS (browser match)."""
+        from app import config
+
+        monkeypatch.setattr(config.settings, "BASE_URL", "ws://localhost:8089")
+        headers = _nip98("http://test/api/v1/auth/login", "POST")
+        headers["X-Forwarded-Proto"] = "https"
+        await client.post("/api/v1/auth/login", headers=headers)
+        logout = await client.post(
+            "/api/v1/auth/logout",
+            headers={"X-Forwarded-Proto": "https"},
+        )
+        assert logout.status_code == 200
+        set_cookie = logout.headers.get("set-cookie", "")
+        assert "cf_session" in set_cookie.lower()
+        assert "secure" in set_cookie.lower(), (
+            f"logout Clear-Cookie over HTTPS needs Secure; got {set_cookie!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # S-H4: CORS allow_origins restricted (no wildcard)
 # ---------------------------------------------------------------------------
 
