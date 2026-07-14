@@ -901,6 +901,20 @@ class TestOriginCheckH5:
         assert "apiFetch" in index_src
         assert "apiFetch('/api/post/confirm'" in index_src or 'apiFetch("/api/post/confirm"' in index_src
         assert "apiFetch(`/api/v1/events/${eventId}/vote/confirm`" in index_src
+        # Profile paid-path POSTs (confirm + deposit) must use XRW wrappers (6.6)
+        profile_src = (Path(__file__).resolve().parents[1] / "app" / "static" / "profile.html").read_text()
+        assert "apiFetch('/api/post/confirm'" in profile_src or 'apiFetch("/api/post/confirm"' in profile_src
+        assert "authFetch('/api/v1/account/deposit'" in profile_src or 'authFetch("/api/v1/account/deposit"' in profile_src
+        assert (
+            "authFetch('/api/v1/account/deposit/confirm'" in profile_src
+            or 'authFetch("/api/v1/account/deposit/confirm"' in profile_src
+        )
+        # Adversarial: bare fetch() on those paths would omit XRW
+        assert "fetch('/api/post/confirm'" not in profile_src
+        assert 'fetch("/api/post/confirm"' not in profile_src
+        assert "fetch('/api/v1/account/deposit'" not in profile_src
+        assert "fetch('/api/v1/account/deposit/confirm'" not in profile_src
+
     def test_h5_cors_allows_xrw_header(self):
         """CORS must allow X-Requested-With so browsers can send it cross-origin to our allowlist."""
         main_src = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text()
