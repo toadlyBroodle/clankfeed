@@ -8,8 +8,6 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from urllib.parse import urlparse
-
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
@@ -25,6 +23,7 @@ from app.models import PendingEvent
 from app.api_v1 import router as api_v1_router
 from app.payment import router as payment_router
 from app.relay import Connection, connections, handle_message
+from app.session_auth import cors_allow_origins
 
 def _setup_logging():
     """Configure structured logging with rotation."""
@@ -128,23 +127,18 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 class OriginCheckMiddleware(BaseHTTPMiddleware):
     """SECURITY: Reject cross-origin POST/PUT/DELETE/PATCH requests.
-    Prevents CSRF by verifying the Origin header matches BASE_URL."""
+    Prevents CSRF by verifying Origin is in cors_allow_origins() (same allowlist as CORS)."""
 
     async def dispatch(self, request: Request, call_next):
         if request.method in ("POST", "PUT", "DELETE", "PATCH"):
             origin = request.headers.get("origin")
-            if origin:
-                # BASE_URL is ws:// or wss://, derive the HTTP origin
-                base = settings.BASE_URL.replace("ws://", "http://").replace("wss://", "https://")
-                allowed = urlparse(base).netloc
-                actual = urlparse(origin).netloc
-                if actual != allowed:
-                    if request.url.path.startswith("/api/"):
-                        return JSONResponse(
-                            {"detail": "Cross-origin request blocked"},
-                            status_code=403,
-                        )
-                    return HTMLResponse("Cross-origin request blocked", status_code=403)
+            if origin and origin not in cors_allow_origins():
+                if request.url.path.startswith("/api/"):
+                    return JSONResponse(
+                        {"detail": "Cross-origin request blocked"},
+                        status_code=403,
+                    )
+                return HTMLResponse("Cross-origin request blocked", status_code=403)
         return await call_next(request)
 
 
@@ -328,9 +322,6 @@ async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
 app.add_exception_handler(RateLimitExceeded, _rate_limit_handler)
 app.add_middleware(OriginCheckMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
-
-# Re-export for tests / callers that import from app.main
-from app.session_auth import cors_allow_origins  # noqa: E402
 
 app.add_middleware(
     CORSMiddleware,

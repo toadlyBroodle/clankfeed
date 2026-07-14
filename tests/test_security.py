@@ -721,3 +721,31 @@ class TestCORSH4:
         acao = resp.headers.get("access-control-allow-origin")
         assert acao != "https://evil.example"
         assert acao != "*"
+
+    @pytest.mark.asyncio
+    async def test_h4_origincheck_allows_127_when_base_is_localhost(self, client, monkeypatch):
+        """OriginCheck must share cors_allow_origins(): 127.0.0.1 allowed when BASE_URL is localhost."""
+        from app import config
+
+        monkeypatch.setattr(config.settings, "BASE_URL", "ws://localhost:8089")
+        headers = _nip98("http://test/api/v1/auth/login", "POST")
+        headers["Origin"] = "http://127.0.0.1:8089"
+        resp = await client.post("/api/v1/auth/login", headers=headers)
+        assert resp.status_code != 403, (
+            "127.0.0.1:8089 is in cors_allow_origins() and must pass OriginCheck "
+            f"when BASE_URL is localhost; got {resp.status_code}: {resp.text}"
+        )
+        assert resp.status_code == 200
+        assert "cf_session" in client.cookies or "cf_session" in resp.headers.get("set-cookie", "").lower()
+
+    @pytest.mark.asyncio
+    async def test_h4_origincheck_rejects_evil_origin(self, client, monkeypatch):
+        """OriginCheck still blocks origins outside cors_allow_origins()."""
+        from app import config
+
+        monkeypatch.setattr(config.settings, "BASE_URL", "ws://localhost:8089")
+        headers = _nip98("http://test/api/v1/auth/login", "POST")
+        headers["Origin"] = "https://evil.example"
+        resp = await client.post("/api/v1/auth/login", headers=headers)
+        assert resp.status_code == 403
+        assert "cross-origin" in resp.text.lower() or "cross-origin" in str(resp.json()).lower()
