@@ -341,3 +341,78 @@ async def test_ui36_empty_clankfeed_shows_empty_state(live_server):
         assert await page.locator(f"#note-{ext_id}").count() == 0
 
         await browser.close()
+
+
+async def _seed_one_local(base: str) -> str:
+    """One origin=clankfeed note via relay-signed post (test-mode)."""
+    with httpx.Client(base_url=base, timeout=10.0) as c:
+        local = c.post("/api/v1/post", json={"content": "local-ui37-nonempty"}).json()
+        local_id = local["event"]["id"]
+        clank = c.get("/api/v1/events?kinds=1&origin=clankfeed").json()["events"]
+        assert local_id in {e["id"] for e in clank}
+    return local_id
+
+
+@pytest.mark.asyncio
+async def test_ui37_nonempty_clankfeed_hides_empty_state(live_server):
+    """UI3.7: nonempty clankfeed must hide #empty-feed (add('hidden') branch).
+
+    UI3.6 only covered empty + external reclaim. A broken else-branch that never
+    calls add('hidden') stays green under that smoke. Seed one local note.
+    Avoid page.wait_for_function — CSP script-src lacks unsafe-eval.
+    """
+    playwright = pytest.importorskip("playwright.async_api")
+    async_playwright = playwright.async_playwright
+
+    local_id = await _seed_one_local(live_server["base"])
+    base = live_server["base"]
+
+    async def _empty_hidden_with_card() -> bool:
+        if await page.locator(f"#note-{local_id}").count() != 1:
+            return False
+        if await page.locator("#notes-feed .note-card").count() < 1:
+            return False
+        empty = page.locator("#empty-feed")
+        if await empty.count() != 1:
+            return False
+        return await empty.is_hidden()
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.goto(base, wait_until="domcontentloaded", timeout=30_000)
+        await page.wait_for_selector("#feed-clankfeed", timeout=10_000)
+
+        for _ in range(100):
+            if await _empty_hidden_with_card():
+                break
+            await page.wait_for_timeout(100)
+        else:
+            empty = page.locator("#empty-feed")
+            raise AssertionError(
+                "nonempty clankfeed must hide #empty-feed with ≥1 .note-card; "
+                f"empty visible={await empty.is_visible() if await empty.count() else 'missing'}, "
+                f"cards={await page.locator('#notes-feed .note-card').count()}, "
+                f"local={await page.locator(f'#note-{local_id}').count()}"
+            )
+
+        assert await page.locator("#empty-feed").is_hidden()
+        assert await page.locator("#notes-feed .note-card").count() >= 1
+        assert await page.locator(f"#note-{local_id}").count() == 1
+
+        # Adversarial: visit external then return — empty-feed stays hidden
+        await page.click("#feed-external")
+        await page.wait_for_selector(f"#note-{local_id}", timeout=15_000)
+        await page.click("#feed-clankfeed")
+        for _ in range(100):
+            if await _empty_hidden_with_card():
+                break
+            await page.wait_for_timeout(100)
+        else:
+            raise AssertionError(
+                "#empty-feed reappeared after return to nonempty clankfeed"
+            )
+        assert await page.locator("#empty-feed").is_hidden()
+        assert await page.locator(f"#note-{local_id}").count() == 1
+
+        await browser.close()
