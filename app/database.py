@@ -57,6 +57,19 @@ async def init_db():
                 if col not in existing:
                     await conn.execute(sqlalchemy.text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"))
 
+    # Backfill: rows that predate the origin column defaulted to 'clankfeed'.
+    # Ingested notes always start with sats_clank=0 and positive sats_ext after
+    # zap credit; paid local posts have sats_clank >= POST_PRICE_SATS.
+    async with engine.begin() as conn:
+        result = await conn.execute(sqlalchemy.text("PRAGMA table_info(nostr_events)"))
+        cols = {row[1] for row in result.fetchall()}
+        if "origin" in cols:
+            await conn.execute(sqlalchemy.text(
+                "UPDATE nostr_events SET origin = 'external' "
+                "WHERE origin = 'clankfeed' AND kind = 1 "
+                "AND COALESCE(sats_clank, 0) = 0 AND COALESCE(sats_ext, 0) > 0"
+            ))
+
     # Migrate: encrypt any plaintext private keys
     from app.crypto import encrypt_field, _fernet
     if _fernet is not None:
