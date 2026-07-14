@@ -17,3 +17,5 @@ docs/
 CLAUDE.md
 .claude/
 .playwright-mcp/
+
+.skill-runs/
