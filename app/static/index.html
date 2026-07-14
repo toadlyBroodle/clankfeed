@@ -98,9 +98,8 @@
         </div>
       </div>
     </div>
-    <div id="notes-feed" class="space-y-2">
-      <p id="empty-feed" class="text-xs c-dim">No notes yet. Be the first to post.</p>
-    </div>
+    <div id="notes-feed" class="space-y-2"></div>
+    <p id="empty-feed" class="text-xs c-dim">No notes yet. Be the first to post.</p>
   </section>
 
 <script>
@@ -185,10 +184,13 @@ function addNote(event) {
 function renderNotes() {
   const feed = document.getElementById('notes-feed');
   const empty = document.getElementById('empty-feed');
-  if (notes.length > 0 && empty) empty.classList.add('hidden');
-
   const topLevel = notes.filter(n => !(n.tags || []).some(t => t[0] === 'e'));
+  // #empty-feed is a sibling of #notes-feed so innerHTML wipe cannot destroy it
   feed.innerHTML = topLevel.map(n => renderNoteCard(n)).join('');
+  if (empty) {
+    if (topLevel.length === 0) empty.classList.remove('hidden');
+    else empty.classList.add('hidden');
+  }
   // Apply cached reply counts immediately
   for (const [eid, count] of Object.entries(replyCountCache)) {
     const btn = document.getElementById(`expand-replies-${eid}`);

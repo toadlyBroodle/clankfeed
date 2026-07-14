@@ -232,3 +232,112 @@ async def test_ui34_tab_membership_and_ext_top_order(live_server):
         assert clank_top, f"expected sort=value&origin=clankfeed; saw: {seen_urls}"
 
         await browser.close()
+
+
+async def _seed_external_only(base: str, db_path: Path) -> str:
+    """One external note; zero clankfeed locals — empty-state repro for UI3.6."""
+    note = sign_event(
+        AUTHOR_SK,
+        {
+            "created_at": int(time.time()) - 3,
+            "kind": 1,
+            "tags": [],
+            "content": "ext-only-ui36",
+        },
+    )
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO nostr_events "
+                "(id, pubkey, created_at, kind, tags, content, sig, "
+                "sats_clank, value_usd, sats_ext, origin) "
+                "VALUES (:id, :pubkey, :created_at, :kind, :tags, :content, :sig, "
+                "0, '0', :sats_ext, 'external')"
+            ),
+            {
+                "id": note["id"],
+                "pubkey": note["pubkey"],
+                "created_at": note["created_at"],
+                "kind": note["kind"],
+                "tags": "[]",
+                "content": note["content"],
+                "sig": note["sig"],
+                "sats_ext": 42,
+            },
+        )
+    await engine.dispose()
+
+    with httpx.Client(base_url=base, timeout=10.0) as c:
+        clank = c.get("/api/v1/events?kinds=1&origin=clankfeed").json()["events"]
+        assert all(e["id"] != note["id"] for e in clank)
+        assert len(clank) == 0
+        all_ev = c.get("/api/v1/events?kinds=1&origin=all").json()["events"]
+        assert note["id"] in {e["id"] for e in all_ev}
+
+    return note["id"]
+
+
+@pytest.mark.asyncio
+async def test_ui36_empty_clankfeed_shows_empty_state(live_server):
+    """UI3.6: empty clankfeed tab must keep #empty-feed visible after renderNotes.
+
+    Prod default: zero locals + many externals. Prior bug: renderNotes wiped
+    #empty-feed via innerHTML so the tab went blank.
+    Avoid page.wait_for_function — CSP script-src lacks unsafe-eval.
+    """
+    playwright = pytest.importorskip("playwright.async_api")
+    async_playwright = playwright.async_playwright
+
+    ext_id = await _seed_external_only(live_server["base"], live_server["db"])
+    base = live_server["base"]
+
+    async def _empty_visible() -> bool:
+        loc = page.locator("#empty-feed")
+        if await loc.count() != 1:
+            return False
+        return await loc.is_visible()
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.goto(base, wait_until="domcontentloaded", timeout=30_000)
+        await page.wait_for_selector("#feed-clankfeed", timeout=10_000)
+
+        # Wait for setFeed('clankfeed') REST round-trip (empty result → empty state)
+        for _ in range(100):
+            if await _empty_visible() and await page.locator("#notes-feed .note-card").count() == 0:
+                break
+            await page.wait_for_timeout(100)
+        else:
+            raise AssertionError(
+                "#empty-feed not visible after empty clankfeed load "
+                f"(count={await page.locator('#empty-feed').count()})"
+            )
+
+        empty = page.locator("#empty-feed")
+        assert await empty.count() == 1
+        assert await empty.is_visible()
+        text = (await empty.inner_text()).strip()
+        assert "No notes yet" in text or "first to post" in text.lower()
+        assert await page.locator("#notes-feed .note-card").count() == 0
+        assert await page.locator(f"#note-{ext_id}").count() == 0
+
+        # External tab: empty hides, external note appears
+        await page.click("#feed-external")
+        await page.wait_for_selector(f"#note-{ext_id}", timeout=15_000)
+        assert await page.locator("#empty-feed").is_hidden()
+        assert await page.locator(f"#note-{ext_id}").count() == 1
+
+        # Adversarial: back to empty clankfeed — empty-feed must still exist + show
+        await page.click("#feed-clankfeed")
+        for _ in range(100):
+            if await _empty_visible() and await page.locator(f"#note-{ext_id}").count() == 0:
+                break
+            await page.wait_for_timeout(100)
+        else:
+            raise AssertionError("empty-feed not restored after return to clankfeed")
+        assert await page.locator("#empty-feed").is_visible()
+        assert await page.locator(f"#note-{ext_id}").count() == 0
+
+        await browser.close()

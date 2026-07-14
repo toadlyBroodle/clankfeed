@@ -117,3 +117,43 @@ class TestTwoFeedsUI3:
         index = (_STATIC / "index.html").read_text()
         assert "origin=" in index
         assert "clankfeed" in index
+
+
+class TestEmptyFeedUI36:
+    """UI3.6: #empty-feed must survive renderNotes (not a child of #notes-feed)."""
+
+    def test_empty_feed_is_sibling_not_child_of_notes_feed(self):
+        """innerHTML wipe of #notes-feed must not destroy #empty-feed."""
+        index = (_STATIC / "index.html").read_text()
+        assert 'id="notes-feed"' in index
+        assert 'id="empty-feed"' in index
+        # Empty state must sit outside the notes-feed container
+        feed_open = index.index('id="notes-feed"')
+        # Find the notes-feed opening tag, then its matching close before empty-feed
+        after_feed_id = index[feed_open:]
+        # Empty-feed must NOT appear between notes-feed open and its first closing </div>
+        # Simpler invariant: empty-feed markup appears after notes-feed's closing tag
+        feed_tag_end = index.index(">", feed_open) + 1
+        # Find </div> that closes notes-feed — look for empty-feed after a closed notes-feed block
+        empty_pos = index.index('id="empty-feed"')
+        assert empty_pos > feed_tag_end
+        between = index[feed_tag_end:empty_pos]
+        # Between open tag and empty-feed there must be a </div> closing notes-feed
+        # (empty-feed is sibling, not nested child)
+        assert "</div>" in between, (
+            "#empty-feed is still nested inside #notes-feed; "
+            "renderNotes innerHTML would destroy it"
+        )
+        # And no unclosed nesting: empty-feed should not appear before that </div>
+        first_close = between.index("</div>")
+        assert 'id="empty-feed"' not in between[:first_close]
+
+    def test_renderNotes_toggles_empty_visibility(self):
+        index = (_STATIC / "index.html").read_text()
+        fn = index.split("function renderNotes", 1)[1].split("\nfunction ", 1)[0]
+        assert "empty-feed" in fn or "empty" in fn
+        # Must show empty state when no notes (not only hide when non-empty)
+        assert "remove('hidden')" in fn or 'remove("hidden")' in fn
+        assert "add('hidden')" in fn or 'add("hidden")' in fn
+        # Must key off empty notes / top-level length
+        assert "length" in fn
