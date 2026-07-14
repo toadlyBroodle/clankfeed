@@ -161,7 +161,9 @@ function esc(s) {
   return d.innerHTML;
 }
 
-/** Safe JS string literal for embedding in single-quoted HTML onclick attrs. */
+/** Safe JS string literal for embedding in single-quoted HTML onclick attrs.
+ *  JSON.stringify alone still emits raw apostrophes (e.g. O'Brien), which
+ *  terminate single-quoted HTML attributes — rewrite ' as \\u0027. */
 function jsStr(s) {
-  return JSON.stringify(s == null ? '' : String(s));
+  return JSON.stringify(s == null ? '' : String(s)).replace(/'/g, '\\u0027');
 }

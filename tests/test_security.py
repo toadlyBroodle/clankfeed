@@ -185,55 +185,152 @@ class TestDOMXSSClient:
         assert "onclick=\"submitVote('${n.id}')\"" not in index
         assert "onclick=\"cancelVote('${n.id}')\"" not in index
         assert "onclick=\"scrollToNote('${parentId}')\"" not in index
-        # Fixed pattern: single-quoted HTML attr + jsStr(...)
-        assert "onclick='startReply(${jsStr(n.id)}, ${jsStr(displayName || pk)})'" in index
-        assert "onclick='startVote(${jsStr(n.id)}, 1)'" in index
-        assert "onclick='toggleReplies(${jsStr(n.id)})'" in index
+        # Handlers must go through jsStr(...) — do not lock a single-quoted attr form
+        # that truncates on apostrophes (see test_l4_html_attr_preserves_apostrophe_name).
+        assert "jsStr(n.id)" in index
+        assert "jsStr(displayName || pk)" in index
+        assert "jsStr(parentId)" in index
+        assert "startReply(${jsStr(" in index
+        assert "startVote(${jsStr(" in index
+        assert "toggleReplies(${jsStr(" in index
 
-    def test_l4_jsstr_helper_uses_json_stringify(self):
-        """jsStr must wrap JSON.stringify so quotes/newlines cannot break out of JS strings."""
+    def test_l4_jsstr_helper_uses_json_stringify_and_html_attr_escape(self):
+        """jsStr must JSON.stringify AND neutralize raw apostrophes for HTML attrs."""
         src = (_STATIC / "nostr-auth.js").read_text()
         assert "function jsStr(" in src
-        # Pull the function body and require JSON.stringify
         body = src.split("function jsStr(", 1)[1].split("\n}", 1)[0]
         assert "JSON.stringify" in body
+        # Must rewrite apostrophe for single-quoted HTML onclick attrs (\\u0027 or equiv)
+        assert "\\u0027" in body or "u0027" in body or ".replace(/'/g" in body
 
-    def test_l4_jsstr_adversarial_quote_breakout(self):
-        """Adversarial display names with quotes must serialize to safe JS literals."""
-        import json
+    def test_l4_html_attr_preserves_apostrophe_name(self):
+        """HTML-parse startReply onclick: getAttribute must retain full O'Brien name."""
+        import html.parser
         import re
         import subprocess
 
         src = (_STATIC / "nostr-auth.js").read_text()
-        m = re.search(r"function jsStr\(([^)]*)\)\s*\{([^}]*)\}", src, re.DOTALL)
+        m = re.search(r"function jsStr\([^)]*\)\s*\{.*?\n\}", src, re.DOTALL)
         assert m, "jsStr function not found"
-        # Evaluate the same contract Node would: JSON.stringify(String(s ?? ''))
+        js_fn = m.group(0)
+        # Run real jsStr via Node (source of truth), embed in single-quoted onclick, HTML-parse.
+        name = "O'Brien"
+        note_id = "a" * 64
+        node = subprocess.run(
+            [
+                "node",
+                "-e",
+                js_fn
+                + f"; process.stdout.write(jsStr({json.dumps(note_id)}) + '\\n' + jsStr({json.dumps(name)}));",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert node.returncode == 0, node.stderr
+        lit_id, lit_name = node.stdout.split("\n", 1)
+        fragment = (
+            f"<button onclick='startReply({lit_id}, {lit_name})'>reply</button>"
+        )
+
+        class _Attr(html.parser.HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.onclick = None
+
+            def handle_starttag(self, tag, attrs):
+                for k, v in attrs:
+                    if k == "onclick":
+                        self.onclick = v
+
+        p = _Attr()
+        p.feed(fragment)
+        assert p.onclick is not None, "onclick attribute missing after HTML parse"
+        # Truncation bug: attr ends at the apostrophe → "startReply(..., \"O"
+        assert "Brien" in p.onclick, (
+            f"apostrophe truncated HTML attr; got {p.onclick!r}"
+        )
+        # Round-trip: Node must recover the original display name from the attr JS
+        assert p.onclick.startswith("startReply(")
+        args_js = p.onclick[len("startReply(") :]
+        if args_js.endswith(")"):
+            args_js = args_js[:-1]
+        rt = subprocess.run(
+            [
+                "node",
+                "-e",
+                f"const [a,b]=[{args_js}]; "
+                f"if (a !== {json.dumps(note_id)} || b !== {json.dumps(name)}) process.exit(1);",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert rt.returncode == 0, (
+            f"onclick JS did not round-trip name {name!r}; attr={p.onclick!r} stderr={rt.stderr}"
+        )
+
+    def test_l4_jsstr_adversarial_quote_breakout(self):
+        """Adversarial names must survive HTML attr parse + JS eval (no quote breakout)."""
+        import html.parser
+        import re
+        import subprocess
+
+        src = (_STATIC / "nostr-auth.js").read_text()
+        m = re.search(r"function jsStr\([^)]*\)\s*\{.*?\n\}", src, re.DOTALL)
+        assert m, "jsStr function not found"
+        js_fn = m.group(0)
         payloads = [
             "');alert(1);//",
-            "\"onload=alert(1)",
+            '"onload=alert(1)',
             "O'Brien",
             "</script><script>alert(1)</script>",
             "a\nb",
         ]
         for p in payloads:
-            # Mirror expected jsStr implementation
-            lit = json.dumps("" if p is None else str(p))
-            assert lit.startswith('"') and lit.endswith('"')
-            assert "');" not in lit or lit == json.dumps(p)
-            # A single-quoted HTML attr wrapping this literal must not see a raw '
-            # that closes a JS single-quoted string — JSON uses double quotes.
-            attr = f"onclick='startReply({lit}, {lit})'"
-            # Extract JS inside the HTML attribute
-            js = attr[len("onclick='"):-1]
-            # Parse as a CallExpression args via JSON — both args are JSON strings
-            assert js.startswith("startReply(")
-            # Node round-trip: eval the arg list safely
-            result = subprocess.run(
-                ["node", "-e", f"const a={lit}; const b={lit}; if (a !== {json.dumps(p)} || b !== {json.dumps(p)}) process.exit(1);"],
+            node = subprocess.run(
+                [
+                    "node",
+                    "-e",
+                    js_fn + f"; process.stdout.write(jsStr({json.dumps(p)}));",
+                ],
                 capture_output=True,
                 text=True,
             )
-            assert result.returncode == 0, result.stderr
+            assert node.returncode == 0, node.stderr
+            lit = node.stdout
+            # Raw apostrophe must not appear — breaks single-quoted HTML attrs
+            assert "'" not in lit, (
+                f"jsStr({p!r}) still contains raw apostrophe for HTML attr: {lit!r}"
+            )
+            fragment = f"<button onclick='startReply({lit}, {lit})'>x</button>"
+
+            class _Attr(html.parser.HTMLParser):
+                def __init__(self):
+                    super().__init__()
+                    self.onclick = None
+
+                def handle_starttag(self, tag, attrs):
+                    for k, v in attrs:
+                        if k == "onclick":
+                            self.onclick = v
+
+            parser = _Attr()
+            parser.feed(fragment)
+            assert parser.onclick is not None
+            assert parser.onclick.startswith("startReply(")
+            args_js = parser.onclick[len("startReply(") :]
+            if args_js.endswith(")"):
+                args_js = args_js[:-1]
+            rt = subprocess.run(
+                [
+                    "node",
+                    "-e",
+                    f"const [a,b]=[{args_js}]; "
+                    f"if (a !== {json.dumps(p)} || b !== {json.dumps(p)}) process.exit(1);",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            assert rt.returncode == 0, f"payload={p!r} attr={parser.onclick!r} err={rt.stderr}"
 
 
 # ---------------------------------------------------------------------------
