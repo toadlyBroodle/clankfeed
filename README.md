@@ -100,6 +100,10 @@ Every note carries two sat tallies:
 
 Zap receipts (kind 9735) are accepted free and verified: embedded zap request signature, bolt11 amount match, and the zapped note must be stored on the relay.
 
+## Dual feeds (`origin`)
+
+Notes are tagged with an `origin` field: `clankfeed` (posted here) or `external` (ingested). Filter with `GET /api/v1/events?origin=clankfeed|external|all` (`all` is the default). The web client’s clankfeed tab uses `origin=clankfeed`; the external tab uses `origin=all` with Top sorted by `sort=ext`.
+
 ## External feed ingestion
 
 To populate the external feed, the relay subscribes to zap receipts on public relays (`EXTERNAL_RELAYS`, default damus/nos.lol/primal) and stores each verified zapped note with its zap value in `sats_ext`. Only zapped notes are ingested, never the firehose. Disable with `EXTERNAL_INGEST=false`.
