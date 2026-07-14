@@ -354,7 +354,7 @@ async def _seed_one_local(base: str) -> str:
 
 
 async def _seed_zero_and_valued_external(base: str, db_path: Path) -> dict:
-    """FEED-1a: one zero-sats external + one valued external (+ optional local)."""
+    """FEED-1a/1b: one zero-sats external + ≥2 valued externals (+ local)."""
     with httpx.Client(base_url=base, timeout=10.0) as c:
         local = c.post("/api/v1/post", json={"content": "local-feed1a"}).json()
         local_id = local["event"]["id"]
@@ -362,25 +362,38 @@ async def _seed_zero_and_valued_external(base: str, db_path: Path) -> dict:
     zero = sign_event(
         AUTHOR_SK,
         {
-            "created_at": int(time.time()) - 20,
+            "created_at": int(time.time()) - 30,
             "kind": 1,
             "tags": [],
             "content": "ext-zero-feed1a",
         },
     )
-    valued = sign_event(
+    valued_high = sign_event(
+        AUTHOR_SK,
+        {
+            "created_at": int(time.time()) - 20,
+            "kind": 1,
+            "tags": [],
+            "content": "ext-valued-high-feed1a",
+        },
+    )
+    valued_low = sign_event(
         AUTHOR_SK,
         {
             "created_at": int(time.time()) - 10,
             "kind": 1,
             "tags": [],
-            "content": "ext-valued-feed1a",
+            "content": "ext-valued-low-feed1a",
         },
     )
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
     async with engine.begin() as conn:
-        for note, sats_ext in ((zero, 0), (valued, 77)):
+        for note, sats_ext in (
+            (zero, 0),
+            (valued_high, 500),
+            (valued_low, 77),
+        ):
             await conn.execute(
                 text(
                     "INSERT INTO nostr_events "
@@ -402,46 +415,97 @@ async def _seed_zero_and_valued_external(base: str, db_path: Path) -> dict:
             )
     await engine.dispose()
 
-    # API FEED-1 filter covered by tests/test_feeds.py — this helper only seeds.
-    # DOM / addNote assertions below catch listing + client skip regressions.
+    def _ext_payload(note: dict, sats_ext: int) -> dict:
+        return {
+            "id": note["id"],
+            "pubkey": note["pubkey"],
+            "created_at": note["created_at"],
+            "kind": 1,
+            "tags": [],
+            "content": note["content"],
+            "sig": note["sig"],
+            "origin": "external",
+            "sats_ext": sats_ext,
+            "sats_clank": 0,
+        }
 
+    valued_events = [
+        _ext_payload(valued_high, 500),
+        _ext_payload(valued_low, 77),
+    ]
     return {
         "local_id": local_id,
         "zero_id": zero["id"],
-        "valued_id": valued["id"],
-        "zero_event": {
-            "id": zero["id"],
-            "pubkey": zero["pubkey"],
-            "created_at": zero["created_at"],
+        "valued_ids": [valued_high["id"], valued_low["id"]],
+        "valued_id": valued_high["id"],  # back-compat alias (first valued)
+        "zero_event": _ext_payload(zero, 0),
+        "valued_events": valued_events,
+        "valued_event": valued_events[0],
+    }
+
+
+async def _seed_zero_only_external(base: str, db_path: Path) -> dict:
+    """FEED-1b: local + ≥1 zero-sats external, no valued externals."""
+    with httpx.Client(base_url=base, timeout=10.0) as c:
+        local = c.post("/api/v1/post", json={"content": "local-feed1b-zero-only"}).json()
+        local_id = local["event"]["id"]
+
+    zero_a = sign_event(
+        AUTHOR_SK,
+        {
+            "created_at": int(time.time()) - 20,
             "kind": 1,
             "tags": [],
-            "content": zero["content"],
-            "sig": zero["sig"],
-            "origin": "external",
-            "sats_ext": 0,
-            "sats_clank": 0,
+            "content": "ext-zero-only-a",
         },
-        "valued_event": {
-            "id": valued["id"],
-            "pubkey": valued["pubkey"],
-            "created_at": valued["created_at"],
+    )
+    zero_b = sign_event(
+        AUTHOR_SK,
+        {
+            "created_at": int(time.time()) - 10,
             "kind": 1,
             "tags": [],
-            "content": valued["content"],
-            "sig": valued["sig"],
-            "origin": "external",
-            "sats_ext": 77,
-            "sats_clank": 0,
+            "content": "ext-zero-only-b",
         },
+    )
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    async with engine.begin() as conn:
+        for note in (zero_a, zero_b):
+            await conn.execute(
+                text(
+                    "INSERT INTO nostr_events "
+                    "(id, pubkey, created_at, kind, tags, content, sig, "
+                    "sats_clank, value_usd, sats_ext, origin) "
+                    "VALUES (:id, :pubkey, :created_at, :kind, :tags, :content, :sig, "
+                    "0, '0', 0, 'external')"
+                ),
+                {
+                    "id": note["id"],
+                    "pubkey": note["pubkey"],
+                    "created_at": note["created_at"],
+                    "kind": note["kind"],
+                    "tags": "[]",
+                    "content": note["content"],
+                    "sig": note["sig"],
+                },
+            )
+    await engine.dispose()
+
+    return {
+        "local_id": local_id,
+        "zero_ids": [zero_a["id"], zero_b["id"]],
+        "valued_ids": [],
     }
 
 
 @pytest.mark.asyncio
 async def test_feed1a_external_tab_omits_zero_shows_valued(live_server):
-    """FEED-1a: #feed-external DOM must omit zero-sats external, keep valued.
+    """FEED-1a/FEED-1b: #feed-external omits zero; shows ≥2 valued (cardinality).
 
-    UI3.4 only seeded valued externals; TestFeed1HideZeroSatsExternal is a
-    source grep. This drives REST→render against a live page.
+    Single-valued seed left a many/none gap: a filter that only keeps the first
+    valued (or hides all when any zero is present) stayed green. Seed ≥2 valued
+    + one zero; assert every valued id is in the DOM and zero is absent.
     Avoid page.wait_for_function — CSP script-src lacks unsafe-eval.
     """
     playwright = pytest.importorskip("playwright.async_api")
@@ -449,6 +513,8 @@ async def test_feed1a_external_tab_omits_zero_shows_valued(live_server):
 
     ids = await _seed_zero_and_valued_external(live_server["base"], live_server["db"])
     base = live_server["base"]
+    valued_ids = ids["valued_ids"]
+    assert len(valued_ids) >= 2, "seed must provide ≥2 valued externals"
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -460,15 +526,57 @@ async def test_feed1a_external_tab_omits_zero_shows_valued(live_server):
         # Clankfeed tab: local only (externals never belong here)
         assert await page.locator(f"#note-{ids['local_id']}").count() == 1
         assert await page.locator(f"#note-{ids['zero_id']}").count() == 0
-        assert await page.locator(f"#note-{ids['valued_id']}").count() == 0
+        for vid in valued_ids:
+            assert await page.locator(f"#note-{vid}").count() == 0
 
         await page.click("#feed-external")
-        await page.wait_for_selector(f"#note-{ids['valued_id']}", timeout=15_000)
+        await page.wait_for_selector(f"#note-{valued_ids[0]}", timeout=15_000)
 
-        assert await page.locator(f"#note-{ids['valued_id']}").count() == 1
+        for vid in valued_ids:
+            assert await page.locator(f"#note-{vid}").count() == 1, (
+                f"valued external {vid} missing from #feed-external"
+            )
         assert await page.locator(f"#note-{ids['local_id']}").count() == 1
         # Critical FEED-1a assertion: zero-sats external must not appear
         assert await page.locator(f"#note-{ids['zero_id']}").count() == 0
+
+        await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_feed1a_external_tab_zero_only_hides_all_externals(live_server):
+    """FEED-1b: zero-only externals (no valued) must not appear on #feed-external.
+
+    Many-valued coverage alone misses the none-valued edge: a bug that shows
+    zeros when the valued list is empty would stay green under the ≥2 seed.
+    """
+    playwright = pytest.importorskip("playwright.async_api")
+    async_playwright = playwright.async_playwright
+
+    ids = await _seed_zero_only_external(live_server["base"], live_server["db"])
+    base = live_server["base"]
+    assert len(ids["zero_ids"]) >= 1
+    assert not ids.get("valued_ids"), "zero-only seed must not include valued"
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.goto(base, wait_until="domcontentloaded", timeout=30_000)
+        await page.wait_for_selector("#feed-clankfeed", timeout=10_000)
+        await page.wait_for_selector(f"#note-{ids['local_id']}", timeout=15_000)
+
+        assert await page.locator(f"#note-{ids['local_id']}").count() == 1
+        for zid in ids["zero_ids"]:
+            assert await page.locator(f"#note-{zid}").count() == 0
+
+        await page.click("#feed-external")
+        await page.wait_for_selector(f"#note-{ids['local_id']}", timeout=15_000)
+
+        assert await page.locator(f"#note-{ids['local_id']}").count() == 1
+        for zid in ids["zero_ids"]:
+            assert await page.locator(f"#note-{zid}").count() == 0, (
+                f"zero-only external {zid} leaked onto #feed-external"
+            )
 
         await browser.close()
 
@@ -486,6 +594,7 @@ async def test_feed1a_addNote_inject_skips_zero_keeps_valued(live_server):
 
     ids = await _seed_zero_and_valued_external(live_server["base"], live_server["db"])
     base = live_server["base"]
+    valued_ids = ids["valued_ids"]
 
     # Fresh synthetic ids so inject is not deduped against seeded cards
     inject_zero = {
@@ -497,7 +606,7 @@ async def test_feed1a_addNote_inject_skips_zero_keeps_valued(live_server):
         "sats_clank": 0,
     }
     inject_valued = {
-        **ids["valued_event"],
+        **ids["valued_events"][0],
         "id": "1" * 64,
         "content": "inject-valued-feed1a",
         "origin": "external",
@@ -511,7 +620,7 @@ async def test_feed1a_addNote_inject_skips_zero_keeps_valued(live_server):
         await page.goto(base, wait_until="domcontentloaded", timeout=30_000)
         await page.wait_for_selector("#feed-clankfeed", timeout=10_000)
         await page.click("#feed-external")
-        await page.wait_for_selector(f"#note-{ids['valued_id']}", timeout=15_000)
+        await page.wait_for_selector(f"#note-{valued_ids[0]}", timeout=15_000)
 
         # CDP evaluate bypasses page CSP (unlike wait_for_function polling)
         added = await page.evaluate(
