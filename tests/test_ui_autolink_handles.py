@@ -27,6 +27,7 @@ _STATIC = ROOT / "app" / "static"
 AUTHOR_SK = "c" * 64
 AUTHOR_SK_NAME = "d" * 64  # kind:0 with name (UI-4.2 preference)
 AUTHOR_SK_NIP05 = "e" * 64  # kind:0 with nip05 only
+AUTHOR_SK_PLAIN = "11" * 32  # no kind:0 picture — UI-5 placeholder + UI-4.3 zero-URL
 AUTHOR_PK = None  # filled from first signed event
 
 
@@ -263,8 +264,22 @@ async def _seed_ui46(db_path: Path) -> dict:
     return {"note_id": note["id"], "pubkey": note["pubkey"]}
 
 
+# 1x1 PNG — loads without network so img.avatar is not replaced by onerror
+_PIC_DATA = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+_PIC_DATA_REPLY = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+)
+
+
 async def _seed_ui42(db_path: Path) -> dict:
-    """UI-4.2: parent+reply with many links; name-pref and nip05-only authors."""
+    """UI-4.2: parent+reply with many links; name-pref and nip05-only authors.
+
+    Also seeds UI-4.3 zero-URL note and UI-5 no-picture author.
+    """
     now = int(time.time())
     meta_display = sign_event(
         AUTHOR_SK,
@@ -272,9 +287,12 @@ async def _seed_ui42(db_path: Path) -> dict:
             "kind": 0,
             "created_at": now - 30,
             "tags": [],
-            "content": (
-                '{"display_name":"HandleBot","nip05":"bot@example.com",'
-                '"picture":"https://example.com/a.png"}'
+            "content": json.dumps(
+                {
+                    "display_name": "HandleBot",
+                    "nip05": "bot@example.com",
+                    "picture": _PIC_DATA,
+                }
             ),
         },
     )
@@ -284,9 +302,13 @@ async def _seed_ui42(db_path: Path) -> dict:
             "kind": 0,
             "created_at": now - 29,
             "tags": [],
-            "content": (
-                '{"name":"NameWins","display_name":"DispLose",'
-                '"nip05":"lose@example.com"}'
+            "content": json.dumps(
+                {
+                    "name": "NameWins",
+                    "display_name": "DispLose",
+                    "nip05": "lose@example.com",
+                    "picture": _PIC_DATA_REPLY,
+                }
             ),
         },
     )
@@ -297,6 +319,16 @@ async def _seed_ui42(db_path: Path) -> dict:
             "created_at": now - 28,
             "tags": [],
             "content": '{"nip05":"onlynip@example.com"}',
+        },
+    )
+    # UI-5: kind:0 without picture → placeholder on note card
+    meta_plain = sign_event(
+        AUTHOR_SK_PLAIN,
+        {
+            "kind": 0,
+            "created_at": now - 27,
+            "tags": [],
+            "content": '{"name":"NoPicBot"}',
         },
     )
     parent = sign_event(
@@ -331,15 +363,27 @@ async def _seed_ui42(db_path: Path) -> dict:
             "content": "nip05 author https://nip.example/ok",
         },
     )
+    # UI-4.3: plain text only — zero http(s) → zero .note-link anchors
+    plain_note = sign_event(
+        AUTHOR_SK_PLAIN,
+        {
+            "kind": 1,
+            "created_at": now - 4,
+            "tags": [],
+            "content": "plain text only no urls www.notalink.example javascript:alert(1)",
+        },
+    )
     engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
     async with engine.begin() as conn:
         rows = [
             (meta_display, 0, "[]"),
             (meta_name, 0, "[]"),
             (meta_nip05, 0, "[]"),
+            (meta_plain, 0, "[]"),
             (parent, 21, "[]"),
             (reply, 21, json.dumps([["e", parent["id"], "", "reply"]])),
             (nip05_note, 21, "[]"),
+            (plain_note, 21, "[]"),
         ]
         for ev, sc, tags in rows:
             await conn.execute(
@@ -366,9 +410,13 @@ async def _seed_ui42(db_path: Path) -> dict:
         "parent_id": parent["id"],
         "reply_id": reply["id"],
         "nip05_note_id": nip05_note["id"],
+        "plain_note_id": plain_note["id"],
         "display_pubkey": meta_display["pubkey"],
         "name_pubkey": meta_name["pubkey"],
         "nip05_pubkey": meta_nip05["pubkey"],
+        "plain_pubkey": meta_plain["pubkey"],
+        "picture_url": _PIC_DATA,
+        "reply_picture_url": _PIC_DATA_REPLY,
     }
 
 
@@ -419,7 +467,7 @@ async def test_ui4_ui6_autolink_and_handle_dom(live_server):
 
 @pytest.mark.asyncio
 async def test_ui42_profile_autolink_and_many_links(live_server):
-    """UI-4.2: profile page linkifies; feed shows ≥3 anchors; amp query preserved."""
+    """UI-4.2: profile linkifies; feed shows ≥3 anchors; amp query preserved."""
     pytest.importorskip("playwright")
     from playwright.async_api import async_playwright
 
@@ -440,8 +488,6 @@ async def test_ui42_profile_autolink_and_many_links(live_server):
         assert any(h and "a=1" in h and "b=2" in h for h in hrefs)
 
         # Name preference: name beats display_name
-        name_card = page.locator(f"#note-{seeded['reply_id']}")
-        # reply is nested under parent until expanded — top-level notes only
         # nip05-only note is top-level
         nip_card = page.locator(f"#note-{seeded['nip05_note_id']}")
         await nip_card.wait_for(timeout=10000)
@@ -473,3 +519,120 @@ async def test_ui42_profile_autolink_and_many_links(live_server):
         assert "a=1" in ph and "b=2" in ph
 
         await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_ui43_zero_url_note_has_no_note_links(live_server):
+    """UI-4.3: note with no http(s) → zero .note-link anchors (none cardinality)."""
+    pytest.importorskip("playwright")
+    from playwright.async_api import async_playwright
+
+    seeded = await _seed_ui42(live_server["db"])
+    base = live_server["base"]
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.goto(base + "/", wait_until="networkidle")
+
+        plain = page.locator(f"#note-{seeded['plain_note_id']}")
+        await plain.wait_for(timeout=15000)
+        plain_links = plain.locator(
+            ".note-content a.note-link, .note-content a[href^='http']"
+        )
+        assert await plain_links.count() == 0
+        # Adversarial: bare www. / javascript: must not become hrefs either
+        assert await plain.locator("a[href^='javascript:']").count() == 0
+        assert await plain.locator("a[href*='notalink']").count() == 0
+
+        # Many-link parent still has anchors (cardinality contrast)
+        parent = page.locator(f"#note-{seeded['parent_id']}")
+        await parent.wait_for(timeout=10000)
+        assert (
+            await parent.locator(
+                ".note-content a.note-link, .note-content a[href^='https://']"
+            ).count()
+            >= 3
+        )
+
+        await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_ui5_avatars_on_cards_replies_profile(live_server):
+    """UI-5: kind:0 picture → img.avatar on feed/reply; none → placeholder; profile header."""
+    pytest.importorskip("playwright")
+    from playwright.async_api import async_playwright
+
+    seeded = await _seed_ui42(live_server["db"])
+    base = live_server["base"]
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.goto(base + "/", wait_until="networkidle")
+
+        # Feed note with picture
+        parent = page.locator(f"#note-{seeded['parent_id']}")
+        await parent.wait_for(timeout=15000)
+        avatar = parent.locator("img.avatar")
+        await avatar.wait_for(timeout=10000)
+        src = await avatar.get_attribute("src")
+        assert src == seeded["picture_url"]
+
+        # No picture → placeholder (not img.avatar)
+        plain = page.locator(f"#note-{seeded['plain_note_id']}")
+        await plain.wait_for(timeout=10000)
+        assert await plain.locator("img.avatar").count() == 0
+        assert await plain.locator(".avatar-placeholder").count() >= 1
+        plain_text = await plain.inner_text()
+        assert "NoPicBot" in plain_text
+
+        # Reply card avatar from kind:0 picture
+        await page.locator(f"#expand-replies-{seeded['parent_id']}").click()
+        reply_card = page.locator(f"#note-{seeded['reply_id']}")
+        await reply_card.wait_for(timeout=10000)
+        reply_av = reply_card.locator("img.avatar")
+        await reply_av.wait_for(timeout=5000)
+        assert await reply_av.get_attribute("src") == seeded["reply_picture_url"]
+
+        # Profile page header shows picture when present
+        await page.goto(
+            base + f"/profile?pubkey={seeded['display_pubkey']}",
+            wait_until="networkidle",
+        )
+        await page.wait_for_selector(
+            f'img[src="{seeded["picture_url"]}"]', timeout=15000
+        )
+
+        # Adversarial: nip05-only author (no picture) stays placeholder on feed
+        await page.goto(base + "/", wait_until="networkidle")
+        nip = page.locator(f"#note-{seeded['nip05_note_id']}")
+        await nip.wait_for(timeout=10000)
+        assert await nip.locator("img.avatar").count() == 0
+        assert await nip.locator(".avatar-placeholder").count() >= 1
+
+        await browser.close()
+
+
+class TestAvatarUI5Source:
+    """UI-5 source contract: getAvatar reads kind:0 picture; renderNoteCard uses it."""
+
+    def test_getAvatar_reads_picture(self):
+        index = (_STATIC / "index.html").read_text()
+        fn = index.split("function getAvatar", 1)[1].split("\nfunction ", 1)[0]
+        assert "picture" in fn
+        assert "metadataCache" in fn
+
+    def test_renderNoteCard_uses_getAvatar(self):
+        index = (_STATIC / "index.html").read_text()
+        fn = index.split("function renderNoteCard", 1)[1].split("\nfunction ", 1)[0]
+        assert "getAvatar(" in fn
+        assert "img" in fn and "avatar" in fn
+        assert "avatar-placeholder" in fn
+
+    def test_profile_shows_picture_when_present(self):
+        profile = (_STATIC / "profile.html").read_text()
+        assert "meta.picture" in profile or "picture" in profile
+        assert "prof-picture" in profile
+        assert "pub-avatar" in profile
