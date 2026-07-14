@@ -27,7 +27,7 @@ from app.config import (
 )
 from app.models import NostrEvent, PendingEvent, Vote
 from app.nostr import validate_event, verify_event_id, verify_signature
-from app.zaps import verify_zap_receipt
+from app.zaps import verify_zap_receipt, verify_zap_receipt_signer
 
 logger = logging.getLogger("clankfeed.relay")
 
@@ -396,6 +396,15 @@ async def _handle_zap_receipt(conn: Connection, event: dict, db: AsyncSession):
     target = await db.get(NostrEvent, info["target_event_id"])
     if not target:
         await conn.send(["OK", event_id, False, "invalid: zapped event not found on this relay"])
+        return
+
+    if info["recipient_pubkey"] != target.pubkey:
+        await conn.send(["OK", event_id, False, "invalid: zap request p tag does not match target author"])
+        return
+
+    signer_err = await verify_zap_receipt_signer(event, target.pubkey, db)
+    if signer_err:
+        await conn.send(["OK", event_id, False, f"invalid: {signer_err}"])
         return
 
     await apply_zap_receipt(db, event, info, target)

@@ -2,6 +2,7 @@
 
 import json
 import time
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select
@@ -10,11 +11,22 @@ from app.database import async_session
 from app.models import NostrEvent, Vote
 from app.nostr import sign_event
 from app.relay import _handle_event, store_event
-from app.zaps import bolt11_amount_msat
+from app.zaps import bolt11_amount_msat, lud16_to_lnurlp_url
 
 AUTHOR_SK = "b" * 64
 SENDER_SK = "c" * 64
 LNURL_SK = "d" * 64
+FORGER_SK = "e" * 64
+
+# Derived once for fixtures that need the LNURL server's nostrPubkey hex.
+LNURL_PUBKEY = sign_event(LNURL_SK, {
+    "created_at": 1, "kind": 1, "tags": [], "content": "",
+})["pubkey"]
+AUTHOR_PUBKEY = sign_event(AUTHOR_SK, {
+    "created_at": 1, "kind": 1, "tags": [], "content": "",
+})["pubkey"]
+
+AUTHOR_LUD16 = "alice@example.com"
 
 
 class FakeConn:
@@ -35,12 +47,22 @@ def _make_note(content="zap me"):
     })
 
 
-def _make_zap_request(target_id: str, amount_msat: int = 21000):
+def _make_profile(lud16: str = AUTHOR_LUD16, sk: str = AUTHOR_SK):
+    return sign_event(sk, {
+        "created_at": int(time.time()),
+        "kind": 0,
+        "tags": [],
+        "content": json.dumps({"name": "alice", "lud16": lud16}),
+    })
+
+
+def _make_zap_request(target_id: str, amount_msat: int = 21000, recipient: str = AUTHOR_PUBKEY):
     return sign_event(SENDER_SK, {
         "created_at": int(time.time()),
         "kind": 9734,
         "tags": [
             ["e", target_id],
+            ["p", recipient],
             ["amount", str(amount_msat)],
             ["relays", "wss://clankfeed.com"],
         ],
@@ -48,11 +70,12 @@ def _make_zap_request(target_id: str, amount_msat: int = 21000):
     })
 
 
-def _make_receipt(zap_request: dict, bolt11: str = "lnbc210n1fakedata"):
-    return sign_event(LNURL_SK, {
+def _make_receipt(zap_request: dict, bolt11: str = "lnbc210n1fakedata", sk: str = LNURL_SK):
+    return sign_event(sk, {
         "created_at": int(time.time()),
         "kind": 9735,
         "tags": [
+            ["p", AUTHOR_PUBKEY],
             ["bolt11", bolt11],
             ["description", json.dumps(zap_request)],
         ],
@@ -63,6 +86,20 @@ def _make_receipt(zap_request: dict, bolt11: str = "lnbc210n1fakedata"):
 async def _store_note(note: dict):
     async with async_session() as db:
         await store_event(db, note, sats_clank=0)
+
+
+async def _store_author_profile(lud16: str = AUTHOR_LUD16):
+    async with async_session() as db:
+        await store_event(db, _make_profile(lud16), sats_clank=0)
+
+
+def _mock_lnurl_pubkey(pubkey: str = LNURL_PUBKEY):
+    """Patch the LNURL metadata fetch used by signer verification."""
+    return patch(
+        "app.zaps.fetch_lnurl_nostr_pubkey",
+        new_callable=AsyncMock,
+        return_value=pubkey,
+    )
 
 
 async def _send(event: dict) -> FakeConn:
@@ -90,13 +127,27 @@ def test_bolt11_amounts():
     assert bolt11_amount_msat("lntb210n1abc") == 21000  # testnet prefix
 
 
+def test_lud16_to_lnurlp_url():
+    assert lud16_to_lnurlp_url("alice@example.com") == (
+        "https://example.com/.well-known/lnurlp/alice"
+    )
+    assert lud16_to_lnurlp_url("bob@ln.example.org") == (
+        "https://ln.example.org/.well-known/lnurlp/bob"
+    )
+    assert lud16_to_lnurlp_url("not-an-address") is None
+    assert lud16_to_lnurlp_url("") is None
+    assert lud16_to_lnurlp_url("a@b@c") is None
+
+
 @pytest.mark.asyncio
 async def test_zap_receipt_credits_sats_ext_full(client):
     note = _make_note()
     await _store_note(note)
+    await _store_author_profile()
 
     receipt = _make_receipt(_make_zap_request(note["id"]))
-    conn = await _send(receipt)
+    with _mock_lnurl_pubkey():
+        conn = await _send(receipt)
 
     assert conn.sent[-1][:3] == ["OK", receipt["id"], True]
     # 21 sats zapped -> 21 credited at face value, segregated from paid value
@@ -119,10 +170,12 @@ async def test_zap_receipt_credits_sats_ext_full(client):
 async def test_duplicate_receipt_credits_once(client):
     note = _make_note("dup target")
     await _store_note(note)
+    await _store_author_profile()
 
     receipt = _make_receipt(_make_zap_request(note["id"]))
-    await _send(receipt)
-    conn = await _send(receipt)
+    with _mock_lnurl_pubkey():
+        await _send(receipt)
+        conn = await _send(receipt)
 
     assert conn.sent[-1][2] is True  # duplicate acked
     assert (await _get_sats(note["id"]))[1] == 21  # not 42
@@ -132,10 +185,12 @@ async def test_duplicate_receipt_credits_once(client):
 async def test_amount_mismatch_rejected(client):
     note = _make_note("mismatch target")
     await _store_note(note)
+    await _store_author_profile()
 
     # zap request says 42000 msat, bolt11 says 21000
     receipt = _make_receipt(_make_zap_request(note["id"], amount_msat=42000))
-    conn = await _send(receipt)
+    with _mock_lnurl_pubkey():
+        conn = await _send(receipt)
 
     assert conn.sent[-1][2] is False
     assert "amount" in conn.sent[-1][3]
@@ -145,7 +200,8 @@ async def test_amount_mismatch_rejected(client):
 @pytest.mark.asyncio
 async def test_unknown_target_rejected(client):
     receipt = _make_receipt(_make_zap_request("e" * 64))
-    conn = await _send(receipt)
+    with _mock_lnurl_pubkey():
+        conn = await _send(receipt)
 
     assert conn.sent[-1][2] is False
     assert "not found" in conn.sent[-1][3]
@@ -155,11 +211,13 @@ async def test_unknown_target_rejected(client):
 async def test_tampered_zap_request_rejected(client):
     note = _make_note("tamper target")
     await _store_note(note)
+    await _store_author_profile()
 
     zap_request = _make_zap_request(note["id"])
     zap_request["content"] = "tampered"  # breaks id/sig
     receipt = _make_receipt(zap_request)
-    conn = await _send(receipt)
+    with _mock_lnurl_pubkey():
+        conn = await _send(receipt)
 
     assert conn.sent[-1][2] is False
     assert (await _get_sats(note["id"]))[1] == 0
@@ -171,7 +229,9 @@ async def test_sort_ext_segregated_from_clank(client):
     unzapped = _make_note("plain note")
     await _store_note(zapped)
     await _store_note(unzapped)
-    await _send(_make_receipt(_make_zap_request(zapped["id"])))
+    await _store_author_profile()
+    with _mock_lnurl_pubkey():
+        await _send(_make_receipt(_make_zap_request(zapped["id"])))
 
     resp = await client.get("/api/v1/events?sort=ext")
     assert resp.status_code == 200
@@ -209,3 +269,141 @@ async def test_receipt_without_description_rejected(client):
 
     assert conn.sent[-1][2] is False
     assert "description" in conn.sent[-1][3]
+
+
+# --- EXT-1: LNURL nostrPubkey signer verification ---
+
+
+@pytest.mark.asyncio
+async def test_forged_receipt_signer_rejected(client):
+    """Adversarial: well-formed receipt signed by a non-LNURL key must not credit."""
+    note = _make_note("forge target")
+    await _store_note(note)
+    await _store_author_profile()
+
+    receipt = _make_receipt(_make_zap_request(note["id"]), sk=FORGER_SK)
+    with _mock_lnurl_pubkey(LNURL_PUBKEY):
+        conn = await _send(receipt)
+
+    assert conn.sent[-1][2] is False
+    assert "nostrPubkey" in conn.sent[-1][3] or "signer" in conn.sent[-1][3].lower()
+    assert (await _get_sats(note["id"]))[1] == 0
+
+
+@pytest.mark.asyncio
+async def test_receipt_without_author_lud16_rejected(client):
+    """Fail closed: no kind:0 lud16 for the zapped author → drop receipt."""
+    note = _make_note("no lud16")
+    await _store_note(note)
+    # deliberately no profile
+
+    receipt = _make_receipt(_make_zap_request(note["id"]))
+    with _mock_lnurl_pubkey():
+        conn = await _send(receipt)
+
+    assert conn.sent[-1][2] is False
+    assert "lud16" in conn.sent[-1][3].lower()
+    assert (await _get_sats(note["id"]))[1] == 0
+
+
+@pytest.mark.asyncio
+async def test_receipt_when_lnurl_fetch_fails_rejected(client):
+    """Fail closed: LNURL metadata unreachable / no nostrPubkey → drop."""
+    note = _make_note("lnurl down")
+    await _store_note(note)
+    await _store_author_profile()
+
+    receipt = _make_receipt(_make_zap_request(note["id"]))
+    with patch("app.zaps.fetch_lnurl_nostr_pubkey", new_callable=AsyncMock, return_value=None):
+        conn = await _send(receipt)
+
+    assert conn.sent[-1][2] is False
+    assert (await _get_sats(note["id"]))[1] == 0
+
+
+@pytest.mark.asyncio
+async def test_fetch_lnurl_nostr_pubkey_http_and_cache(client):
+    """Real fetch path: HTTP GET lud16 → nostrPubkey; second call hits cache."""
+    from app.zaps import clear_lnurl_cache, fetch_lnurl_nostr_pubkey
+
+    clear_lnurl_cache()
+    calls = []
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {
+                "allowsNostr": True,
+                "nostrPubkey": LNURL_PUBKEY,
+                "callback": "https://example.com/cb",
+            }
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            pass
+
+        async def get(self, url, **kwargs):
+            calls.append(url)
+            return FakeResp()
+
+    with patch("app.zaps.httpx.AsyncClient", FakeClient):
+        pk1 = await fetch_lnurl_nostr_pubkey(AUTHOR_LUD16)
+        pk2 = await fetch_lnurl_nostr_pubkey(AUTHOR_LUD16)
+
+    assert pk1 == LNURL_PUBKEY
+    assert pk2 == LNURL_PUBKEY
+    assert calls == ["https://example.com/.well-known/lnurlp/alice"]  # cached
+
+
+@pytest.mark.asyncio
+async def test_ingest_drops_forged_receipt(client):
+    """Ingest path: forged receipt must not credit sats_ext on an external note."""
+    from app.ingest import _handle_receipt
+
+    note = _make_note("ingest forge")
+    async with async_session() as db:
+        await store_event(db, note, sats_clank=0, origin="external")
+    await _store_author_profile()
+
+    class FakeWS:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, msg):
+            self.sent.append(msg)
+
+    receipt = _make_receipt(_make_zap_request(note["id"]), sk=FORGER_SK)
+    pending = {}
+    with _mock_lnurl_pubkey(LNURL_PUBKEY):
+        await _handle_receipt(FakeWS(), receipt, pending)
+
+    assert (await _get_sats(note["id"]))[1] == 0
+    assert pending == {}  # not parked either
+
+
+@pytest.mark.asyncio
+async def test_ingest_credits_verified_receipt(client):
+    """Ingest path: receipt signed by LNURL nostrPubkey credits sats_ext."""
+    from app.ingest import _handle_receipt
+
+    note = _make_note("ingest ok")
+    async with async_session() as db:
+        await store_event(db, note, sats_clank=0, origin="external")
+    await _store_author_profile()
+
+    class FakeWS:
+        async def send(self, msg):
+            pass
+
+    receipt = _make_receipt(_make_zap_request(note["id"]))
+    with _mock_lnurl_pubkey(LNURL_PUBKEY):
+        await _handle_receipt(FakeWS(), receipt, {})
+
+    assert (await _get_sats(note["id"]))[1] == 21

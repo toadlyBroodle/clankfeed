@@ -18,7 +18,7 @@ from app.database import async_session
 from app.models import NostrEvent
 from app.nostr import validate_event
 from app.relay import apply_zap_receipt, store_event
-from app.zaps import verify_zap_receipt
+from app.zaps import verify_zap_receipt, verify_zap_receipt_signer
 
 logger = logging.getLogger("clankfeed.ingest")
 
@@ -35,6 +35,14 @@ def _acceptable_note(event: dict) -> bool:
     )
 
 
+async def _signer_ok(db, event: dict, info: dict, target: NostrEvent) -> bool:
+    """True if zap-request p matches target author and LNURL nostrPubkey matches."""
+    if info.get("recipient_pubkey") != target.pubkey:
+        return False
+    err = await verify_zap_receipt_signer(event, target.pubkey, db)
+    return not err
+
+
 async def _apply_receipts(target_id: str, receipts: list[tuple[dict, dict]]):
     """Credit parked (event, info) receipts now that their target is stored."""
     async with async_session() as db:
@@ -44,6 +52,9 @@ async def _apply_receipts(target_id: str, receipts: list[tuple[dict, dict]]):
         for event, info in receipts:
             if await db.get(NostrEvent, event["id"]):
                 continue  # receipt already credited
+            if not await _signer_ok(db, event, info, target):
+                logger.info("Dropped forged/unverified zap receipt %s", event.get("id", "")[:12])
+                continue
             await apply_zap_receipt(db, event, info, target)
 
 
@@ -61,6 +72,9 @@ async def _handle_receipt(ws, event: dict, pending: dict):
             return  # duplicate receipt
         target = await db.get(NostrEvent, target_id)
         if target:
+            if not await _signer_ok(db, event, info, target):
+                logger.info("Dropped forged/unverified zap receipt %s", event.get("id", "")[:12])
+                return
             await apply_zap_receipt(db, event, info, target)
             return
 

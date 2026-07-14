@@ -5,18 +5,29 @@ zapped note's sats_ext with the full zap amount — the fair combined ranking
 shared with clankfeed votes. sats_clank (money paid to clankfeed) is
 untouched by zaps.
 
-Verification enforced here: receipt signature (upstream via validate_event),
-embedded kind-9734 zap request id + signature, bolt11 amount == zap request
-amount tag, and a valid target event id. Full NIP-57 validation would also
-check the receipt pubkey against the recipient's LNURL server nostrPubkey;
-that requires an HTTP fetch of the recipient's lud16 metadata and is skipped
-to keep ingestion free of network round-trips.
+Verification: receipt signature (upstream via validate_event), embedded
+kind-9734 zap request id + signature, bolt11 amount == zap request amount
+tag, valid target event id, and (async) receipt pubkey == the recipient's
+LNURL-pay `nostrPubkey` (fetched from their lud16 metadata and cached).
 """
 
 import json
+import logging
 import re
+import time
 
+import httpx
+from sqlalchemy import and_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import NostrEvent
 from app.nostr import validate_event
+
+logger = logging.getLogger("clankfeed.zaps")
+
+# lud16 -> (fetched_at, nostrPubkey or None for negative cache)
+_lnurl_cache: dict[str, tuple[float, str | None]] = {}
+_LNURL_CACHE_TTL = 3600  # 1 hour
 
 # BOLT11 human-readable part: ln + network + optional amount + multiplier,
 # followed by the bech32 "1" separator.
@@ -55,11 +66,109 @@ def _first_tag(tags: list, name: str) -> str | None:
     return None
 
 
+def lud16_to_lnurlp_url(lud16: str) -> str | None:
+    """Convert a lightning address (user@domain) to an LNURL-pay HTTPS URL."""
+    if not isinstance(lud16, str) or "@" not in lud16:
+        return None
+    user, _, domain = lud16.strip().partition("@")
+    if not user or not domain or "@" in domain or "/" in domain:
+        return None
+    return f"https://{domain.lower()}/.well-known/lnurlp/{user}"
+
+
+def clear_lnurl_cache() -> None:
+    """Clear the in-process LNURL nostrPubkey cache (tests)."""
+    _lnurl_cache.clear()
+
+
+def extract_lud16_from_kind0_content(content: str) -> str | None:
+    """Parse kind:0 JSON content for a lud16 lightning address."""
+    try:
+        meta = json.loads(content)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    lud16 = meta.get("lud16")
+    if isinstance(lud16, str) and "@" in lud16:
+        return lud16.strip()
+    return None
+
+
+async def get_author_lud16(db: AsyncSession, pubkey: str) -> str | None:
+    """Return lud16 from the latest stored kind:0 for pubkey, if any."""
+    stmt = select(NostrEvent).where(
+        and_(NostrEvent.pubkey == pubkey, NostrEvent.kind == 0)
+    )
+    row = (await db.execute(stmt)).scalar_one_or_none()
+    if not row:
+        return None
+    return extract_lud16_from_kind0_content(row.content)
+
+
+async def fetch_lnurl_nostr_pubkey(lud16: str) -> str | None:
+    """Fetch LNURL-pay metadata for lud16; return nostrPubkey if allowsNostr.
+
+    Cached for _LNURL_CACHE_TTL seconds (including negative results).
+    """
+    now = time.time()
+    cached = _lnurl_cache.get(lud16)
+    if cached and cached[0] > now - _LNURL_CACHE_TTL:
+        return cached[1]
+
+    url = lud16_to_lnurlp_url(lud16)
+    if not url:
+        _lnurl_cache[lud16] = (now, None)
+        return None
+
+    pubkey: str | None = None
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                data = resp.json()
+                if (
+                    isinstance(data, dict)
+                    and data.get("allowsNostr") is True
+                    and isinstance(data.get("nostrPubkey"), str)
+                    and re.fullmatch(r"[0-9a-f]{64}", data["nostrPubkey"].lower())
+                ):
+                    pubkey = data["nostrPubkey"].lower()
+    except Exception as e:
+        logger.warning("LNURL fetch failed for %s: %s", lud16, e)
+
+    _lnurl_cache[lud16] = (now, pubkey)
+    return pubkey
+
+
+async def verify_zap_receipt_signer(
+    event: dict, recipient_pubkey: str, db: AsyncSession
+) -> str:
+    """NIP-57 Appendix F: receipt.pubkey must equal author's LNURL nostrPubkey.
+
+    Returns an error string on failure, or "" on success. Fail-closed: missing
+    lud16 or unreachable LNURL metadata rejects the receipt.
+    """
+    lud16 = await get_author_lud16(db, recipient_pubkey)
+    if not lud16:
+        return "author has no lud16 metadata"
+
+    expected = await fetch_lnurl_nostr_pubkey(lud16)
+    if not expected:
+        return "could not resolve LNURL nostrPubkey"
+
+    if event.get("pubkey", "").lower() != expected:
+        return "receipt pubkey does not match LNURL nostrPubkey"
+
+    return ""
+
+
 def verify_zap_receipt(event: dict) -> tuple[str, dict]:
     """Verify a kind-9735 zap receipt (already NIP-01 validated).
 
     Returns (error, info). On success error is "" and info contains
-    target_event_id, sender_pubkey, and amount_sats.
+    target_event_id, sender_pubkey, recipient_pubkey, and amount_sats.
+    Signer/LNURL checks are async — see verify_zap_receipt_signer.
     """
     description = _first_tag(event["tags"], "description")
     if not description:
@@ -95,8 +204,13 @@ def verify_zap_receipt(event: dict) -> tuple[str, dict]:
     if not target_event_id or not re.fullmatch(r"[0-9a-f]{64}", target_event_id):
         return "zap request has no valid e tag", {}
 
+    recipient_pubkey = _first_tag(zap_request["tags"], "p")
+    if not recipient_pubkey or not re.fullmatch(r"[0-9a-f]{64}", recipient_pubkey):
+        return "zap request has no valid p tag", {}
+
     return "", {
         "target_event_id": target_event_id,
         "sender_pubkey": zap_request["pubkey"],
+        "recipient_pubkey": recipient_pubkey,
         "amount_sats": msat // 1000,
     }

@@ -98,7 +98,7 @@ Every note carries two sat tallies:
 - `sats_clank` — money paid to clankfeed (posting fees + paid votes). Sort with `GET /api/v1/events?sort=clank` (alias `value`). Gaming this costs real money; the relay keeps the payment.
 - `sats_ext` — the fair combined ranking: external NIP-57 zaps at face value plus clankfeed votes at their fee-inclusive amount. Sort with `GET /api/v1/events?sort=ext` (alias `zaps`).
 
-Zap receipts (kind 9735) are accepted free and verified: embedded zap request signature, bolt11 amount match, and the zapped note must be stored on the relay.
+Zap receipts (kind 9735) are accepted free and verified: embedded zap request signature, bolt11 amount match, zapped note present on the relay, and receipt pubkey equals the author's LNURL-pay `nostrPubkey` (from kind:0 `lud16`, fetched and cached).
 
 ## Dual feeds (`origin`)
 
