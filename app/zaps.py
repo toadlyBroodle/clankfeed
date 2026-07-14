@@ -11,14 +11,16 @@ tag, valid target event id, and (async) receipt pubkey == the recipient's
 LNURL-pay `nostrPubkey` (fetched from their lud16 metadata and cached).
 """
 
+import asyncio
 import ipaddress
 import json
 import logging
 import re
 import socket
+import ssl
 import time
+from urllib.parse import urlparse
 
-import httpx
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -99,20 +101,45 @@ def _is_non_public_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool
     )
 
 
-def lnurl_host_is_safe(host: str) -> bool:
-    """Resolve host and reject loopback/private/link-local/metadata targets.
-
-    Used before any server-side HTTP GET of lud16 LNURL-pay metadata (SSRF).
-    """
+def _normalize_lnurl_host(host: str) -> str | None:
+    """Lowercase / strip host; None if empty or blocked metadata name."""
     if not isinstance(host, str) or not host:
-        return False
+        return None
     host = host.strip().lower().rstrip(".")
     if not host or host in _BLOCKED_LNURL_HOSTS:
-        return False
-    # Bracketed IPv6 literals from URL parsing are not expected in lud16 domains,
-    # but strip brackets if present.
+        return None
     if host.startswith("[") and host.endswith("]"):
         host = host[1:-1]
+    return host or None
+
+
+def _first_public_ip_from_addrinfo(infos) -> str | None:
+    """Return first public IP if *every* addr is public; else None (fail closed)."""
+    if not infos:
+        return None
+    first: str | None = None
+    for info in infos:
+        sockaddr = info[4]
+        try:
+            ip = ipaddress.ip_address(sockaddr[0])
+        except ValueError:
+            return None
+        if _is_non_public_ip(ip):
+            return None
+        if first is None:
+            first = str(ip)
+    return first
+
+
+def lnurl_host_is_safe(host: str) -> bool:
+    """Sync resolve + reject loopback/private/link-local/metadata targets.
+
+    Prefer ``resolve_safe_lnurl_ip`` on async paths (off-loop DNS + returns the
+    pinned IP for the subsequent GET).
+    """
+    host = _normalize_lnurl_host(host)
+    if host is None:
+        return False
 
     try:
         ip = ipaddress.ip_address(host)
@@ -124,17 +151,142 @@ def lnurl_host_is_safe(host: str) -> bool:
         infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
     except socket.gaierror:
         return False
-    if not infos:
-        return False
-    for info in infos:
-        sockaddr = info[4]
+    return _first_public_ip_from_addrinfo(infos) is not None
+
+
+async def resolve_safe_lnurl_ip(host: str) -> str | None:
+    """Async DNS (thread offload) + SSRF check; return one public IP to pin.
+
+    A single resolution is reused for the HTTP connect so a later rebind of the
+    hostname cannot steer the GET at a private address (DNS rebinding TOCTOU).
+    """
+    host = _normalize_lnurl_host(host)
+    if host is None:
+        return None
+
+    try:
+        ip = ipaddress.ip_address(host)
+        return None if _is_non_public_ip(ip) else str(ip)
+    except ValueError:
+        pass
+
+    try:
+        infos = await asyncio.to_thread(
+            socket.getaddrinfo, host, 443, 0, socket.SOCK_STREAM
+        )
+    except socket.gaierror:
+        return None
+    return _first_public_ip_from_addrinfo(infos)
+
+
+def _decode_chunked_body(body: bytes) -> bytes:
+    """Decode a single HTTP/1.1 chunked body (no trailers)."""
+    out = bytearray()
+    pos = 0
+    while pos < len(body):
+        nl = body.find(b"\r\n", pos)
+        if nl < 0:
+            break
+        size_line = body[pos:nl].split(b";", 1)[0].strip()
         try:
-            ip = ipaddress.ip_address(sockaddr[0])
+            size = int(size_line, 16)
         except ValueError:
-            return False
-        if _is_non_public_ip(ip):
-            return False
-    return True
+            break
+        pos = nl + 2
+        if size == 0:
+            break
+        out.extend(body[pos : pos + size])
+        pos += size + 2  # chunk data + CRLF
+    return bytes(out)
+
+
+def _parse_http_json_response(raw: bytes) -> tuple[int, dict | list | None]:
+    """Parse status + JSON body from a raw HTTP/1.1 response."""
+    if not raw:
+        return (0, None)
+    header_blob, sep, body = raw.partition(b"\r\n\r\n")
+    if not sep:
+        return (0, None)
+    try:
+        status_line = header_blob.split(b"\r\n", 1)[0].decode("ascii", "replace")
+        parts = status_line.split(" ", 2)
+        status = int(parts[1]) if len(parts) >= 2 else 0
+    except (ValueError, IndexError):
+        return (0, None)
+
+    headers: dict[str, str] = {}
+    for line in header_blob.split(b"\r\n")[1:]:
+        if b":" not in line:
+            continue
+        k, _, v = line.partition(b":")
+        headers[k.decode("ascii", "replace").strip().lower()] = (
+            v.decode("ascii", "replace").strip()
+        )
+
+    if "chunked" in headers.get("transfer-encoding", "").lower():
+        body = _decode_chunked_body(body)
+
+    if status != 200:
+        return (status, None)
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return (status, None)
+    return (status, data)
+
+
+async def lnurl_http_get(url: str, pinned_ip: str) -> tuple[int, dict | list | None]:
+    """GET ``url`` connecting only to ``pinned_ip`` (Host + TLS SNI = URL host).
+
+    Does not re-resolve the hostname, closing the DNS-rebinding TOCTOU window
+    between the SSRF check and the TCP connect.
+    """
+    parsed = urlparse(url)
+    hostname = parsed.hostname
+    if not hostname or parsed.scheme != "https":
+        return (0, None)
+    port = parsed.port or 443
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+
+    ctx = ssl.create_default_context()
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(
+                pinned_ip, port, ssl=ctx, server_hostname=hostname
+            ),
+            timeout=10.0,
+        )
+    except Exception as e:
+        logger.warning(
+            "LNURL pinned connect failed host=%s ip=%s: %s", hostname, pinned_ip, e
+        )
+        return (0, None)
+
+    try:
+        req = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {hostname}\r\n"
+            f"Accept: application/json\r\n"
+            f"User-Agent: clankfeed\r\n"
+            f"Connection: close\r\n"
+            f"\r\n"
+        )
+        writer.write(req.encode("ascii"))
+        await writer.drain()
+        raw = await asyncio.wait_for(reader.read(65536), timeout=10.0)
+    except Exception as e:
+        logger.warning("LNURL pinned read failed host=%s: %s", hostname, e)
+        return (0, None)
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+
+    return _parse_http_json_response(raw)
 
 
 def clear_lnurl_cache() -> None:
@@ -187,26 +339,25 @@ async def fetch_lnurl_nostr_pubkey(lud16: str) -> str | None:
         _lnurl_cache[lud16] = (now, None)
         return None
 
-    # SSRF: never GET loopback/private/link-local/metadata targets.
+    # SSRF: resolve once, reject non-public, pin that IP for the GET (no rebind).
     host = url.split("://", 1)[-1].split("/", 1)[0]
-    if not lnurl_host_is_safe(host):
+    pinned_ip = await resolve_safe_lnurl_ip(host)
+    if not pinned_ip:
         logger.warning("LNURL SSRF blocked for lud16=%s host=%s", lud16, host)
         _lnurl_cache[lud16] = (now, None)
         return None
 
     pubkey: str | None = None
     try:
-        async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
-            resp = await client.get(url)
-            if resp.status_code == 200:
-                data = resp.json()
-                if (
-                    isinstance(data, dict)
-                    and data.get("allowsNostr") is True
-                    and isinstance(data.get("nostrPubkey"), str)
-                    and re.fullmatch(r"[0-9a-f]{64}", data["nostrPubkey"].lower())
-                ):
-                    pubkey = data["nostrPubkey"].lower()
+        status, data = await lnurl_http_get(url, pinned_ip)
+        if (
+            status == 200
+            and isinstance(data, dict)
+            and data.get("allowsNostr") is True
+            and isinstance(data.get("nostrPubkey"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", data["nostrPubkey"].lower())
+        ):
+            pubkey = data["nostrPubkey"].lower()
     except Exception as e:
         logger.warning("LNURL fetch failed for %s: %s", lud16, e)
 

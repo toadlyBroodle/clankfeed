@@ -324,42 +324,39 @@ async def test_receipt_when_lnurl_fetch_fails_rejected(client):
 @pytest.mark.asyncio
 async def test_fetch_lnurl_nostr_pubkey_http_and_cache(client):
     """Real fetch path: HTTP GET lud16 → nostrPubkey; second call hits cache."""
+    import socket
+
     from app.zaps import clear_lnurl_cache, fetch_lnurl_nostr_pubkey
 
     clear_lnurl_cache()
     calls = []
 
-    class FakeResp:
-        status_code = 200
-
-        def json(self):
-            return {
+    async def fake_get(url, pinned_ip):
+        calls.append((url, pinned_ip))
+        return (
+            200,
+            {
                 "allowsNostr": True,
                 "nostrPubkey": LNURL_PUBKEY,
                 "callback": "https://example.com/cb",
-            }
+            },
+        )
 
-    class FakeClient:
-        def __init__(self, *a, **k):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            pass
-
-        async def get(self, url, **kwargs):
-            calls.append(url)
-            return FakeResp()
-
-    with patch("app.zaps.httpx.AsyncClient", FakeClient):
+    public = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443)),
+    ]
+    with (
+        patch("app.zaps.socket.getaddrinfo", return_value=public),
+        patch("app.zaps.lnurl_http_get", side_effect=fake_get),
+    ):
         pk1 = await fetch_lnurl_nostr_pubkey(AUTHOR_LUD16)
         pk2 = await fetch_lnurl_nostr_pubkey(AUTHOR_LUD16)
 
     assert pk1 == LNURL_PUBKEY
     assert pk2 == LNURL_PUBKEY
-    assert calls == ["https://example.com/.well-known/lnurlp/alice"]  # cached
+    assert calls == [
+        ("https://example.com/.well-known/lnurlp/alice", "8.8.8.8")
+    ]  # cached; single pinned GET
 
 
 @pytest.mark.asyncio
@@ -431,21 +428,11 @@ async def test_fetch_lnurl_rejects_non_public_targets(lud16, client):
     clear_lnurl_cache()
     get_calls = []
 
-    class FakeClient:
-        def __init__(self, *a, **k):
-            pass
+    async def fake_get(url, pinned_ip):
+        get_calls.append((url, pinned_ip))
+        raise AssertionError(f"SSRF: must not GET {url} via {pinned_ip}")
 
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            pass
-
-        async def get(self, url, **kwargs):
-            get_calls.append(url)
-            raise AssertionError(f"SSRF: must not GET {url}")
-
-    with patch("app.zaps.httpx.AsyncClient", FakeClient):
+    with patch("app.zaps.lnurl_http_get", side_effect=fake_get):
         pk = await fetch_lnurl_nostr_pubkey(lud16)
 
     assert pk is None
@@ -462,19 +449,9 @@ async def test_fetch_lnurl_rejects_hostname_resolving_to_private_ip(client):
     clear_lnurl_cache()
     get_calls = []
 
-    class FakeClient:
-        def __init__(self, *a, **k):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            pass
-
-        async def get(self, url, **kwargs):
-            get_calls.append(url)
-            raise AssertionError(f"SSRF: must not GET {url}")
+    async def fake_get(url, pinned_ip):
+        get_calls.append((url, pinned_ip))
+        raise AssertionError(f"SSRF: must not GET {url} via {pinned_ip}")
 
     # (family, type, proto, canonname, sockaddr)
     private_addrs = [
@@ -483,7 +460,7 @@ async def test_fetch_lnurl_rejects_hostname_resolving_to_private_ip(client):
 
     with (
         patch("app.zaps.socket.getaddrinfo", return_value=private_addrs),
-        patch("app.zaps.httpx.AsyncClient", FakeClient),
+        patch("app.zaps.lnurl_http_get", side_effect=fake_get),
     ):
         pk = await fetch_lnurl_nostr_pubkey("alice@evil.example.com")
 
@@ -497,6 +474,8 @@ async def test_fetch_lnurl_rejects_hostname_resolving_to_private_ip(client):
 @pytest.mark.asyncio
 async def test_fetch_lnurl_negative_cache_short_ttl(client):
     """Transport/HTTP failure caches None briefly; success keeps long TTL."""
+    import socket
+
     from app.zaps import (
         _LNURL_CACHE_TTL,
         _LNURL_NEGATIVE_CACHE_TTL,
@@ -509,49 +488,35 @@ async def test_fetch_lnurl_negative_cache_short_ttl(client):
 
     clear_lnurl_cache()
     calls = []
+    mode = {"v": "fail"}
 
-    class FailResp:
-        status_code = 503
-
-        def json(self):
-            return {}
-
-    class OkResp:
-        status_code = 200
-
-        def json(self):
-            return {
+    async def fake_get(url, pinned_ip):
+        calls.append(url)
+        if mode["v"] == "fail":
+            return (503, None)
+        return (
+            200,
+            {
                 "allowsNostr": True,
                 "nostrPubkey": LNURL_PUBKEY,
                 "callback": "https://example.com/cb",
-            }
+            },
+        )
 
-    class FakeClient:
-        mode = "fail"
-
-        def __init__(self, *a, **k):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            pass
-
-        async def get(self, url, **kwargs):
-            calls.append(url)
-            if FakeClient.mode == "fail":
-                return FailResp()
-            return OkResp()
-
-    with patch("app.zaps.httpx.AsyncClient", FakeClient):
+    public = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443)),
+    ]
+    with (
+        patch("app.zaps.socket.getaddrinfo", return_value=public),
+        patch("app.zaps.lnurl_http_get", side_effect=fake_get),
+    ):
         assert await fetch_lnurl_nostr_pubkey(AUTHOR_LUD16) is None
         assert await fetch_lnurl_nostr_pubkey(AUTHOR_LUD16) is None  # negative cache hit
         assert len(calls) == 1
 
         # Advance past negative TTL → retry
         with patch("app.zaps.time.time", return_value=time.time() + _LNURL_NEGATIVE_CACHE_TTL + 1):
-            FakeClient.mode = "ok"
+            mode["v"] = "ok"
             pk = await fetch_lnurl_nostr_pubkey(AUTHOR_LUD16)
             assert pk == LNURL_PUBKEY
             assert len(calls) == 2
@@ -587,3 +552,96 @@ async def test_receipt_p_tag_mismatch_rejected(client):
     assert conn.sent[-1][2] is False
     assert "p" in conn.sent[-1][3].lower() or "author" in conn.sent[-1][3].lower()
     assert (await _get_sats(note["id"]))[1] == 0
+
+
+# --- EXT-1e: pin validated IP (DNS rebinding TOCTOU) ---
+
+
+@pytest.mark.asyncio
+async def test_fetch_lnurl_pins_ip_against_dns_rebinding(client):
+    """Adversarial: DNS public→private rebind must not SSRF; GET uses pinned IP."""
+    import socket
+
+    from app.zaps import clear_lnurl_cache, fetch_lnurl_nostr_pubkey
+
+    clear_lnurl_cache()
+    # Use a globally-routable IP: 203.0.113.0/24 is is_private under ipaddress.
+    public_ip = "8.8.8.8"
+    resolve_calls = []
+    get_meta = []  # (pinned_ip, url_hostname)
+
+    def rebinding_gai(host, *a, **k):
+        resolve_calls.append(host)
+        if len(resolve_calls) == 1:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (public_ip, 443))]
+        # TOCTOU rebind: second lookup would SSRF if used for connect
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))]
+
+    async def fake_get(url, pinned_ip):
+        from urllib.parse import urlparse
+
+        hostname = urlparse(url).hostname
+        get_meta.append((pinned_ip, hostname))
+        if pinned_ip in ("127.0.0.1", "::1") or pinned_ip.startswith("10."):
+            raise AssertionError(f"SSRF: GET connected via private host {pinned_ip}")
+        return (
+            200,
+            {
+                "allowsNostr": True,
+                "nostrPubkey": LNURL_PUBKEY,
+                "callback": "https://evil.example.com/cb",
+            },
+        )
+
+    with (
+        patch("app.zaps.socket.getaddrinfo", side_effect=rebinding_gai),
+        patch("app.zaps.lnurl_http_get", side_effect=fake_get),
+    ):
+        pk = await fetch_lnurl_nostr_pubkey("alice@evil.example.com")
+
+    assert pk == LNURL_PUBKEY
+    assert len(resolve_calls) == 1, "must resolve DNS once (no second lookup for connect)"
+    assert get_meta == [(public_ip, "evil.example.com")], (
+        "GET must pin validated public IP with URL host=original hostname"
+    )
+
+
+# --- EXT-1f: async DNS (do not block the event loop) ---
+
+
+@pytest.mark.asyncio
+async def test_lnurl_dns_not_on_event_loop_thread(client):
+    """socket.getaddrinfo must not run on the asyncio event-loop thread."""
+    import socket
+    import threading
+
+    from app.zaps import clear_lnurl_cache, fetch_lnurl_nostr_pubkey
+
+    clear_lnurl_cache()
+    loop_ident = threading.get_ident()
+    called_on_loop = []
+
+    def tracking_gai(host, *a, **k):
+        called_on_loop.append(threading.get_ident() == loop_ident)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))]
+
+    async def fake_get(url, pinned_ip):
+        return (
+            200,
+            {
+                "allowsNostr": True,
+                "nostrPubkey": LNURL_PUBKEY,
+            },
+        )
+
+    with (
+        patch("app.zaps.socket.getaddrinfo", side_effect=tracking_gai),
+        patch("app.zaps.lnurl_http_get", side_effect=fake_get),
+    ):
+        pk = await fetch_lnurl_nostr_pubkey("alice@example.com")
+
+    assert pk == LNURL_PUBKEY
+    assert called_on_loop, "expected getaddrinfo to run during fetch"
+    assert called_on_loop == [False], (
+        "getaddrinfo must run off the event-loop thread (asyncio.to_thread)"
+    )
