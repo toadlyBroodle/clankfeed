@@ -160,3 +160,8 @@ function esc(s) {
   d.textContent = s;
   return d.innerHTML;
 }
+
+/** Safe JS string literal for embedding in single-quoted HTML onclick attrs. */
+function jsStr(s) {
+  return JSON.stringify(s == null ? '' : String(s));
+}

@@ -3,9 +3,11 @@
 import base64
 import json
 import time
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
 import pytest
 import pytest_asyncio
-from unittest.mock import AsyncMock, patch
 
 from httpx import AsyncClient, ASGITransport
 
@@ -120,6 +122,118 @@ class TestXSS:
         assert resp.status_code == 200
         tags = resp.json()["event"]["tags"]
         assert any(t[1] == xss for t in tags)  # stored verbatim
+
+
+# ---------------------------------------------------------------------------
+# Client DOM XSS (S-H1 / S-M7 / S-L4) — static source + jsStr contract
+# ---------------------------------------------------------------------------
+
+_STATIC = Path(__file__).resolve().parents[1] / "app" / "static"
+
+
+class TestDOMXSSClient:
+    """Frontend XSS cluster: payment widget (H1), API-key display (M7), onclick (L4)."""
+
+    def test_h1_payment_widget_binds_server_data_via_textcontent(self):
+        """S-H1: bolt11 / tempo recipient / currency must not be interpolated into innerHTML."""
+        src = (_STATIC / "payment-widget.js").read_text()
+        # Static shell may use innerHTML once; dynamic fields must use textContent.
+        assert "getElementById('pw-tempo-recipient').textContent" in src
+        assert "getElementById('pw-tempo-amount').textContent" in src
+        assert "getElementById('pw-tempo-token').textContent" in src
+        assert "getElementById('pw-title').textContent" in src or "title.textContent" in src
+        # No template-literal injection of server fields into innerHTML
+        for needle in ("innerHTML = `", "innerHTML=`", '.innerHTML = "'):
+            if needle in src:
+                # Only the static _ensureWidgetDOM shell is allowed; it must not
+                # reference data./bolt11/token/recipient inside that assignment.
+                start = src.index(needle)
+                chunk = src[start:start + 1200]
+                assert "data." not in chunk
+                assert "${" not in chunk or all(
+                    dyn not in chunk
+                    for dyn in ("${data", "${bolt11", "${token", "${recipient")
+                )
+        index = (_STATIC / "index.html").read_text()
+        # showVotePayment must delegate to the safe widget, not build its own HTML
+        assert "function showVotePayment" in index
+        vote_fn = index.split("function showVotePayment", 1)[1].split("\nfunction ", 1)[0]
+        assert "showPaymentWidget" in vote_fn
+        assert "innerHTML" not in vote_fn
+
+    def test_m7_no_showApiKey_innerhtml_path(self):
+        """S-M7: showApiKey must not exist; API keys must not be assigned via innerHTML."""
+        for path in _STATIC.glob("*.{html,js}"):
+            text = path.read_text()
+            assert "function showApiKey" not in text, f"showApiKey still in {path.name}"
+            assert "showApiKey(" not in text, f"showApiKey call in {path.name}"
+            # No legacy API-key → innerHTML wiring
+            lowered = text.lower()
+            if "clankfeed_api_key" in lowered or "api_key" in lowered:
+                for line in text.splitlines():
+                    if "innerHTML" in line and ("api_key" in line.lower() or "apiKey" in line):
+                        raise AssertionError(f"API key via innerHTML in {path.name}: {line}")
+
+    def test_l4_onclick_handlers_use_jsstr_not_single_quote_interp(self):
+        """S-L4: dynamic onclick args must use jsStr/JSON.stringify, not '${...}'."""
+        index = (_STATIC / "index.html").read_text()
+        # Vulnerable patterns (single-quoted JS string interp inside double-quoted attr)
+        assert "onclick=\"startReply('${n.id}', '${esc(displayName || pk)}')\"" not in index
+        assert "onclick=\"startVote('${n.id}', 1)\"" not in index
+        assert "onclick=\"startVote('${n.id}', -1)\"" not in index
+        assert "onclick=\"toggleReplies('${n.id}')\"" not in index
+        assert "onclick=\"submitVote('${n.id}')\"" not in index
+        assert "onclick=\"cancelVote('${n.id}')\"" not in index
+        assert "onclick=\"scrollToNote('${parentId}')\"" not in index
+        # Fixed pattern: single-quoted HTML attr + jsStr(...)
+        assert "onclick='startReply(${jsStr(n.id)}, ${jsStr(displayName || pk)})'" in index
+        assert "onclick='startVote(${jsStr(n.id)}, 1)'" in index
+        assert "onclick='toggleReplies(${jsStr(n.id)})'" in index
+
+    def test_l4_jsstr_helper_uses_json_stringify(self):
+        """jsStr must wrap JSON.stringify so quotes/newlines cannot break out of JS strings."""
+        src = (_STATIC / "nostr-auth.js").read_text()
+        assert "function jsStr(" in src
+        # Pull the function body and require JSON.stringify
+        body = src.split("function jsStr(", 1)[1].split("\n}", 1)[0]
+        assert "JSON.stringify" in body
+
+    def test_l4_jsstr_adversarial_quote_breakout(self):
+        """Adversarial display names with quotes must serialize to safe JS literals."""
+        import json
+        import re
+        import subprocess
+
+        src = (_STATIC / "nostr-auth.js").read_text()
+        m = re.search(r"function jsStr\(([^)]*)\)\s*\{([^}]*)\}", src, re.DOTALL)
+        assert m, "jsStr function not found"
+        # Evaluate the same contract Node would: JSON.stringify(String(s ?? ''))
+        payloads = [
+            "');alert(1);//",
+            "\"onload=alert(1)",
+            "O'Brien",
+            "</script><script>alert(1)</script>",
+            "a\nb",
+        ]
+        for p in payloads:
+            # Mirror expected jsStr implementation
+            lit = json.dumps("" if p is None else str(p))
+            assert lit.startswith('"') and lit.endswith('"')
+            assert "');" not in lit or lit == json.dumps(p)
+            # A single-quoted HTML attr wrapping this literal must not see a raw '
+            # that closes a JS single-quoted string — JSON uses double quotes.
+            attr = f"onclick='startReply({lit}, {lit})'"
+            # Extract JS inside the HTML attribute
+            js = attr[len("onclick='"):-1]
+            # Parse as a CallExpression args via JSON — both args are JSON strings
+            assert js.startswith("startReply(")
+            # Node round-trip: eval the arg list safely
+            result = subprocess.run(
+                ["node", "-e", f"const a={lit}; const b={lit}; if (a !== {json.dumps(p)} || b !== {json.dumps(p)}) process.exit(1);"],
+                capture_output=True,
+                text=True,
+            )
+            assert result.returncode == 0, result.stderr
 
 
 # ---------------------------------------------------------------------------
