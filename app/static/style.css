@@ -85,6 +85,14 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .note-card:hover { border-color: var(--accent); }
 
+/* Note body: wrap long unbroken strings (URLs) in feed + replies + profile */
+.note-content {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 100%;
+}
+
 /* Avatar */
 .avatar {
   width: 24px; height: 24px;
@@ -125,6 +133,14 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   min-width: 30px;
   text-align: center;
   color: var(--accent);
+}
+.vote-ext {
+  font-size: 9px;
+  font-weight: bold;
+  min-width: 30px;
+  text-align: center;
+  color: var(--dim);
+  line-height: 1.2;
 }
 .vote-prompt {
   display: none;

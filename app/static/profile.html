@@ -455,12 +455,16 @@ async function showPublicProfile(pubkey) {
       container.innerHTML = notes.map(n => {
         const time = new Date(n.created_at * 1000).toLocaleDateString();
         const sats = n.sats_clank || 0;
+        const ext = n.sats_ext || 0;
+        const tally = (sats || ext)
+          ? `<span class="text-xs c-accent">${sats} sats</span>${ext ? `<span class="text-xs c-dim ml-1" title="external zaps">&#9889;${ext}</span>` : ''}`
+          : '';
         return `<div class="note-card p-3 rounded">
           <div class="flex justify-between items-start mb-1">
             <span class="text-xs c-dim">${time}</span>
-            ${sats ? `<span class="text-xs c-accent">${sats} sats</span>` : ''}
+            ${tally}
           </div>
-          <p class="text-sm whitespace-pre-wrap">${esc(n.content)}</p>
+          <p class="text-sm note-content">${esc(n.content)}</p>
         </div>`;
       }).join('');
     }

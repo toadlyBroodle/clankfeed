@@ -228,6 +228,7 @@ function renderNoteCard(n, isReply) {
   const timeAgo = relativeTime(n.created_at);
   const pic = getAvatar(n);
   const valueSats = n.sats_clank || 0;
+  const extSats = n.sats_ext || 0;
   const avatarHtml = pic
     ? `<img class="avatar" src="${esc(pic)}" onerror="this.outerHTML='<div class=\\'avatar-placeholder\\'>${esc(displayName || pk).charAt(0).toUpperCase()}</div>'">`
     : `<div class="avatar-placeholder">${esc(displayName || pk).charAt(0).toUpperCase()}</div>`;
@@ -241,10 +242,11 @@ function renderNoteCard(n, isReply) {
     <div class="flex gap-2">
       <div class="flex flex-col items-center gap-0 vote-col">
         <button class="vote-btn" onclick='startVote(${jsStr(n.id)}, 1)' title="Upvote">&#9650;</button>
-        <span class="vote-value" id="value-${n.id}" class="c-accent">${valueSats}</span>
+        <span class="vote-value" id="value-${n.id}" class="c-accent" title="clankfeed sats">${valueSats}</span>
+        <span class="vote-ext" id="ext-${n.id}" title="external zaps (sats_ext)">&#9889;${extSats}</span>
         <button class="vote-btn" onclick='startVote(${jsStr(n.id)}, -1)' title="Downvote">&#9660;</button>
       </div>
-      <div class="flex-1">
+      <div class="flex-1 min-w-0">
         ${replyIndicator}
         <div class="flex items-center gap-2 mb-1">
           <a href="/profile?pubkey=${n.pubkey}" style="text-decoration:none;display:contents;">${avatarHtml}</a>
@@ -252,7 +254,7 @@ function renderNoteCard(n, isReply) {
           <span class="flex-1"></span>
           <span class="text-xs c-dim">${timeAgo}</span>
         </div>
-        <p class="text-sm whitespace-pre-wrap">${esc(n.content)}</p>
+        <p class="text-sm note-content">${esc(n.content)}</p>
         <div class="flex items-center gap-3 mt-1">
           <button class="reply-btn text-xs" onclick='startReply(${jsStr(n.id)}, ${jsStr(displayName || pk)})' title="Reply">&#8627; reply</button>
           <button class="reply-btn text-xs" id="expand-replies-${n.id}" onclick='toggleReplies(${jsStr(n.id)})' title="Show replies">&#9662; replies</button>
@@ -418,7 +420,7 @@ async function submitVote(eventId) {
     const data = await resp.json();
 
     if (data.voted) {
-      voteSuccess(eventId, direction, amount, data.new_sats_clank);
+      voteSuccess(eventId, direction, amount, data.new_sats_clank, data.new_sats_ext);
     } else if (data.status === 'payment_required') {
       // Show payment widget for the vote
       status.textContent = '';
@@ -433,13 +435,20 @@ async function submitVote(eventId) {
   }
 }
 
-function voteSuccess(eventId, direction, amount, newValue) {
+function voteSuccess(eventId, direction, amount, newValue, newSatsExt) {
   hidePaymentWidget();
   delete votePending[eventId];
   const valueEl = document.getElementById(`value-${eventId}`);
   if (valueEl) valueEl.textContent = newValue;
+  const extEl = document.getElementById(`ext-${eventId}`);
+  if (extEl && newSatsExt !== undefined && newSatsExt !== null) {
+    extEl.textContent = '\u26A1' + newSatsExt;
+  }
   const note = notes.find(n => n.id === eventId);
-  if (note) note.sats_clank = newValue;
+  if (note) {
+    note.sats_clank = newValue;
+    if (newSatsExt !== undefined && newSatsExt !== null) note.sats_ext = newSatsExt;
+  }
   const status = document.getElementById(`vote-status-${eventId}`);
   status.textContent = (direction === 1 ? '+' : '-') + amount + ' sats';
   status.style.color = 'var(--accent)';
@@ -463,7 +472,7 @@ function showVotePayment(eventId, direction, data) {
     });
     const d = await resp.json();
     if (d.voted) {
-      voteSuccess(eventId, direction, amount, d.new_sats_clank);
+      voteSuccess(eventId, direction, amount, d.new_sats_clank, d.new_sats_ext);
       hidePaymentWidget();
     }
   }, null, document.getElementById(`vote-prompt-${eventId}`));
