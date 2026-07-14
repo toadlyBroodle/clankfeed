@@ -178,28 +178,36 @@ function esc(s) {
   return d.innerHTML;
 }
 
-/** Escape note content, then wrap obvious http(s) URLs as safe <a> links.
- *  Only http/https — javascript: and other schemes stay plain text.
- *  Escape runs first so XSS payloads cannot break out of the href/text. */
+/** Wrap obvious http(s) URLs as safe <a> links.
+ *  Match URLs on raw text first, then escape non-URL segments and href/text
+ *  separately — escape-first would turn & into &amp; and truncate query strings.
+ *  Only http/https — javascript: and other schemes stay plain text. */
 function linkify(text) {
-  const escaped = esc(text == null ? '' : String(text));
-  // Match http(s) URLs; strip common trailing punctuation from the href+label.
-  return escaped.replace(
-    /https?:\/\/[^\s<&]+/gi,
-    (raw) => {
-      let url = raw;
-      let trail = '';
-      while (/[.,;:!?)]$/.test(url)) {
-        trail = url.slice(-1) + trail;
-        url = url.slice(0, -1);
-      }
-      if (!/^https?:\/\//i.test(url)) return raw;
-      return (
-        `<a href="${url}" class="note-link" target="_blank" ` +
-        `rel="noopener noreferrer">${url}</a>${trail}`
-      );
+  const s = text == null ? '' : String(text);
+  const re = /https?:\/\/[^\s<>]+/gi;
+  let out = '';
+  let last = 0;
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    out += esc(s.slice(last, m.index));
+    let url = m[0];
+    let trail = '';
+    while (/[.,;:!?)]$/.test(url)) {
+      trail = url.slice(-1) + trail;
+      url = url.slice(0, -1);
     }
-  );
+    if (!/^https?:\/\//i.test(url)) {
+      out += esc(m[0]);
+    } else {
+      const safe = esc(url);
+      out +=
+        `<a href="${safe}" class="note-link" target="_blank" ` +
+        `rel="noopener noreferrer">${safe}</a>${esc(trail)}`;
+    }
+    last = m.index + m[0].length;
+  }
+  out += esc(s.slice(last));
+  return out;
 }
 
 /** Safe JS string literal for embedding in single-quoted HTML onclick attrs.
