@@ -412,12 +412,14 @@ async def read_events(
     min_value: int | None = None,
     max_value: int | None = None,
     reply_to: str = "",
+    origin: str = "all",
 ):
     """Query stored events with optional filters.
 
-    sort: "newest" (default), "value" (paid value first), or "zaps" (external zaps first)
+    sort: "newest" (default), "value"/"clank" (paid value first), or "zaps"/"ext" (sats_ext first)
     min_value/max_value: filter by sats_clank range
     reply_to: filter replies to a specific event ID
+    origin: "clankfeed" (submitted here), "external" (ingested), or "all" (default)
     """
     filt = {}
 
@@ -443,7 +445,17 @@ async def read_events(
     if sort not in ("newest", "value", "clank", "zaps", "ext"):
         sort = "newest"
 
-    events = await query_events(db, [filt], sort=sort, min_value=min_value, max_value=max_value)
+    if origin not in ("all", "clankfeed", "external"):
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "origin must be all, clankfeed, or external"},
+        )
+    if origin != "all":
+        filt["origin"] = origin
+
+    events = await query_events(
+        db, [filt], sort=sort, min_value=min_value, max_value=max_value, origin=origin if origin != "all" else None
+    )
     return {"events": events, "count": len(events)}
 
 

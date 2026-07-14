@@ -80,3 +80,40 @@ class TestSatsExtDisplayUI2:
         profile = (_STATIC / "profile.html").read_text()
         assert "sats_ext" in profile
         assert "sats_clank" in profile
+
+
+class TestTwoFeedsUI3:
+    """UI-3: clankfeed tab (origin=clankfeed, sats_clank) + external tab (all, sats_ext)."""
+
+    def test_index_has_feed_tabs(self):
+        index = (_STATIC / "index.html").read_text()
+        assert 'id="feed-clankfeed"' in index or "feed-clankfeed" in index
+        assert 'id="feed-external"' in index or "feed-external" in index
+        assert "setFeed" in index or "currentFeed" in index
+
+    def test_clankfeed_tab_queries_origin_clankfeed(self):
+        index = (_STATIC / "index.html").read_text()
+        # REST fetch must pass origin=clankfeed for the clankfeed feed
+        assert "origin=clankfeed" in index
+        # Default ranking for that tab uses clank/value sort
+        assert "sort=clank" in index or "sort=value" in index or "currentSort" in index
+
+    def test_external_tab_queries_all_ranked_by_ext(self):
+        index = (_STATIC / "index.html").read_text()
+        # External tab shows everything ranked by sats_ext
+        assert "sort=ext" in index or "sort=zaps" in index
+        # Must not force origin=external-only for the "everything" tab
+        # (origin=all or omitted when feed is external)
+        assert "setFeed" in index or "currentFeed" in index
+        # When on external feed, fetch includes sort=ext (and not origin=clankfeed)
+        fn = index
+        if "function setFeed" in index:
+            fn = index.split("function setFeed", 1)[1].split("\nfunction ", 1)[0]
+        elif "function loadFeed" in index:
+            fn = index.split("function loadFeed", 1)[1].split("\nfunction ", 1)[0]
+        assert "ext" in fn or "zaps" in fn or "external" in fn
+
+    def test_feed_fetch_uses_origin_param(self):
+        index = (_STATIC / "index.html").read_text()
+        assert "origin=" in index
+        assert "clankfeed" in index

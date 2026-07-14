@@ -19,6 +19,8 @@ class NostrEvent(Base):
     sats_clank = Column(Integer, default=0)  # clankfeed-paid value (posts + votes)
     value_usd = Column(Text, default="0")
     sats_ext = Column(Integer, default=0)  # external NIP-57 zaps, kept separate for fair ranking
+    # "clankfeed" = submitted via this relay; "external" = ingested from other relays
+    origin = Column(String(16), nullable=False, default="clankfeed")
 
     __table_args__ = (
         Index("ix_nostr_events_pubkey", "pubkey"),
@@ -27,6 +29,7 @@ class NostrEvent(Base):
         Index("ix_nostr_events_kind_created_at", "kind", "created_at"),
         Index("ix_nostr_events_sats_clank", "sats_clank"),
         Index("ix_nostr_events_sats_ext", "sats_ext"),
+        Index("ix_nostr_events_origin", "origin"),
     )
 
 

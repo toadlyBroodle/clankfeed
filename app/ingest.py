@@ -83,7 +83,7 @@ async def _handle_target(ws, sub_id: str, event: dict, pending: dict):
     if not valid or not _acceptable_note(event):
         return
     async with async_session() as db:
-        await store_event(db, event, sats_clank=0)
+        await store_event(db, event, sats_clank=0, origin="external")
     await _apply_receipts(target_id, receipts)
     logger.info("Ingested external note %s with %d zap(s)", target_id[:12], len(receipts))
 

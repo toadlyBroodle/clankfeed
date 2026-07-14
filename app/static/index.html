@@ -80,7 +80,10 @@
   <!-- Notes Feed -->
   <section>
     <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
-      <h2 class="text-sm font-bold c-dim">PAID NOTES</h2>
+      <div class="flex gap-1 items-center">
+        <button id="feed-clankfeed" class="px-2 py-1 rounded bg-primary text-xs font-bold" onclick="setFeed('clankfeed')">clankfeed</button>
+        <button id="feed-external" class="px-2 py-1 rounded bg-alt text-xs font-bold" onclick="setFeed('external')">external</button>
+      </div>
       <div class="flex items-center gap-2 text-xs flex-wrap">
         <div class="flex gap-1">
           <button id="sort-newest" class="px-2 py-1 rounded bg-primary" onclick="setSort('newest')">Newest</button>
@@ -112,6 +115,7 @@ let subId = 'feed-' + Math.random().toString(36).slice(2, 10);
 let notes = [];
 let metadataCache = {};  // pubkey -> {name, about, picture}
 let currentSort = 'newest';
+let currentFeed = 'clankfeed';  // 'clankfeed' | 'external'
 let relayPubkey = '';  // set from NIP-11, used to label relay-signed notes as 'anon'
 
 // ---- WebSocket Relay Client ----
@@ -170,6 +174,9 @@ function setStatus(connected) {
 function addNote(event) {
   // Deduplicate
   if (notes.find(n => n.id === event.id)) return;
+  // Feed filter: clankfeed tab only shows origin=clankfeed (missing => local)
+  const origin = event.origin || 'clankfeed';
+  if (currentFeed === 'clankfeed' && origin !== 'clankfeed') return;
   notes.push(event);
   notes.sort((a, b) => b.created_at - a.created_at);
   renderNotes();
@@ -559,7 +566,7 @@ function scrollToNote(eventId) {
   }
 }
 
-// ---- Sort & Filter ----
+// ---- Sort & Filter & Feed ----
 let filterMinValue = null;
 let filterMaxValue = null;
 
@@ -582,14 +589,43 @@ function clearFilters() {
   setSort(currentSort);
 }
 
+function setFeed(feed) {
+  currentFeed = feed === 'external' ? 'external' : 'clankfeed';
+  document.getElementById('feed-clankfeed').className =
+    currentFeed === 'clankfeed' ? 'px-2 py-1 rounded bg-primary text-xs font-bold' : 'px-2 py-1 rounded bg-alt text-xs font-bold';
+  document.getElementById('feed-external').className =
+    currentFeed === 'external' ? 'px-2 py-1 rounded bg-primary text-xs font-bold' : 'px-2 py-1 rounded bg-alt text-xs font-bold';
+  // Default ranking per feed: clankfeed → sats_clank (value); external → sats_ext
+  if (currentFeed === 'external' && currentSort === 'value') {
+    currentSort = 'ext';
+  } else if (currentFeed === 'clankfeed' && (currentSort === 'ext' || currentSort === 'zaps')) {
+    currentSort = 'value';
+  }
+  setSort(currentSort);
+}
+
 async function setSort(mode) {
+  // Normalize Top button: value on clankfeed, ext on external
+  if (mode === 'value' && currentFeed === 'external') mode = 'ext';
+  if (mode === 'ext' && currentFeed === 'clankfeed') mode = 'value';
   currentSort = mode;
-  document.getElementById('sort-newest').className = mode === 'newest' ? 'px-2 py-1 rounded bg-primary' : 'px-2 py-1 rounded bg-alt';
-  document.getElementById('sort-value').className = mode === 'value' ? 'px-2 py-1 rounded bg-primary' : 'px-2 py-1 rounded bg-alt';
+  const isNewest = mode === 'newest';
+  const isTop = mode === 'value' || mode === 'clank' || mode === 'ext' || mode === 'zaps';
+  document.getElementById('sort-newest').className = isNewest ? 'px-2 py-1 rounded bg-primary' : 'px-2 py-1 rounded bg-alt';
+  document.getElementById('sort-value').className = isTop ? 'px-2 py-1 rounded bg-primary' : 'px-2 py-1 rounded bg-alt';
 
   try {
-    // Fetch notes from REST API with sort
-    let url = `/api/v1/events?sort=${mode}&kinds=0,1&limit=50`;
+    // clankfeed tab: origin=clankfeed + sats_clank (value); external: origin=all + sats_ext when Top
+    let url;
+    if (currentFeed === 'external' && isTop) {
+      url = `/api/v1/events?sort=ext&kinds=0,1&limit=50&origin=all`;
+    } else if (currentFeed === 'external') {
+      url = `/api/v1/events?sort=newest&kinds=0,1&limit=50&origin=all`;
+    } else if (isTop) {
+      url = `/api/v1/events?sort=value&kinds=0,1&limit=50&origin=clankfeed`;
+    } else {
+      url = `/api/v1/events?sort=newest&kinds=0,1&limit=50&origin=clankfeed`;
+    }
     if (filterMinValue !== null) url += `&min_value=${filterMinValue}`;
     if (filterMaxValue !== null) url += `&max_value=${filterMaxValue}`;
     const resp = await fetch(url);
@@ -630,6 +666,7 @@ function updateHeaderLink() {
 connect();
 updateHeaderLink();
 setTimeout(updateHeaderLink, 500);
+setFeed('clankfeed');  // load clankfeed-only feed via REST (origin=clankfeed)
 
 // Fetch relay info for pubkey display
 fetch('/', { headers: { 'Accept': 'application/nostr+json' }})

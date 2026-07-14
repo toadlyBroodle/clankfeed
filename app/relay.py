@@ -97,6 +97,7 @@ async def query_events(
     sort: str = "newest",
     min_value: int | None = None,
     max_value: int | None = None,
+    origin: str | None = None,
 ) -> list[dict]:
     """Query stored events matching any of the given filters.
 
@@ -104,6 +105,7 @@ async def query_events(
     money paid to clankfeed), or "ext"/"zaps" (sats_ext DESC: fair ranking
     of zaps + votes at face value)
     min_value/max_value: filter by sats_clank range
+    origin: "clankfeed" | "external" | None/all (no filter)
     """
     results = []
     seen_ids = set()
@@ -129,6 +131,11 @@ async def query_events(
             conditions.append(NostrEvent.sats_clank >= min_value)
         if max_value is not None:
             conditions.append(NostrEvent.sats_clank <= max_value)
+
+        # Origin filter (clankfeed-submitted vs ingested)
+        filt_origin = filt.get("origin", origin)
+        if filt_origin and filt_origin != "all":
+            conditions.append(NostrEvent.origin == filt_origin)
 
         # Reply filter
         if "reply_to" in filt:
@@ -176,15 +183,26 @@ def row_to_event(row: NostrEvent) -> dict:
         d["sats_ext"] = row.sats_ext
     if row.value_usd and row.value_usd != "0":
         d["value_usd"] = row.value_usd
+    d["origin"] = getattr(row, "origin", None) or "clankfeed"
     return d
 
 
-async def store_event(db: AsyncSession, event: dict, sats_clank: int = 0, value_usd: str = "0"):
+async def store_event(
+    db: AsyncSession,
+    event: dict,
+    sats_clank: int = 0,
+    value_usd: str = "0",
+    origin: str = "clankfeed",
+):
     """Store a validated, paid event in the database.
 
     Kind 0 (metadata) is replaceable: only the latest per pubkey is kept.
     If a newer kind:0 already exists for this pubkey, the incoming event is skipped.
+    origin: "clankfeed" (submitted here) or "external" (ingested from other relays).
     """
+    if origin not in ("clankfeed", "external"):
+        origin = "clankfeed"
+
     existing = await db.get(NostrEvent, event["id"])
     if existing:
         return  # duplicate, skip
@@ -212,6 +230,7 @@ async def store_event(db: AsyncSession, event: dict, sats_clank: int = 0, value_
         sig=event["sig"],
         sats_clank=sats_clank,
         value_usd=value_usd,
+        origin=origin,
     )
     db.add(row)
     await db.commit()

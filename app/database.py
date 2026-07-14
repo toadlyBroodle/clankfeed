@@ -42,7 +42,12 @@ async def init_db():
     # Migrate: add new columns to existing tables if missing
     async with engine.begin() as conn:
         for table, columns in [
-            ("nostr_events", [("sats_clank", "INTEGER DEFAULT 0"), ("value_usd", "TEXT DEFAULT '0'"), ("sats_ext", "INTEGER DEFAULT 0")]),
+            ("nostr_events", [
+                ("sats_clank", "INTEGER DEFAULT 0"),
+                ("value_usd", "TEXT DEFAULT '0'"),
+                ("sats_ext", "INTEGER DEFAULT 0"),
+                ("origin", "TEXT NOT NULL DEFAULT 'clankfeed'"),
+            ]),
             ("pending_events", [("amount_sats", "INTEGER DEFAULT 0"), ("amount_usd", "TEXT DEFAULT '0'")]),
             ("accounts", [("nostr_privkey", "VARCHAR(64)"), ("nostr_pubkey", "VARCHAR(64)")]),
         ]:
