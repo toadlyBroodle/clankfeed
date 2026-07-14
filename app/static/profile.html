@@ -188,6 +188,7 @@ async function loginWithExtension() {
     if (!window.nostr) { errEl.textContent = 'No extension found'; errEl.classList.remove('hidden'); return; }
     const pubkey = await window.nostr.getPublicKey();
     setAuthState('extension', pubkey, '');
+    await establishSession();
     showOwnAccount();
   } catch (err) {
     errEl.textContent = 'Extension login failed';
@@ -209,6 +210,7 @@ async function loginWithNsec() {
     const pubkey = derivePubkey(input);
     setAuthState('nsec', pubkey, input);
     document.getElementById('login-nsec').value = '';
+    await establishSession();
     showOwnAccount();
   } catch (err) {
     errEl.textContent = 'Invalid private key';
@@ -216,7 +218,7 @@ async function loginWithNsec() {
   }
 }
 
-function createIdentity() {
+async function createIdentity() {
   const errEl = document.getElementById('login-error');
   errEl.classList.add('hidden');
   try {
@@ -225,6 +227,7 @@ function createIdentity() {
     const privhex = bytesToHex(privBytes);
     const pubkey = derivePubkey(privhex);
     setAuthState('nsec', pubkey, privhex);
+    await establishSession();
 
     // Show keys for backup
     document.getElementById('new-pub').value = pubkey;
@@ -249,8 +252,8 @@ function createIdentity() {
   }
 }
 
-function doLogout() {
-  clearAuthState();
+async function doLogout() {
+  await clearAuthState();
   document.getElementById('view-account').classList.add('hidden');
   document.getElementById('view-login').classList.remove('hidden');
   const extBtn = document.getElementById('btn-ext-login');

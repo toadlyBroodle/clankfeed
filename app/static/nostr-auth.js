@@ -3,10 +3,15 @@
  * Requires window.__nostrCrypto to be set by ES module imports before use.
  */
 
-// ---- Auth State (from localStorage) ----
+// ---- Auth State ----
+// Persist only non-secrets (mode + pubkey) for UX. nsec stays in memory only
+// (SECURITY H2). HTTP auth uses an httpOnly cf_session cookie after login.
 let authMode = localStorage.getItem('cf_auth_mode') || '';
 let userPubkey = localStorage.getItem('cf_pubkey') || '';
-let userNsec = localStorage.getItem('cf_nsec') || '';
+let userNsec = ''; // never read from localStorage
+// Scrub any legacy secrets left from older clients
+localStorage.removeItem('cf_nsec');
+localStorage.removeItem('clankfeed_api_key');
 
 function isLoggedIn() {
   return !!(authMode && userPubkey);
@@ -18,12 +23,21 @@ function setAuthState(mode, pubkey, nsec) {
   userNsec = nsec || '';
   localStorage.setItem('cf_auth_mode', mode);
   localStorage.setItem('cf_pubkey', pubkey);
-  if (nsec) localStorage.setItem('cf_nsec', nsec);
-  else localStorage.removeItem('cf_nsec');
-  localStorage.removeItem('clankfeed_api_key');  // clean up legacy
+  localStorage.removeItem('cf_nsec');
+  localStorage.removeItem('clankfeed_api_key');
 }
 
-function clearAuthState() {
+async function establishSession() {
+  if (!isLoggedIn()) return false;
+  try {
+    const resp = await authFetch('/api/v1/auth/login', { method: 'POST' });
+    return resp.ok;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function clearAuthState() {
   authMode = '';
   userPubkey = '';
   userNsec = '';
@@ -31,6 +45,9 @@ function clearAuthState() {
   localStorage.removeItem('cf_pubkey');
   localStorage.removeItem('cf_nsec');
   localStorage.removeItem('clankfeed_api_key');
+  try {
+    await fetch('/api/v1/auth/logout', { method: 'POST', credentials: 'include' });
+  } catch (e) {}
 }
 
 // ---- Nostr Signing ----
@@ -88,7 +105,7 @@ async function authFetch(url, options = {}) {
   const method = (options.method || 'GET').toUpperCase();
   const fullUrl = new URL(url, window.location.origin).href;
   const hdrs = await authHeaders(fullUrl, method, options.headers || {});
-  return fetch(url, {...options, headers: hdrs});
+  return fetch(url, {...options, headers: hdrs, credentials: 'include'});
 }
 
 // ---- Payment Helper ----

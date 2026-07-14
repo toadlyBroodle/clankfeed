@@ -329,9 +329,12 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_handler)
 app.add_middleware(OriginCheckMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 
+# Re-export for tests / callers that import from app.main
+from app.session_auth import cors_allow_origins  # noqa: E402
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_allow_origins(),
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "Accept"],
 )

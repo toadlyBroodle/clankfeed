@@ -854,6 +854,52 @@ async def confirm_vote(request: Request, event_id: str, db: AsyncSession = Depen
 
 
 # ---------------------------------------------------------------------------
+# Browser session (httpOnly cookie — SECURITY H2)
+# ---------------------------------------------------------------------------
+
+@router.post("/auth/login")
+@limiter.limit(RATE_EVENTS_READ)
+async def auth_login(request: Request, db: AsyncSession = Depends(get_db)):
+    """Mint httpOnly session cookie after NIP-98 auth. Browser clients only."""
+    from app.auth import get_auth
+    from app.session_auth import set_session_cookie
+
+    acct, pubkey, method = await get_auth(request, db)
+    if not acct or method != "nip98" or not pubkey:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "NIP-98 Authorization required to create session"},
+        )
+    body = {"pubkey": pubkey, "auth_method": "session"}
+    response = JSONResponse(content=body)
+    set_session_cookie(response, pubkey)
+    return response
+
+
+@router.post("/auth/logout")
+@limiter.limit(RATE_EVENTS_READ)
+async def auth_logout(request: Request):
+    """Clear the httpOnly session cookie."""
+    from app.session_auth import clear_session_cookie
+
+    response = JSONResponse(content={"ok": True})
+    clear_session_cookie(response)
+    return response
+
+
+@router.get("/auth/me")
+@limiter.limit(RATE_EVENTS_READ)
+async def auth_me(request: Request, db: AsyncSession = Depends(get_db)):
+    """Return authenticated pubkey (NIP-98 or session cookie)."""
+    from app.auth import get_auth
+
+    acct, pubkey, method = await get_auth(request, db)
+    if not acct or not pubkey:
+        return JSONResponse(status_code=401, content={"detail": "Authentication required"})
+    return {"pubkey": pubkey, "auth_method": method}
+
+
+# ---------------------------------------------------------------------------
 # Account endpoints
 # ---------------------------------------------------------------------------
 

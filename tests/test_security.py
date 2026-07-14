@@ -582,3 +582,142 @@ class TestRateLimiting:
             resp = await client.post("/api/v1/post", json={"content": f"rate {i}"})
         assert resp.status_code == 429
         assert "Retry-After" in resp.headers
+
+
+# ---------------------------------------------------------------------------
+# S-H2: auth secrets out of localStorage; httpOnly session cookie
+# ---------------------------------------------------------------------------
+
+class TestSessionCookieH2:
+    """H2: no nsec/API-key in localStorage; NIP-98 login mints httpOnly session."""
+
+    def test_h2_no_auth_secrets_persisted_to_localstorage(self):
+        """Client must not write nsec or API keys into localStorage."""
+        src = (_STATIC / "nostr-auth.js").read_text()
+        # Forbidden persistence of signing secrets / legacy API keys
+        assert "localStorage.setItem('cf_nsec'" not in src
+        assert 'localStorage.setItem("cf_nsec"' not in src
+        assert "localStorage.setItem('clankfeed_api_key'" not in src
+        assert 'localStorage.setItem("clankfeed_api_key"' not in src
+        # setAuthState must keep nsec in memory only (assign userNsec, no setItem for it)
+        assert "function setAuthState" in src
+        body = src.split("function setAuthState", 1)[1].split("\nfunction ", 1)[0]
+        assert "userNsec" in body
+        assert "localStorage.setItem('cf_nsec'" not in body
+        assert 'localStorage.setItem("cf_nsec"' not in body
+
+    def test_h2_auth_fetch_sends_credentials(self):
+        """authFetch must include cookies so the httpOnly session is sent."""
+        src = (_STATIC / "nostr-auth.js").read_text()
+        assert "credentials" in src
+        assert "'include'" in src or '"include"' in src
+
+    @pytest.mark.asyncio
+    async def test_h2_login_sets_httponly_session_cookie(self, client):
+        """POST /api/v1/auth/login with NIP-98 sets httpOnly cf_session cookie."""
+        headers = _nip98("http://test/api/v1/auth/login", "POST")
+        resp = await client.post("/api/v1/auth/login", headers=headers)
+        assert resp.status_code == 200
+        assert resp.json()["pubkey"]  # hex pubkey
+        # httpx stores cookies; Set-Cookie must be HttpOnly
+        set_cookie = resp.headers.get("set-cookie", "")
+        assert "cf_session=" in set_cookie.lower() or "cf_session" in client.cookies
+        assert "httponly" in set_cookie.lower()
+        assert "cf_session" in client.cookies
+
+    @pytest.mark.asyncio
+    async def test_h2_session_cookie_authenticates_without_nip98(self, client):
+        """After login, balance endpoint accepts cookie alone (no Authorization)."""
+        headers = _nip98("http://test/api/v1/auth/login", "POST")
+        login = await client.post("/api/v1/auth/login", headers=headers)
+        assert login.status_code == 200
+        pubkey = login.json()["pubkey"]
+
+        resp = await client.get("/api/v1/account/balance")  # cookie from client jar
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "balance_sats" in body
+        # Session identity is the login pubkey (account.pubkey), not server nostr_pubkey
+        me = await client.get("/api/v1/auth/me")
+        assert me.status_code == 200
+        assert me.json()["pubkey"] == pubkey
+        assert me.json()["auth_method"] == "session"
+    @pytest.mark.asyncio
+    async def test_h2_logout_clears_session(self, client):
+        """POST /api/v1/auth/logout clears cookie; subsequent authed call is 401."""
+        headers = _nip98("http://test/api/v1/auth/login", "POST")
+        await client.post("/api/v1/auth/login", headers=headers)
+        logout = await client.post("/api/v1/auth/logout")
+        assert logout.status_code == 200
+        set_cookie = logout.headers.get("set-cookie", "")
+        # Cleared cookie: Max-Age=0 or empty value
+        assert "cf_session" in set_cookie.lower() or "cf_session" not in client.cookies or client.cookies.get("cf_session") in ("", None)
+
+        resp = await client.get("/api/v1/account/balance")
+        assert resp.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_h2_tampered_session_cookie_rejected(self, client):
+        """Adversarial: forged/tampered cf_session must not authenticate."""
+        client.cookies.set("cf_session", "deadbeef.9999999999.forgedsignature")
+        resp = await client.get("/api/v1/account/balance")
+        assert resp.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_h2_me_returns_session_pubkey(self, client):
+        """GET /api/v1/auth/me returns pubkey when session cookie is valid."""
+        headers = _nip98("http://test/api/v1/auth/login", "POST")
+        login = await client.post("/api/v1/auth/login", headers=headers)
+        pubkey = login.json()["pubkey"]
+        me = await client.get("/api/v1/auth/me")
+        assert me.status_code == 200
+        assert me.json()["pubkey"] == pubkey
+
+
+# ---------------------------------------------------------------------------
+# S-H4: CORS allow_origins restricted (no wildcard)
+# ---------------------------------------------------------------------------
+
+class TestCORSH4:
+    """H4: CORS must not reflect arbitrary origins; allow clankfeed + localhost."""
+
+    def test_h4_cors_origins_not_wildcard(self):
+        """main.py must not use allow_origins=['*']."""
+        main_src = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text()
+        assert 'allow_origins=["*"]' not in main_src
+        assert "allow_origins=['*']" not in main_src
+        # Must call a helper or list explicit origins
+        assert "cors_allow_origins" in main_src or "CORS_ALLOW" in main_src or "clankfeed.com" in main_src
+
+    @pytest.mark.asyncio
+    async def test_h4_allowed_origin_gets_acao(self, client, monkeypatch):
+        """https://clankfeed.com preflight/GET receives Access-Control-Allow-Origin."""
+        from app import config
+        monkeypatch.setattr(config.settings, "BASE_URL", "wss://clankfeed.com")
+        # Re-import would be heavy; exercise OPTIONS against live middleware via app
+        from app.main import cors_allow_origins
+        allowed = cors_allow_origins()
+        assert "https://clankfeed.com" in allowed
+        assert "*" not in allowed
+
+        resp = await client.options(
+            "/api/v1/events",
+            headers={
+                "Origin": "https://clankfeed.com",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        # Starlette CORS answers 200 on preflight when origin allowed
+        assert resp.status_code in (200, 204)
+        assert resp.headers.get("access-control-allow-origin") == "https://clankfeed.com"
+
+    @pytest.mark.asyncio
+    async def test_h4_evil_origin_not_reflected(self, client):
+        """evil.com must not receive a reflecting ACAO header."""
+        resp = await client.get(
+            "/api/v1/events",
+            headers={"Origin": "https://evil.example"},
+        )
+        acao = resp.headers.get("access-control-allow-origin")
+        assert acao != "https://evil.example"
+        assert acao != "*"
