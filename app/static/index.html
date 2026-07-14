@@ -265,7 +265,7 @@ function renderNoteCard(n, isReply) {
           <span class="flex-1"></span>
           <span class="text-xs c-dim">${timeAgo}</span>
         </div>
-        <p class="text-sm note-content">${esc(n.content)}</p>
+        <p class="text-sm note-content">${linkify(n.content)}</p>
         <div class="flex items-center gap-3 mt-1">
           <button class="reply-btn text-xs" onclick='startReply(${jsStr(n.id)}, ${jsStr(displayName || pk)})' title="Reply">&#8627; reply</button>
           <button class="reply-btn text-xs" id="expand-replies-${n.id}" onclick='toggleReplies(${jsStr(n.id)})' title="Show replies">&#9662; replies</button>
@@ -283,10 +283,14 @@ function renderNoteCard(n, isReply) {
 }
 
 function getDisplayName(event) {
-  // First check kind:0 metadata cache
+  // kind:0 metadata: name → display_name → nip05
   const meta = metadataCache[event.pubkey];
-  if (meta && meta.name) return meta.name;
-  // Fall back to display_name tag
+  if (meta) {
+    if (meta.name) return meta.name;
+    if (meta.display_name) return meta.display_name;
+    if (meta.nip05) return meta.nip05;
+  }
+  // Fall back to display_name tag on the event itself
   const tag = (event.tags || []).find(t => t[0] === 'display_name');
   return tag ? tag[1] : '';
 }

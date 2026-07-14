@@ -178,6 +178,30 @@ function esc(s) {
   return d.innerHTML;
 }
 
+/** Escape note content, then wrap obvious http(s) URLs as safe <a> links.
+ *  Only http/https — javascript: and other schemes stay plain text.
+ *  Escape runs first so XSS payloads cannot break out of the href/text. */
+function linkify(text) {
+  const escaped = esc(text == null ? '' : String(text));
+  // Match http(s) URLs; strip common trailing punctuation from the href+label.
+  return escaped.replace(
+    /https?:\/\/[^\s<&]+/gi,
+    (raw) => {
+      let url = raw;
+      let trail = '';
+      while (/[.,;:!?)]$/.test(url)) {
+        trail = url.slice(-1) + trail;
+        url = url.slice(0, -1);
+      }
+      if (!/^https?:\/\//i.test(url)) return raw;
+      return (
+        `<a href="${url}" class="note-link" target="_blank" ` +
+        `rel="noopener noreferrer">${url}</a>${trail}`
+      );
+    }
+  );
+}
+
 /** Safe JS string literal for embedding in single-quoted HTML onclick attrs.
  *  JSON.stringify alone still emits raw apostrophes (e.g. O'Brien), which
  *  terminate single-quoted HTML attributes — rewrite ' as \\u0027. */

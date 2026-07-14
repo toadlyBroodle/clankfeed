@@ -92,6 +92,11 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   word-break: break-word;
   max-width: 100%;
 }
+.note-content a.note-link {
+  color: var(--accent);
+  text-decoration: underline;
+  word-break: break-all;
+}
 
 /* Avatar */
 .avatar {
