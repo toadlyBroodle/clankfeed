@@ -499,9 +499,11 @@ class TestCredentialError402Challenge:
         """v1 API malformed credential returns 402 with challenge."""
         from app.nostr import sign_event as _sign
         from app import config
-        event = _sign(config.settings.RELAY_PRIVATE_KEY, {
+        from tests.conftest import kind1_tags
+        sk = config.settings.RELAY_PRIVATE_KEY
+        event = _sign(sk, {
             "created_at": int(time.time()), "kind": 1,
-            "tags": [], "content": "test",
+            "tags": kind1_tags(sk), "content": "test",
         })
         resp = await tempo_client.post(
             "/api/v1/events",

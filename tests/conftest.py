@@ -13,6 +13,14 @@ from httpx import AsyncClient, ASGITransport
 
 from app.database import engine, Base
 from app.main import app
+from app.zaps import build_zap_split_tags, pubkey_from_privkey
+
+
+def kind1_tags(privkey_hex: str, extra: list | None = None) -> list:
+    """Tags for client-signed kind:1 — always includes required Phase 13 zap fee tags."""
+    tags = list(extra or [])
+    tags.extend(build_zap_split_tags(pubkey_from_privkey(privkey_hex)))
+    return tags
 
 
 @pytest_asyncio.fixture

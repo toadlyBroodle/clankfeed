@@ -22,6 +22,7 @@ from app.lightning import create_invoice, check_payment_status, check_and_consum
 from app.models import PendingEvent, NostrEvent
 from app.mpp import build_mpp_challenge, parse_mpp_credential, verify_mpp_credential, extract_payment_hash, build_receipt
 from app.nostr import sign_event
+from app.zaps import append_zap_split_tags, pubkey_from_privkey
 from app.relay import store_event, broadcast_event, store_pending_event
 from app.tempo_pay import build_tempo_challenge, verify_tempo_credential, extract_tempo_tx_hash
 
@@ -245,15 +246,19 @@ async def api_post(request: Request, db: AsyncSession = Depends(get_db)):
     if display_name:
         tags.append(["display_name", display_name])
 
+    if not settings.RELAY_PRIVATE_KEY:
+        return JSONResponse(status_code=500, content={"detail": "Relay private key not configured"})
+
+    # Phase 13: inject NIP-57 zap fee tags before sign (author 9 + relay 1)
+    author_pk = pubkey_from_privkey(settings.RELAY_PRIVATE_KEY)
+    tags = append_zap_split_tags(tags, author_pk)
+
     event = {
         "created_at": int(time.time()),
         "kind": 1,
         "tags": tags,
         "content": content,
     }
-
-    if not settings.RELAY_PRIVATE_KEY:
-        return JSONResponse(status_code=500, content={"detail": "Relay private key not configured"})
     signed = sign_event(settings.RELAY_PRIVATE_KEY, event)
 
     # Test mode without Tempo: skip payment entirely

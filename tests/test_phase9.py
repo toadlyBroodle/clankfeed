@@ -11,6 +11,7 @@ from httpx import AsyncClient, ASGITransport
 from app.database import engine, Base
 from app.limiter import limiter
 from app.nostr import sign_event
+from tests.conftest import kind1_tags
 
 
 TEST_SK = "b" * 64
@@ -24,10 +25,12 @@ def _reset():
 
 
 def _make_event(content="test", kind=1, tags=None):
+    if tags is None:
+        tags = kind1_tags(TEST_SK) if kind == 1 else []
     return sign_event(TEST_SK, {
         "created_at": int(time.time()),
         "kind": kind,
-        "tags": tags or [],
+        "tags": tags,
         "content": content,
     })
 

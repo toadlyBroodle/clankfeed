@@ -12,6 +12,7 @@ from httpx import AsyncClient, ASGITransport
 from app.database import engine, Base
 from app.limiter import limiter
 from app.nostr import sign_event
+from tests.conftest import kind1_tags
 
 
 TEST_SK = "b" * 64
@@ -242,7 +243,7 @@ class TestCreditSpendingPaymentMode:
 
         event = sign_event(TEST_SK, {
             "created_at": int(time.time()),
-            "kind": 1, "tags": [],
+            "kind": 1, "tags": kind1_tags(TEST_SK),
             "content": "agent with credits",
         })
 

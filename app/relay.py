@@ -27,7 +27,11 @@ from app.config import (
 )
 from app.models import NostrEvent, PendingEvent, Vote
 from app.nostr import validate_event, verify_event_id, verify_signature
-from app.zaps import verify_zap_receipt, verify_zap_receipt_signer
+from app.zaps import (
+    validate_kind1_zap_fee_tags,
+    verify_zap_receipt,
+    verify_zap_receipt_signer,
+)
 
 logger = logging.getLogger("clankfeed.relay")
 
@@ -332,6 +336,13 @@ async def _handle_event(conn: Connection, msg: list, db: AsyncSession):
     if event["kind"] in ZAP_EVENT_KINDS:
         await _handle_zap_receipt(conn, event, db)
         return
+
+    # Phase 13: kind:1 must carry NIP-57 zap fee tags (cannot rewrite without breaking sig)
+    if event["kind"] == 1:
+        zap_ok, zap_err = validate_kind1_zap_fee_tags(event)
+        if not zap_ok:
+            await conn.send(["OK", event_id, False, zap_err])
+            return
 
     # NWC events (NIP-47): store and broadcast without payment, but validate size
     if event["kind"] in NWC_EVENT_KINDS:

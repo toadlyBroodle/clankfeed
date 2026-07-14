@@ -14,6 +14,7 @@ from httpx import AsyncClient, ASGITransport
 from app.database import engine, Base
 from app.limiter import limiter
 from app.nostr import sign_event
+from tests.conftest import kind1_tags
 
 
 TEST_SK = "b" * 64
@@ -37,7 +38,7 @@ def _make_event(content="test", kind=1):
     return sign_event(TEST_SK, {
         "created_at": int(time.time()),
         "kind": kind,
-        "tags": [],
+        "tags": kind1_tags(TEST_SK) if kind == 1 else [],
         "content": content,
     })
 
@@ -484,7 +485,7 @@ class TestEventEdgeCases:
         # Re-sign with future timestamp
         event = sign_event(TEST_SK, {
             "created_at": event["created_at"],
-            "kind": 1, "tags": [], "content": "future",
+            "kind": 1, "tags": kind1_tags(TEST_SK), "content": "future",
         })
         resp = await client.post("/api/v1/events", json={"event": event})
         assert resp.status_code == 400
@@ -496,7 +497,7 @@ class TestEventEdgeCases:
         event = sign_event(TEST_SK, {
             "created_at": int(time.time()),
             "kind": 1,
-            "tags": [["t", str(i)] for i in range(101)],
+            "tags": kind1_tags(TEST_SK, [["t", str(i)] for i in range(101)]),
             "content": "too many tags",
         })
         resp = await client.post("/api/v1/events", json={"event": event})
@@ -536,13 +537,10 @@ class TestInputLimits:
     @pytest.mark.asyncio
     async def test_tag_value_too_long(self, client):
         """Tag values over 1024 chars are rejected."""
-        event = _make_event("tag test")
-        event["tags"] = [["t", "x" * 2000]]
-        # Re-sign since tags changed
         event = sign_event(TEST_SK, {
-            "created_at": event["created_at"],
+            "created_at": int(time.time()),
             "kind": 1,
-            "tags": [["t", "x" * 2000]],
+            "tags": kind1_tags(TEST_SK, [["t", "x" * 2000]]),
             "content": "tag test",
         })
         resp = await client.post("/api/v1/events", json={"event": event})
@@ -555,7 +553,7 @@ class TestInputLimits:
         event = sign_event(TEST_SK, {
             "created_at": int(time.time()),
             "kind": 1,
-            "tags": [["t", "x" * 1024]],
+            "tags": kind1_tags(TEST_SK, [["t", "x" * 1024]]),
             "content": "ok tag",
         })
         resp = await client.post("/api/v1/events", json={"event": event})
@@ -567,7 +565,7 @@ class TestInputLimits:
         event = sign_event(TEST_SK, {
             "created_at": int(time.time()),
             "kind": 1,
-            "tags": [["t", 12345]],
+            "tags": kind1_tags(TEST_SK, [["t", 12345]]),
             "content": "bad tag type",
         })
         resp = await client.post("/api/v1/events", json={"event": event})

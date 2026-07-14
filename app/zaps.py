@@ -1,14 +1,17 @@
-"""NIP-57 zap receipt (kind 9735) verification.
+"""NIP-57 zap receipts + zap fee-split tags (Appendix G).
 
-Zap receipts are accepted without payment. A verified receipt credits the
-zapped note's sats_ext with the full zap amount — the fair combined ranking
-shared with clankfeed votes. sats_clank (money paid to clankfeed) is
-untouched by zaps.
+Zap receipts (kind 9735) are accepted without payment. A verified receipt
+credits the zapped note's sats_ext with the full zap amount — the fair
+combined ranking shared with clankfeed votes. sats_clank (money paid to
+clankfeed) is untouched by zaps.
 
 Verification: receipt signature (upstream via validate_event), embedded
 kind-9734 zap request id + signature, bolt11 amount == zap request amount
 tag, valid target event id, and (async) receipt pubkey == the recipient's
 LNURL-pay `nostrPubkey` (fetched from their lud16 metadata and cached).
+
+Phase 13 also builds/validates NIP-57 `zap` tags on kind:1 (author weight +
+relay fee weight) so clients can split tips without custodial remittance.
 """
 
 import asyncio
@@ -21,13 +24,101 @@ import ssl
 import time
 from urllib.parse import urlparse
 
+from coincurve import PrivateKey
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models import NostrEvent
 from app.nostr import validate_event
 
 logger = logging.getLogger("clankfeed.zaps")
+
+
+def relay_pubkey_hex() -> str:
+    """X-only pubkey hex derived from RELAY_PRIVATE_KEY (empty if unset)."""
+    if not settings.RELAY_PRIVATE_KEY:
+        return ""
+    try:
+        sk = PrivateKey(bytes.fromhex(settings.RELAY_PRIVATE_KEY))
+    except Exception as e:
+        logger.warning("Invalid RELAY_PRIVATE_KEY for zap tags: %s", e)
+        return ""
+    return sk.public_key.format(compressed=True)[1:].hex()
+
+
+def pubkey_from_privkey(privkey_hex: str) -> str:
+    """Derive x-only pubkey hex from a hex private key."""
+    sk = PrivateKey(bytes.fromhex(privkey_hex))
+    return sk.public_key.format(compressed=True)[1:].hex()
+
+
+def build_zap_split_tags(author_pubkey: str) -> list[list[str]]:
+    """NIP-57 Appendix G zap tags: author + relay fee with configured weights.
+
+    Shape: ["zap", <pubkey>, <relay-url>, <weight-string>]
+    """
+    relay_pk = relay_pubkey_hex()
+    relay_url = settings.BASE_URL
+    return [
+        ["zap", author_pubkey, relay_url, str(settings.ZAP_AUTHOR_WEIGHT)],
+        ["zap", relay_pk, relay_url, str(settings.ZAP_RELAY_WEIGHT)],
+    ]
+
+
+def append_zap_split_tags(tags: list, author_pubkey: str) -> list:
+    """Return a new tag list with required zap split tags appended."""
+    return list(tags) + build_zap_split_tags(author_pubkey)
+
+
+def validate_kind1_zap_fee_tags(event: dict) -> tuple[bool, str]:
+    """Require exactly the configured author + relay zap fee tags on kind:1.
+
+    Returns (ok, error_message). Non-kind-1 events always pass.
+    Extra zap recipients are rejected so the 90/10 fee cannot be diluted.
+    """
+    if event.get("kind") != 1:
+        return True, ""
+
+    author_pk = event.get("pubkey", "")
+    relay_pk = relay_pubkey_hex()
+    if not relay_pk:
+        return False, "invalid: relay zap fee pubkey not configured"
+
+    expected_author = str(settings.ZAP_AUTHOR_WEIGHT)
+    expected_relay = str(settings.ZAP_RELAY_WEIGHT)
+    relay_url = settings.BASE_URL
+
+    zap_tags = [
+        t for t in event.get("tags", [])
+        if isinstance(t, list) and len(t) >= 4 and t[0] == "zap"
+    ]
+    if len(zap_tags) != 2:
+        return False, "invalid: kind:1 requires exactly two zap fee tags"
+
+    by_pk = {t[1]: t for t in zap_tags if isinstance(t[1], str)}
+    author_tag = by_pk.get(author_pk)
+    relay_tag = by_pk.get(relay_pk)
+    if author_tag is None:
+        return False, "invalid: missing author zap fee tag"
+    if relay_tag is None:
+        return False, "invalid: missing relay zap fee tag"
+
+    # When author == relay (anon relay-signed), both tags share one pubkey;
+    # require both weight values present among the two tags.
+    if author_pk == relay_pk:
+        weights = {t[3] for t in zap_tags}
+        if weights != {expected_author, expected_relay}:
+            return False, "invalid: zap fee tag weights must match configured ratio"
+        if any(t[2] != relay_url for t in zap_tags):
+            return False, "invalid: zap fee tag relay URL mismatch"
+        return True, ""
+
+    if author_tag[3] != expected_author or relay_tag[3] != expected_relay:
+        return False, "invalid: zap fee tag weights must match configured ratio"
+    if author_tag[2] != relay_url or relay_tag[2] != relay_url:
+        return False, "invalid: zap fee tag relay URL mismatch"
+    return True, ""
 
 # lud16 -> (fetched_at, nostrPubkey or None for negative cache)
 _lnurl_cache: dict[str, tuple[float, str | None]] = {}

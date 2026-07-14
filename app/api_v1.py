@@ -32,6 +32,7 @@ from app.models import PendingEvent, NostrEvent
 from app.mpp import build_mpp_challenge, parse_mpp_credential, verify_mpp_credential, extract_payment_hash, build_receipt
 from app.crypto import decrypt_field
 from app.nostr import validate_event, sign_event
+from app.zaps import append_zap_split_tags, pubkey_from_privkey, validate_kind1_zap_fee_tags
 from app.relay import store_event, broadcast_event, store_pending_event, query_events, row_to_event
 from app.tempo_pay import build_tempo_challenge, verify_tempo_credential, extract_tempo_tx_hash
 
@@ -228,6 +229,11 @@ async def submit_event(request: Request, db: AsyncSession = Depends(get_db)):
     # Enforce allowed kinds
     if event["kind"] not in ALLOWED_EVENT_KINDS:
         return JSONResponse(status_code=400, content={"detail": f"blocked: kind {event['kind']} not accepted"})
+
+    # Phase 13: kind:1 must carry NIP-57 zap fee tags (cannot rewrite without breaking sig)
+    zap_ok, zap_err = validate_kind1_zap_fee_tags(event)
+    if not zap_ok:
+        return JSONResponse(status_code=400, content={"detail": zap_err})
 
     # Enforce limits
     if len(event["content"]) > MAX_CONTENT_LENGTH:
@@ -514,13 +520,6 @@ async def relay_post(request: Request, db: AsyncSession = Depends(get_db)):
     if reply_to and len(reply_to) == 64:
         tags.append(["e", reply_to, "", "reply"])
 
-    event = {
-        "created_at": int(time.time()),
-        "kind": 1,
-        "tags": tags,
-        "content": content,
-    }
-
     # Sign with account's Nostr key if logged in, otherwise relay key
     from app.auth import get_auth
     acct, _, _ = await get_auth(request, db)
@@ -530,6 +529,17 @@ async def relay_post(request: Request, db: AsyncSession = Depends(get_db)):
 
     if not signing_key:
         return JSONResponse(status_code=500, content={"detail": "Relay private key not configured"})
+
+    # Phase 13: inject NIP-57 zap fee tags before sign (author 9 + relay 1)
+    author_pk = pubkey_from_privkey(signing_key)
+    tags = append_zap_split_tags(tags, author_pk)
+
+    event = {
+        "created_at": int(time.time()),
+        "kind": 1,
+        "tags": tags,
+        "content": content,
+    }
     signed = sign_event(signing_key, event)
 
     # Parse custom amount
