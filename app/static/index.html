@@ -176,6 +176,8 @@ function addNote(event) {
   // Feed filter: clankfeed tab only shows origin=clankfeed (missing => local)
   const origin = event.origin || 'clankfeed';
   if (currentFeed === 'clankfeed' && origin !== 'clankfeed') return;
+  // FEED-1: hide external notes with no sats (sats_ext=0 and sats_clank=0)
+  if (origin === 'external' && !(event.sats_ext || 0) && !(event.sats_clank || 0)) return;
   notes.push(event);
   notes.sort((a, b) => b.created_at - a.created_at);
   renderNotes();

@@ -6,7 +6,7 @@ import secrets
 from datetime import datetime, timezone, timedelta
 
 from fastapi import WebSocket
-from sqlalchemy import select, and_, or_
+from sqlalchemy import select, and_, or_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import (
@@ -136,6 +136,17 @@ async def query_events(
         filt_origin = filt.get("origin", origin)
         if filt_origin and filt_origin != "all":
             conditions.append(NostrEvent.origin == filt_origin)
+
+        # FEED-1: hide origin=external kind:1 notes with no economic signal
+        # (sats_ext=0 and sats_clank=0). Kind:0 metadata and local notes stay.
+        conditions.append(
+            or_(
+                NostrEvent.kind != 1,
+                NostrEvent.origin != "external",
+                func.coalesce(NostrEvent.sats_ext, 0) > 0,
+                func.coalesce(NostrEvent.sats_clank, 0) > 0,
+            )
+        )
 
         # Reply filter
         if "reply_to" in filt:

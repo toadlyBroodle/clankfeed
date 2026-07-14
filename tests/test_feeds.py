@@ -51,16 +51,13 @@ async def test_local_post_has_origin_clankfeed(client):
 
 @pytest.mark.asyncio
 async def test_ingest_marks_origin_external(client):
-    """Notes stored via ingest path are marked origin=external."""
+    """Notes stored via ingest path are marked origin=external (FEED-1: needs sats)."""
     note = _make_note("from nostr")
-    pending = {note["id"]: []}  # empty receipts — just store the note
-    ws = FakeWS()
-    # _handle_target expects pending receipts; seed one dummy so it proceeds
-    # to store, then pop — use a fake receipt pair that apply will skip if empty.
-    # Actually _handle_target returns early if not receipts. Call store path directly
-    # via the same store_event signature ingest uses, then assert API filter.
     async with async_session() as db:
         await store_event(db, note, sats_clank=0, origin="external")
+        row = await db.get(NostrEvent, note["id"])
+        row.sats_ext = 21
+        await db.commit()
 
     resp = await client.get("/api/v1/events?kinds=1&origin=external")
     assert resp.status_code == 200
@@ -72,6 +69,46 @@ async def test_ingest_marks_origin_external(client):
     # clankfeed-only filter must exclude it
     clank = await client.get("/api/v1/events?kinds=1&origin=clankfeed")
     assert note["id"] not in [e["id"] for e in clank.json()["events"]]
+
+
+@pytest.mark.asyncio
+async def test_feed1_zero_sats_external_hidden_from_listings(client):
+    """FEED-1: origin=external with sats_ext=0 and sats_clank=0 is omitted from feeds."""
+    zero = _make_note("zero sats external")
+    valued = _make_note("valued external")
+    async with async_session() as db:
+        await store_event(db, zero, sats_clank=0, origin="external")
+        await store_event(db, valued, sats_clank=0, origin="external")
+        row = await db.get(NostrEvent, valued["id"])
+        row.sats_ext = 42
+        await db.commit()
+
+    for qs in (
+        "kinds=1&origin=external",
+        "kinds=1&origin=all",
+        "kinds=1",
+    ):
+        resp = await client.get(f"/api/v1/events?{qs}")
+        assert resp.status_code == 200
+        ids = {e["id"] for e in resp.json()["events"]}
+        assert zero["id"] not in ids, f"zero-sats external leaked in ?{qs}"
+        assert valued["id"] in ids, f"valued external missing from ?{qs}"
+
+    # Direct get-by-id still works (listing filter only)
+    one = await client.get(f"/api/v1/events/{zero['id']}")
+    assert one.status_code == 200
+    assert one.json()["event"]["id"] == zero["id"]
+
+
+@pytest.mark.asyncio
+async def test_feed1_zero_sats_clankfeed_still_listed(client):
+    """FEED-1 adversarial: local origin=clankfeed with 0 sats still appears on clankfeed."""
+    note = _make_note("local zero")
+    async with async_session() as db:
+        await store_event(db, note, sats_clank=0, origin="clankfeed")
+
+    clank = await client.get("/api/v1/events?kinds=1&origin=clankfeed")
+    assert note["id"] in {e["id"] for e in clank.json()["events"]}
 
 
 @pytest.mark.asyncio
@@ -100,12 +137,15 @@ async def test_ingest_handle_target_sets_external(client):
 
 @pytest.mark.asyncio
 async def test_origin_all_returns_both(client):
-    """origin=all (or omitted) returns both clankfeed and external notes."""
+    """origin=all (or omitted) returns both clankfeed and valued external notes."""
     local = await client.post("/api/v1/post", json={"content": "local a"})
     local_id = local.json()["event"]["id"]
     ext = _make_note("ext b")
     async with async_session() as db:
         await store_event(db, ext, sats_clank=0, origin="external")
+        row = await db.get(NostrEvent, ext["id"])
+        row.sats_ext = 21
+        await db.commit()
 
     both = await client.get("/api/v1/events?kinds=1&origin=all")
     ids = {e["id"] for e in both.json()["events"]}

@@ -119,6 +119,18 @@ class TestTwoFeedsUI3:
         assert "clankfeed" in index
 
 
+class TestFeed1HideZeroSatsExternal:
+    """FEED-1: web client must not render origin=external notes with 0 sats."""
+
+    def test_addNote_skips_zero_sats_external(self):
+        index = (_STATIC / "index.html").read_text()
+        fn = index.split("function addNote", 1)[1].split("\nfunction ", 1)[0]
+        assert "external" in fn
+        # Must gate on sats_ext / sats_clank (or both zero) for external origin
+        assert "sats_ext" in fn or "sats_clank" in fn
+        assert "return" in fn
+
+
 class TestEmptyFeedUI36:
     """UI3.6: #empty-feed must survive renderNotes (not a child of #notes-feed)."""
 
