@@ -239,11 +239,17 @@ async def lnurl_http_get(url: str, pinned_ip: str) -> tuple[int, dict | list | N
     """GET ``url`` connecting only to ``pinned_ip`` (Host + TLS SNI = URL host).
 
     Does not re-resolve the hostname, closing the DNS-rebinding TOCTOU window
-    between the SSRF check and the TCP connect.
+    between the SSRF check and the TCP connect. IDN hosts are sent as IDNA
+    A-labels (punycode) so the hand-rolled request stays ASCII-safe.
     """
     parsed = urlparse(url)
     hostname = parsed.hostname
     if not hostname or parsed.scheme != "https":
+        return (0, None)
+    try:
+        host_ascii = hostname.encode("idna").decode("ascii")
+    except UnicodeError:
+        logger.warning("LNURL invalid IDN hostname=%r", hostname)
         return (0, None)
     port = parsed.port or 443
     path = parsed.path or "/"
@@ -254,20 +260,20 @@ async def lnurl_http_get(url: str, pinned_ip: str) -> tuple[int, dict | list | N
     try:
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(
-                pinned_ip, port, ssl=ctx, server_hostname=hostname
+                pinned_ip, port, ssl=ctx, server_hostname=host_ascii
             ),
             timeout=10.0,
         )
     except Exception as e:
         logger.warning(
-            "LNURL pinned connect failed host=%s ip=%s: %s", hostname, pinned_ip, e
+            "LNURL pinned connect failed host=%s ip=%s: %s", host_ascii, pinned_ip, e
         )
         return (0, None)
 
     try:
         req = (
             f"GET {path} HTTP/1.1\r\n"
-            f"Host: {hostname}\r\n"
+            f"Host: {host_ascii}\r\n"
             f"Accept: application/json\r\n"
             f"User-Agent: clankfeed\r\n"
             f"Connection: close\r\n"
@@ -277,7 +283,7 @@ async def lnurl_http_get(url: str, pinned_ip: str) -> tuple[int, dict | list | N
         await writer.drain()
         raw = await asyncio.wait_for(reader.read(65536), timeout=10.0)
     except Exception as e:
-        logger.warning("LNURL pinned read failed host=%s: %s", hostname, e)
+        logger.warning("LNURL pinned read failed host=%s: %s", host_ascii, e)
         return (0, None)
     finally:
         writer.close()

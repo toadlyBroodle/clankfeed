@@ -645,3 +645,116 @@ async def test_lnurl_dns_not_on_event_loop_thread(client):
     assert called_on_loop == [False], (
         "getaddrinfo must run off the event-loop thread (asyncio.to_thread)"
     )
+
+
+# --- EXT-1g: IDN Host header must use punycode (not UnicodeEncodeError) ---
+
+
+@pytest.mark.asyncio
+async def test_lnurl_http_get_idn_host_uses_punycode():
+    """IDN hostname must go out as IDNA/punycode Host; ascii encode must not fail."""
+    from app.zaps import lnurl_http_get
+
+    idn_host = "münchen.de"
+    punycode = idn_host.encode("idna").decode("ascii")
+    assert punycode.startswith("xn--"), "fixture sanity: expect A-label"
+
+    written = []
+    open_kwargs = {}
+
+    class FakeWriter:
+        def write(self, data):
+            written.append(data)
+
+        async def drain(self):
+            return None
+
+        def close(self):
+            return None
+
+        async def wait_closed(self):
+            return None
+
+    class FakeReader:
+        async def read(self, n):
+            body = b'{"allowsNostr":true,"nostrPubkey":"' + LNURL_PUBKEY.encode() + b'"}'
+            return (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                b"\r\n" + body
+            )
+
+    async def fake_open(*args, **kwargs):
+        open_kwargs.update(kwargs)
+        open_kwargs["_args"] = args
+        return FakeReader(), FakeWriter()
+
+    with patch("app.zaps.asyncio.open_connection", side_effect=fake_open):
+        status, data = await lnurl_http_get(
+            f"https://{idn_host}/.well-known/lnurlp/alice",
+            "8.8.8.8",
+        )
+
+    assert status == 200
+    assert data is not None
+    assert written, "expected HTTP request bytes written"
+    req = written[0].decode("ascii")  # must be pure ASCII (punycode Host)
+    assert f"Host: {punycode}\r\n" in req, f"Host must be punycode, got:\n{req}"
+    assert idn_host not in req, "Unicode U-label must not appear in Host header"
+    assert open_kwargs.get("server_hostname") == punycode
+
+
+# --- EXT-1h: open_connection must use pinned IP + SNI hostname ---
+
+
+@pytest.mark.asyncio
+async def test_lnurl_http_get_opens_connection_to_pinned_ip():
+    """CI must assert connect host=pinned_ip and server_hostname=URL host."""
+    from app.zaps import lnurl_http_get
+
+    pinned_ip = "203.0.113.50"
+    hostname = "lnurl.example.com"
+    open_calls = []
+
+    class FakeWriter:
+        def write(self, data):
+            return None
+
+        async def drain(self):
+            return None
+
+        def close(self):
+            return None
+
+        async def wait_closed(self):
+            return None
+
+    class FakeReader:
+        async def read(self, n):
+            body = b'{"ok":true}'
+            return (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                b"\r\n" + body
+            )
+
+    async def fake_open(*args, **kwargs):
+        open_calls.append((args, kwargs))
+        return FakeReader(), FakeWriter()
+
+    with patch("app.zaps.asyncio.open_connection", side_effect=fake_open):
+        status, _ = await lnurl_http_get(
+            f"https://{hostname}/.well-known/lnurlp/bob",
+            pinned_ip,
+        )
+
+    assert status == 200
+    assert len(open_calls) == 1
+    args, kwargs = open_calls[0]
+    # asyncio.open_connection(host, port, ..., server_hostname=...)
+    assert args[0] == pinned_ip, f"must connect to pinned IP, got {args[0]!r}"
+    assert args[0] != hostname, "must not reconnect by hostname (DNS rebinding)"
+    assert kwargs.get("server_hostname") == hostname
+    assert "ssl" in kwargs and kwargs["ssl"] is not None
