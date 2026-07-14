@@ -39,7 +39,9 @@ async def init_db():
             if old in existing and new not in existing:
                 await conn.execute(sqlalchemy.text(f"ALTER TABLE nostr_events RENAME COLUMN {old} TO {new}"))
 
-    # Migrate: add new columns to existing tables if missing
+    # Migrate: add new columns to existing tables if missing.
+    # Track whether origin was just added — backfill runs only then (UI3.1).
+    origin_just_added = False
     async with engine.begin() as conn:
         for table, columns in [
             ("nostr_events", [
@@ -56,19 +58,21 @@ async def init_db():
             for col, col_type in columns:
                 if col not in existing:
                     await conn.execute(sqlalchemy.text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"))
+                    if table == "nostr_events" and col == "origin":
+                        origin_just_added = True
 
-    # Backfill: rows that predate the origin column defaulted to 'clankfeed'.
-    # Ingested notes always start with sats_clank=0 and positive sats_ext after
-    # zap credit; paid local posts have sats_clank >= POST_PRICE_SATS.
-    async with engine.begin() as conn:
-        result = await conn.execute(sqlalchemy.text("PRAGMA table_info(nostr_events)"))
-        cols = {row[1] for row in result.fetchall()}
-        if "origin" in cols:
+    # One-shot backfill (UI3.1): only when origin was just ADDed this boot.
+    # Pre-column rows defaulted to 'clankfeed'; ingested notes have
+    # sats_clank=0 and sats_ext>0. Re-running every boot falsely reclassifies
+    # local notes that later hit sats_clank=0 with external zaps.
+    if origin_just_added:
+        async with engine.begin() as conn:
             await conn.execute(sqlalchemy.text(
                 "UPDATE nostr_events SET origin = 'external' "
                 "WHERE origin = 'clankfeed' AND kind = 1 "
                 "AND COALESCE(sats_clank, 0) = 0 AND COALESCE(sats_ext, 0) > 0"
             ))
+            logger.info("Origin backfill: reclassified pre-column rows to external (one-shot)")
 
     # Migrate: encrypt any plaintext private keys
     from app.crypto import encrypt_field, _fernet
