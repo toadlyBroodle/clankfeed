@@ -11,9 +11,11 @@ tag, valid target event id, and (async) receipt pubkey == the recipient's
 LNURL-pay `nostrPubkey` (fetched from their lud16 metadata and cached).
 """
 
+import ipaddress
 import json
 import logging
 import re
+import socket
 import time
 
 import httpx
@@ -27,7 +29,15 @@ logger = logging.getLogger("clankfeed.zaps")
 
 # lud16 -> (fetched_at, nostrPubkey or None for negative cache)
 _lnurl_cache: dict[str, tuple[float, str | None]] = {}
-_LNURL_CACHE_TTL = 3600  # 1 hour
+_LNURL_CACHE_TTL = 3600  # 1 hour — successful pubkey lookups
+_LNURL_NEGATIVE_CACHE_TTL = 60  # errors / missing nostrPubkey
+
+# Hostnames that must never be fetched even if DNS is unexpected.
+_BLOCKED_LNURL_HOSTS = frozenset({
+    "localhost",
+    "metadata.google.internal",
+    "metadata",
+})
 
 # BOLT11 human-readable part: ln + network + optional amount + multiplier,
 # followed by the bech32 "1" separator.
@@ -76,6 +86,57 @@ def lud16_to_lnurlp_url(lud16: str) -> str | None:
     return f"https://{domain.lower()}/.well-known/lnurlp/{user}"
 
 
+def _is_non_public_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """True if ip must not be fetched (loopback/private/link-local/etc.)."""
+    return bool(
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+        or (isinstance(ip, ipaddress.IPv4Address) and ip.is_reserved)
+    )
+
+
+def lnurl_host_is_safe(host: str) -> bool:
+    """Resolve host and reject loopback/private/link-local/metadata targets.
+
+    Used before any server-side HTTP GET of lud16 LNURL-pay metadata (SSRF).
+    """
+    if not isinstance(host, str) or not host:
+        return False
+    host = host.strip().lower().rstrip(".")
+    if not host or host in _BLOCKED_LNURL_HOSTS:
+        return False
+    # Bracketed IPv6 literals from URL parsing are not expected in lud16 domains,
+    # but strip brackets if present.
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+
+    try:
+        ip = ipaddress.ip_address(host)
+        return not _is_non_public_ip(ip)
+    except ValueError:
+        pass
+
+    try:
+        infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        sockaddr = info[4]
+        try:
+            ip = ipaddress.ip_address(sockaddr[0])
+        except ValueError:
+            return False
+        if _is_non_public_ip(ip):
+            return False
+    return True
+
+
 def clear_lnurl_cache() -> None:
     """Clear the in-process LNURL nostrPubkey cache (tests)."""
     _lnurl_cache.clear()
@@ -109,21 +170,33 @@ async def get_author_lud16(db: AsyncSession, pubkey: str) -> str | None:
 async def fetch_lnurl_nostr_pubkey(lud16: str) -> str | None:
     """Fetch LNURL-pay metadata for lud16; return nostrPubkey if allowsNostr.
 
-    Cached for _LNURL_CACHE_TTL seconds (including negative results).
+    Successful pubkeys cache for _LNURL_CACHE_TTL; misses/errors use the
+    shorter _LNURL_NEGATIVE_CACHE_TTL so brief LNURL blips do not block
+    sats_ext credits for a full hour.
     """
     now = time.time()
     cached = _lnurl_cache.get(lud16)
-    if cached and cached[0] > now - _LNURL_CACHE_TTL:
-        return cached[1]
+    if cached:
+        fetched_at, cached_pk = cached
+        ttl = _LNURL_CACHE_TTL if cached_pk is not None else _LNURL_NEGATIVE_CACHE_TTL
+        if fetched_at > now - ttl:
+            return cached_pk
 
     url = lud16_to_lnurlp_url(lud16)
     if not url:
         _lnurl_cache[lud16] = (now, None)
         return None
 
+    # SSRF: never GET loopback/private/link-local/metadata targets.
+    host = url.split("://", 1)[-1].split("/", 1)[0]
+    if not lnurl_host_is_safe(host):
+        logger.warning("LNURL SSRF blocked for lud16=%s host=%s", lud16, host)
+        _lnurl_cache[lud16] = (now, None)
+        return None
+
     pubkey: str | None = None
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
             resp = await client.get(url)
             if resp.status_code == 200:
                 data = resp.json()

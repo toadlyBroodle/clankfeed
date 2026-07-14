@@ -407,3 +407,183 @@ async def test_ingest_credits_verified_receipt(client):
         await _handle_receipt(FakeWS(), receipt, {})
 
     assert (await _get_sats(note["id"]))[1] == 21
+
+
+# --- EXT-1b: SSRF block on lud16 LNURL targets ---
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "lud16",
+    [
+        "x@127.0.0.1",
+        "x@10.0.0.1",
+        "x@192.168.1.1",
+        "x@169.254.169.254",
+        "x@localhost",
+        "x@metadata.google.internal",
+    ],
+)
+async def test_fetch_lnurl_rejects_non_public_targets(lud16, client):
+    """Adversarial: loopback/private/link-local/metadata lud16 must not HTTP GET."""
+    from app.zaps import clear_lnurl_cache, fetch_lnurl_nostr_pubkey
+
+    clear_lnurl_cache()
+    get_calls = []
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            pass
+
+        async def get(self, url, **kwargs):
+            get_calls.append(url)
+            raise AssertionError(f"SSRF: must not GET {url}")
+
+    with patch("app.zaps.httpx.AsyncClient", FakeClient):
+        pk = await fetch_lnurl_nostr_pubkey(lud16)
+
+    assert pk is None
+    assert get_calls == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_lnurl_rejects_hostname_resolving_to_private_ip(client):
+    """Hostname that DNS-resolves to a private address must not be fetched."""
+    import socket
+
+    from app.zaps import clear_lnurl_cache, fetch_lnurl_nostr_pubkey
+
+    clear_lnurl_cache()
+    get_calls = []
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            pass
+
+        async def get(self, url, **kwargs):
+            get_calls.append(url)
+            raise AssertionError(f"SSRF: must not GET {url}")
+
+    # (family, type, proto, canonname, sockaddr)
+    private_addrs = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.1.2.3", 443)),
+    ]
+
+    with (
+        patch("app.zaps.socket.getaddrinfo", return_value=private_addrs),
+        patch("app.zaps.httpx.AsyncClient", FakeClient),
+    ):
+        pk = await fetch_lnurl_nostr_pubkey("alice@evil.example.com")
+
+    assert pk is None
+    assert get_calls == []
+
+
+# --- EXT-1c: short TTL for negative/error LNURL cache ---
+
+
+@pytest.mark.asyncio
+async def test_fetch_lnurl_negative_cache_short_ttl(client):
+    """Transport/HTTP failure caches None briefly; success keeps long TTL."""
+    from app.zaps import (
+        _LNURL_CACHE_TTL,
+        _LNURL_NEGATIVE_CACHE_TTL,
+        clear_lnurl_cache,
+        fetch_lnurl_nostr_pubkey,
+    )
+
+    assert _LNURL_NEGATIVE_CACHE_TTL <= 60
+    assert _LNURL_CACHE_TTL >= 3600
+
+    clear_lnurl_cache()
+    calls = []
+
+    class FailResp:
+        status_code = 503
+
+        def json(self):
+            return {}
+
+    class OkResp:
+        status_code = 200
+
+        def json(self):
+            return {
+                "allowsNostr": True,
+                "nostrPubkey": LNURL_PUBKEY,
+                "callback": "https://example.com/cb",
+            }
+
+    class FakeClient:
+        mode = "fail"
+
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            pass
+
+        async def get(self, url, **kwargs):
+            calls.append(url)
+            if FakeClient.mode == "fail":
+                return FailResp()
+            return OkResp()
+
+    with patch("app.zaps.httpx.AsyncClient", FakeClient):
+        assert await fetch_lnurl_nostr_pubkey(AUTHOR_LUD16) is None
+        assert await fetch_lnurl_nostr_pubkey(AUTHOR_LUD16) is None  # negative cache hit
+        assert len(calls) == 1
+
+        # Advance past negative TTL → retry
+        with patch("app.zaps.time.time", return_value=time.time() + _LNURL_NEGATIVE_CACHE_TTL + 1):
+            FakeClient.mode = "ok"
+            pk = await fetch_lnurl_nostr_pubkey(AUTHOR_LUD16)
+            assert pk == LNURL_PUBKEY
+            assert len(calls) == 2
+
+            # Success cache still valid within long TTL (far short of 1h)
+            with patch(
+                "app.zaps.time.time",
+                return_value=time.time() + _LNURL_NEGATIVE_CACHE_TTL + 30,
+            ):
+                assert await fetch_lnurl_nostr_pubkey(AUTHOR_LUD16) == LNURL_PUBKEY
+                assert len(calls) == 2  # no third GET
+
+
+# --- EXT-1d: zap-request p ≠ note author ---
+
+
+@pytest.mark.asyncio
+async def test_receipt_p_tag_mismatch_rejected(client):
+    """Adversarial: zap-request p ≠ target note author → OK false, sats_ext unchanged."""
+    other_pk = sign_event(FORGER_SK, {
+        "created_at": 1, "kind": 1, "tags": [], "content": "",
+    })["pubkey"]
+
+    note = _make_note("wrong p target")
+    await _store_note(note)
+    await _store_author_profile()
+
+    # Valid LNURL signer, but p points at a different pubkey than the note author
+    receipt = _make_receipt(_make_zap_request(note["id"], recipient=other_pk))
+    with _mock_lnurl_pubkey(LNURL_PUBKEY):
+        conn = await _send(receipt)
+
+    assert conn.sent[-1][2] is False
+    assert "p" in conn.sent[-1][3].lower() or "author" in conn.sent[-1][3].lower()
+    assert (await _get_sats(note["id"]))[1] == 0
