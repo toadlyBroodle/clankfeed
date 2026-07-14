@@ -42,7 +42,11 @@ async def client():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     transport = ASGITransport(app=app, root_path="")
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    ) as c:
         yield c
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)

@@ -358,7 +358,7 @@ async function saveProfile() {
         const body = { token, method };
         if (method === 'tempo') body.tx_hash = paymentId;
         else body.payment_hash = paymentId;
-        const cr = await fetch('/api/post/confirm', {
+        const cr = await apiFetch('/api/post/confirm', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify(body),

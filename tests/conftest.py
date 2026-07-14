@@ -30,7 +30,12 @@ async def client():
         await conn.run_sync(Base.metadata.create_all)
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    # SECURITY H5: default X-Requested-With so POSTs without Origin still pass
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    ) as c:
         yield c
 
     async with engine.begin() as conn:

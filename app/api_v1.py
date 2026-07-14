@@ -38,6 +38,18 @@ from app.tempo_pay import build_tempo_challenge, verify_tempo_credential, extrac
 
 logger = logging.getLogger("clankfeed.api_v1")
 
+_EVENT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _invalid_event_id(event_id: str) -> JSONResponse | None:
+    """SECURITY L3: path event_id must be exactly 64 lowercase hex chars."""
+    if not _EVENT_ID_RE.fullmatch(event_id or ""):
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "event_id must be 64 lowercase hex characters"},
+        )
+    return None
+
 router = APIRouter(prefix="/api/v1")
 
 
@@ -444,6 +456,12 @@ async def read_events(
     if ids:
         filt["ids"] = [i.strip() for i in ids.split(",") if i.strip()]
     if reply_to:
+        # SECURITY M3: exact 64-hex only — never pass wildcards into LIKE
+        if not _EVENT_ID_RE.fullmatch(reply_to):
+            return JSONResponse(
+                status_code=400,
+                content={"detail": "reply_to must be 64 lowercase hex characters"},
+            )
         filt["reply_to"] = reply_to
 
     filt["limit"] = min(max(limit, 1), 500)
@@ -473,6 +491,9 @@ async def read_events(
 @limiter.limit(RATE_EVENTS_READ)
 async def get_event(request: Request, event_id: str, db: AsyncSession = Depends(get_db)):
     """Get a single event by ID."""
+    bad = _invalid_event_id(event_id)
+    if bad:
+        return bad
     row = await db.get(NostrEvent, event_id)
     if not row:
         return JSONResponse(status_code=404, content={"detail": "Event not found"})
@@ -643,6 +664,9 @@ async def get_replies(
     sort: str = "newest",
 ):
     """Get replies to a specific note."""
+    bad = _invalid_event_id(event_id)
+    if bad:
+        return bad
     row = await db.get(NostrEvent, event_id)
     if not row:
         return JSONResponse(status_code=404, content={"detail": "Event not found"})
@@ -665,6 +689,9 @@ async def vote_event(request: Request, event_id: str, db: AsyncSession = Depends
     direction: 1 (upvote) or -1 (downvote)
     amount: must be >= minimum (POST_PRICE_SATS / TEMPO_PRICE_USD)
     """
+    bad = _invalid_event_id(event_id)
+    if bad:
+        return bad
     row = await db.get(NostrEvent, event_id)
     if not row:
         return JSONResponse(status_code=404, content={"detail": "Event not found"})
@@ -785,6 +812,9 @@ async def confirm_vote(request: Request, event_id: str, db: AsyncSession = Depen
 
     Body: {"token": "...", "method": "tempo", "tx_hash": "0x..."} (same as event confirm)
     """
+    bad = _invalid_event_id(event_id)
+    if bad:
+        return bad
     try:
         body = await request.json()
     except Exception as e:

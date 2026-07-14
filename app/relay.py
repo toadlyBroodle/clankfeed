@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import secrets
 from datetime import datetime, timezone, timedelta
 
@@ -15,6 +16,7 @@ from app.config import (
     tempo_enabled,
     MAX_SUBSCRIPTIONS_PER_CONN,
     MAX_FILTERS_PER_REQ,
+    MAX_SUBSCRIPTION_ID_LENGTH,
     MAX_MESSAGE_BYTES,
     MAX_CONTENT_LENGTH,
     MAX_EVENT_TAGS,
@@ -152,11 +154,14 @@ async def query_events(
             )
         )
 
-        # Reply filter
+        # Reply filter (SECURITY M3: only exact 64-hex event ids — no LIKE wildcards)
         if "reply_to" in filt:
-            # Match events that have an "e" tag with the parent event ID
-            # json.dumps uses ", " separator, so search for '"e", "parent_id"'
-            conditions.append(NostrEvent.tags.contains(f'"e", "{filt["reply_to"]}"'))
+            parent = filt["reply_to"]
+            if not isinstance(parent, str) or not re.fullmatch(r"[0-9a-f]{64}", parent):
+                # Invalid → match nothing (do not skip the constraint)
+                conditions.append(NostrEvent.id == "")
+            else:
+                conditions.append(NostrEvent.tags.contains(f'"e", "{parent}"'))
 
         # Sort order
         if sort in ("clank", "value"):
@@ -468,6 +473,10 @@ async def _handle_req(conn: Connection, msg: list, db: AsyncSession):
     sub_id = msg[1]
     if not isinstance(sub_id, str):
         await conn.send(["NOTICE", "error: subscription_id must be a string"])
+        return
+
+    if len(sub_id) > MAX_SUBSCRIPTION_ID_LENGTH:
+        await conn.send(["CLOSED", sub_id, "error: subscription_id too long"])
         return
 
     if len(conn.subscriptions) >= MAX_SUBSCRIPTIONS_PER_CONN and sub_id not in conn.subscriptions:

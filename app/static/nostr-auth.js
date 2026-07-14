@@ -46,7 +46,7 @@ async function clearAuthState() {
   localStorage.removeItem('cf_nsec');
   localStorage.removeItem('clankfeed_api_key');
   try {
-    await fetch('/api/v1/auth/logout', { method: 'POST', credentials: 'include' });
+    await apiFetch('/api/v1/auth/logout', { method: 'POST', credentials: 'include' });
   } catch (e) {}
 }
 
@@ -94,6 +94,10 @@ async function makeNip98Auth(url, method) {
 
 async function authHeaders(url, method, extra) {
   const headers = extra ? {...extra} : {};
+  // SECURITY H5: custom header so no-Origin CSRF cannot mutate with cookies alone
+  if (!headers['X-Requested-With'] && !headers['x-requested-with']) {
+    headers['X-Requested-With'] = 'XMLHttpRequest';
+  }
   const nip98 = await makeNip98Auth(url, method);
   if (nip98) {
     headers['Authorization'] = nip98;
@@ -106,6 +110,12 @@ async function authFetch(url, options = {}) {
   const fullUrl = new URL(url, window.location.origin).href;
   const hdrs = await authHeaders(fullUrl, method, options.headers || {});
   return fetch(url, {...options, headers: hdrs, credentials: 'include'});
+}
+
+/** fetch() wrapper that always sends X-Requested-With (SECURITY H5). */
+function apiFetch(url, options = {}) {
+  const headers = Object.assign({'X-Requested-With': 'XMLHttpRequest'}, options.headers || {});
+  return fetch(url, Object.assign({}, options, {headers}));
 }
 
 // ---- Payment Helper ----

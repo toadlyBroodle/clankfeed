@@ -151,7 +151,11 @@ async def tempo_client(monkeypatch):
 
     from app.main import app
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    ) as c:
         yield c
 
     async with engine.begin() as conn:

@@ -126,19 +126,45 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 
 class OriginCheckMiddleware(BaseHTTPMiddleware):
-    """SECURITY: Reject cross-origin POST/PUT/DELETE/PATCH requests.
-    Prevents CSRF by verifying Origin is in cors_allow_origins() (same allowlist as CORS)."""
+    """SECURITY: CSRF defense for mutating requests (H4 + H5).
+
+    H4: if Origin is present, it must be in cors_allow_origins().
+    H5: if Origin is absent, require X-Requested-With or Authorization so
+    simple form CSRF / no-Origin bypasses cannot mutate state. API agents
+    send Authorization; the web client sends X-Requested-With on all POSTs.
+    """
 
     async def dispatch(self, request: Request, call_next):
         if request.method in ("POST", "PUT", "DELETE", "PATCH"):
             origin = request.headers.get("origin")
-            if origin and origin not in cors_allow_origins():
-                if request.url.path.startswith("/api/"):
-                    return JSONResponse(
-                        {"detail": "Cross-origin request blocked"},
+            if origin:
+                if origin not in cors_allow_origins():
+                    if request.url.path.startswith("/api/") or request.url.path.startswith("/pay"):
+                        return JSONResponse(
+                            {"detail": "Cross-origin request blocked"},
+                            status_code=403,
+                        )
+                    return HTMLResponse("Cross-origin request blocked", status_code=403)
+            else:
+                # No Origin: browsers/agents must prove intent via custom header or auth.
+                xrw = (request.headers.get("x-requested-with") or "").strip()
+                auth = (request.headers.get("authorization") or "").strip()
+                if not xrw and not auth:
+                    path = request.url.path
+                    if path.startswith("/api/") or path.startswith("/pay"):
+                        return JSONResponse(
+                            {
+                                "detail": (
+                                    "Missing Origin: send X-Requested-With "
+                                    "or Authorization header"
+                                )
+                            },
+                            status_code=403,
+                        )
+                    return HTMLResponse(
+                        "Missing Origin: send X-Requested-With or Authorization header",
                         status_code=403,
                     )
-                return HTMLResponse("Cross-origin request blocked", status_code=403)
         return await call_next(request)
 
 
@@ -327,7 +353,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_allow_origins(),
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "Accept"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "X-Requested-With"],
 )
 
 app.include_router(api_v1_router)

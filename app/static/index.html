@@ -216,7 +216,7 @@ async function fetchReplyCounts() {
   const ids = notes.map(n => n.id);
   if (!ids.length) return;
   try {
-    const resp = await fetch('/api/v1/events/reply-counts', {
+    const resp = await apiFetch('/api/v1/events/reply-counts', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({event_ids: ids})
@@ -352,7 +352,7 @@ document.getElementById('post-form').addEventListener('submit', async (e) => {
         const body = { token, method };
         if (method === 'tempo') body.tx_hash = paymentId;
         else body.payment_hash = paymentId;
-        const cr = await fetch('/api/post/confirm', {
+        const cr = await apiFetch('/api/post/confirm', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify(body),
@@ -480,7 +480,7 @@ function showVotePayment(eventId, direction, data) {
     const body = { token, method };
     if (method === 'tempo') body.tx_hash = paymentId;
     else body.payment_hash = paymentId;
-    const resp = await fetch(`/api/v1/events/${eventId}/vote/confirm`, {
+    const resp = await apiFetch(`/api/v1/events/${eventId}/vote/confirm`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),

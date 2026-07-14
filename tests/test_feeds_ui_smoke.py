@@ -92,7 +92,7 @@ def live_server(tmp_path):
 
 async def _seed_notes(base: str, db_path: Path) -> dict:
     """Local clankfeed note + two external notes with distinct sats_ext."""
-    with httpx.Client(base_url=base, timeout=10.0) as c:
+    with httpx.Client(base_url=base, timeout=10.0, headers={"X-Requested-With": "XMLHttpRequest"}) as c:
         local = c.post("/api/v1/post", json={"content": "local-ui34-only"}).json()
         local_id = local["event"]["id"]
 
@@ -140,7 +140,7 @@ async def _seed_notes(base: str, db_path: Path) -> dict:
     await engine.dispose()
 
     # Sanity: API membership + ext order before browser
-    with httpx.Client(base_url=base, timeout=10.0) as c:
+    with httpx.Client(base_url=base, timeout=10.0, headers={"X-Requested-With": "XMLHttpRequest"}) as c:
         clank = c.get("/api/v1/events?kinds=1&origin=clankfeed").json()["events"]
         clank_ids = {e["id"] for e in clank}
         assert local_id in clank_ids
@@ -268,7 +268,7 @@ async def _seed_external_only(base: str, db_path: Path) -> str:
         )
     await engine.dispose()
 
-    with httpx.Client(base_url=base, timeout=10.0) as c:
+    with httpx.Client(base_url=base, timeout=10.0, headers={"X-Requested-With": "XMLHttpRequest"}) as c:
         clank = c.get("/api/v1/events?kinds=1&origin=clankfeed").json()["events"]
         assert all(e["id"] != note["id"] for e in clank)
         assert len(clank) == 0
@@ -345,7 +345,7 @@ async def test_ui36_empty_clankfeed_shows_empty_state(live_server):
 
 async def _seed_one_local(base: str) -> str:
     """One origin=clankfeed note via relay-signed post (test-mode)."""
-    with httpx.Client(base_url=base, timeout=10.0) as c:
+    with httpx.Client(base_url=base, timeout=10.0, headers={"X-Requested-With": "XMLHttpRequest"}) as c:
         local = c.post("/api/v1/post", json={"content": "local-ui37-nonempty"}).json()
         local_id = local["event"]["id"]
         clank = c.get("/api/v1/events?kinds=1&origin=clankfeed").json()["events"]
@@ -355,7 +355,7 @@ async def _seed_one_local(base: str) -> str:
 
 async def _seed_zero_and_valued_external(base: str, db_path: Path) -> dict:
     """FEED-1a/1b: one zero-sats external + ≥2 valued externals (+ local)."""
-    with httpx.Client(base_url=base, timeout=10.0) as c:
+    with httpx.Client(base_url=base, timeout=10.0, headers={"X-Requested-With": "XMLHttpRequest"}) as c:
         local = c.post("/api/v1/post", json={"content": "local-feed1a"}).json()
         local_id = local["event"]["id"]
 
@@ -446,7 +446,7 @@ async def _seed_zero_and_valued_external(base: str, db_path: Path) -> dict:
 
 async def _seed_zero_only_external(base: str, db_path: Path) -> dict:
     """FEED-1b: local + ≥1 zero-sats external, no valued externals."""
-    with httpx.Client(base_url=base, timeout=10.0) as c:
+    with httpx.Client(base_url=base, timeout=10.0, headers={"X-Requested-With": "XMLHttpRequest"}) as c:
         local = c.post("/api/v1/post", json={"content": "local-feed1b-zero-only"}).json()
         local_id = local["event"]["id"]
 

@@ -57,7 +57,11 @@ async def sec_client(monkeypatch):
 
     from app.main import app
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    ) as c:
         yield c
 
     async with engine.begin() as conn:
@@ -75,7 +79,7 @@ class TestSQLInjection:
     async def test_event_id_injection(self, client):
         """SQL injection via event_id path param."""
         resp = await client.get("/api/v1/events/'; DROP TABLE nostr_events; --")
-        assert resp.status_code == 404  # safe, not 500
+        assert resp.status_code == 400  # L3 format reject, not 500
 
     @pytest.mark.asyncio
     async def test_authors_filter_injection(self, client):
@@ -825,3 +829,187 @@ class TestCORSH4:
         resp = await client.post("/api/v1/auth/login", headers=headers)
         assert resp.status_code == 403
         assert "cross-origin" in resp.text.lower() or "cross-origin" in str(resp.json()).lower()
+
+
+# ---------------------------------------------------------------------------
+# S-H5: Require X-Requested-With when Origin absent (CSRF gap after H4)
+# ---------------------------------------------------------------------------
+
+class TestOriginCheckH5:
+    """H5: mutating requests without Origin need X-Requested-With or Authorization."""
+
+    @pytest.mark.asyncio
+    async def test_h5_no_origin_no_headers_rejected(self, client):
+        """POST without Origin, X-Requested-With, or Authorization → 403."""
+        # Bypass fixture default XRW if present: use a bare ASGI call
+        from app.main import app
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as bare:
+            resp = await bare.post("/api/v1/post", json={"content": "csrf?"})
+        assert resp.status_code == 403
+        detail = resp.text.lower()
+        assert "origin" in detail or "requested" in detail or "csrf" in detail or "header" in detail
+
+    @pytest.mark.asyncio
+    async def test_h5_no_origin_with_xrw_allowed(self, client):
+        """POST without Origin but with X-Requested-With → not blocked by H5."""
+        resp = await client.post(
+            "/api/v1/post",
+            json={"content": "h5 ok"},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        assert resp.status_code != 403
+        assert resp.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_h5_no_origin_with_authorization_allowed(self, client):
+        """Agents without Origin may authenticate via Authorization (no XRW needed)."""
+        headers = _nip98("http://test/api/v1/auth/login", "POST")
+        # Ensure no X-Requested-With sneaks in from a default
+        headers.pop("X-Requested-With", None)
+        from app.main import app
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as bare:
+            resp = await bare.post("/api/v1/auth/login", headers=headers)
+        assert resp.status_code != 403
+        assert resp.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_h5_valid_origin_without_xrw_allowed(self, client, monkeypatch):
+        """Valid Origin alone still passes (H4 path); XRW not required when Origin ok."""
+        from app import config
+
+        monkeypatch.setattr(config.settings, "BASE_URL", "ws://localhost:8089")
+        from app.main import app
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as bare:
+            resp = await bare.post(
+                "/api/v1/post",
+                json={"content": "origin ok"},
+                headers={"Origin": "http://127.0.0.1:8089"},
+            )
+        assert resp.status_code != 403
+        assert resp.status_code == 200
+
+    def test_h5_frontend_sends_xrw(self):
+        """Browser fetch helpers must set X-Requested-With for CSRF defense."""
+        auth_src = (Path(__file__).resolve().parents[1] / "app" / "static" / "nostr-auth.js").read_text()
+        assert "X-Requested-With" in auth_src
+        assert "function apiFetch" in auth_src
+        index_src = (Path(__file__).resolve().parents[1] / "app" / "static" / "index.html").read_text()
+        # Mutating POSTs that skip authFetch must use apiFetch (sets XRW)
+        assert "apiFetch" in index_src
+        assert "apiFetch('/api/post/confirm'" in index_src or 'apiFetch("/api/post/confirm"' in index_src
+        assert "apiFetch(`/api/v1/events/${eventId}/vote/confirm`" in index_src
+    def test_h5_cors_allows_xrw_header(self):
+        """CORS must allow X-Requested-With so browsers can send it cross-origin to our allowlist."""
+        main_src = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text()
+        assert "X-Requested-With" in main_src
+
+
+# ---------------------------------------------------------------------------
+# S-M3: reply_to must be 64 hex before LIKE query
+# ---------------------------------------------------------------------------
+
+class TestReplyToM3:
+    """M3: reply_to wildcards must not reach the tags.contains LIKE path."""
+
+    @pytest.mark.asyncio
+    async def test_m3_reply_to_wildcard_rejected(self, client):
+        resp = await client.get("/api/v1/events?reply_to=%25&kinds=1")
+        assert resp.status_code == 400
+        assert "reply_to" in resp.json().get("detail", "").lower()
+
+    @pytest.mark.asyncio
+    async def test_m3_reply_to_underscore_rejected(self, client):
+        bad = "a" * 63 + "_"  # 64 chars but not hex
+        resp = await client.get(f"/api/v1/events?reply_to={bad}&kinds=1")
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_m3_reply_to_valid_hex_ok(self, client):
+        parent = "ab" * 32
+        resp = await client.get(f"/api/v1/events?reply_to={parent}&kinds=1")
+        assert resp.status_code == 200
+        assert "events" in resp.json()
+
+
+# ---------------------------------------------------------------------------
+# S-L3: event_id path params must be 64 hex
+# ---------------------------------------------------------------------------
+
+class TestEventIdPathL3:
+    """L3: reject non-hex / wrong-length event_id path params with 400."""
+
+    @pytest.mark.asyncio
+    async def test_l3_get_event_rejects_short_id(self, client):
+        resp = await client.get("/api/v1/events/notanid")
+        assert resp.status_code == 400
+        assert "event" in resp.json().get("detail", "").lower() or "id" in resp.json().get("detail", "").lower()
+
+    @pytest.mark.asyncio
+    async def test_l3_get_event_rejects_injection_shape(self, client):
+        resp = await client.get("/api/v1/events/'; DROP TABLE nostr_events; --")
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_l3_replies_rejects_bad_id(self, client):
+        resp = await client.get("/api/v1/events/zzzz/replies")
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_l3_vote_rejects_bad_id(self, client):
+        resp = await client.post(
+            "/api/v1/events/nothex/vote",
+            json={"direction": 1, "amount_sats": 21},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# S-L5: WebSocket subscription id max 256 chars
+# ---------------------------------------------------------------------------
+
+class TestSubIdLengthL5:
+    """L5: REQ with subscription_id longer than 256 chars is rejected."""
+
+    def test_l5_long_sub_id_closed(self, client):
+        from starlette.testclient import TestClient
+        from app.main import app
+
+        long_id = "s" * 257
+        with TestClient(app) as tc:
+            with tc.websocket_connect("/") as ws:
+                ws.receive_json()  # AUTH challenge
+                ws.send_json(["REQ", long_id, {"kinds": [1], "limit": 1}])
+                msg = ws.receive_json()
+                assert msg[0] == "CLOSED"
+                assert msg[1] == long_id
+                assert "subscription" in msg[2].lower() or "length" in msg[2].lower() or "too long" in msg[2].lower()
+
+    def test_l5_sub_id_256_ok(self, client):
+        from starlette.testclient import TestClient
+        from app.main import app
+
+        ok_id = "s" * 256
+        with TestClient(app) as tc:
+            with tc.websocket_connect("/") as ws:
+                ws.receive_json()
+                ws.send_json(["REQ", ok_id, {"kinds": [1], "limit": 1}])
+                # May get EVENT(s) then EOSE, or just EOSE
+                while True:
+                    msg = ws.receive_json()
+                    if msg[0] == "EOSE":
+                        assert msg[1] == ok_id
+                        break
+                    if msg[0] == "CLOSED":
+                        pytest.fail(f"256-char sub_id should be accepted, got CLOSED: {msg}")
+                    if msg[0] == "EVENT":
+                        continue
+                    # ignore NOTICE etc.
+                    if msg[0] not in ("EVENT", "EOSE"):
+                        # unexpected but keep draining briefly
+                        if msg[0] == "NOTICE":
+                            continue
+                        break
