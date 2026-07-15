@@ -1568,6 +1568,43 @@ class TestErrorSanitizeL2:
             route.dependant.call = orig_call
 
     @pytest.mark.asyncio
+    async def test_l2_starlette_http_500_leaky_detail_sanitized(self, client):
+        """Starlette HTTPException(500) must also be sanitized (not only FastAPI subclass).
+
+        Registering the L2 handler only on fastapi.HTTPException leaves
+        starlette.exceptions.HTTPException on the default handler, which echoes
+        detail verbatim — adversarial path for 6.19.
+        """
+        from fastapi.routing import APIRoute
+        from starlette.exceptions import HTTPException as StarletteHTTPException
+
+        from app.main import app
+
+        async def leaky_health():
+            raise StarletteHTTPException(status_code=500, detail=self._LEAK)
+
+        route = next(
+            r for r in app.routes
+            if isinstance(r, APIRoute) and r.path == "/health"
+        )
+        orig_ep, orig_call = route.endpoint, route.dependant.call
+        route.endpoint = leaky_health
+        route.dependant.call = leaky_health
+        try:
+            resp = await client.get("/health")
+            assert resp.status_code == 500
+            body = resp.text
+            assert self._LEAK not in body
+            assert "/home/rob" not in body
+            assert "SQLAlchemy" not in body
+            assert "relay.db" not in body
+            data = resp.json()
+            assert data.get("detail") == "Internal server error"
+        finally:
+            route.endpoint = orig_ep
+            route.dependant.call = orig_call
+
+    @pytest.mark.asyncio
     async def test_l2_unhandled_exception_no_internals(self, client):
         """Unhandled Exception → 500 JSON without exception message / paths."""
         from fastapi.routing import APIRoute
