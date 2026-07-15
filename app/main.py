@@ -76,7 +76,7 @@ async def _cleanup_expired_pending():
             async with async_session() as db:
                 await db.execute(
                     delete(PendingEvent).where(
-                        PendingEvent.expires_at < datetime.utcnow()
+                        PendingEvent.expires_at < datetime.now(timezone.utc)
                     )
                 )
                 await db.commit()

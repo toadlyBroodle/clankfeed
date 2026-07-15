@@ -10,7 +10,7 @@ import logging
 import re
 import secrets
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request, Depends
 from fastapi.responses import JSONResponse
@@ -362,7 +362,7 @@ async def confirm_event(request: Request, db: AsyncSession = Depends(get_db)):
     method = body.get("method", "lightning")
 
     pending = await db.get(PendingEvent, token)
-    if not pending or pending.expires_at.replace(tzinfo=None) < datetime.utcnow():
+    if not pending or pending.expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
         return JSONResponse(status_code=404, content={"detail": "Token expired or not found"})
 
     if method == "tempo":
@@ -850,7 +850,7 @@ async def confirm_vote(request: Request, event_id: str, db: AsyncSession = Depen
     method = body.get("method", "lightning")
 
     pending = await db.get(PendingEvent, token)
-    if not pending or pending.expires_at.replace(tzinfo=None) < datetime.utcnow():
+    if not pending or pending.expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
         return JSONResponse(status_code=404, content={"detail": "Token expired or not found"})
 
     # Verify payment (same logic as event confirm)
@@ -1103,7 +1103,7 @@ async def account_deposit_confirm(request: Request, db: AsyncSession = Depends(g
     method = body.get("method", "lightning")
 
     pending = await db.get(PendingEvent, token)
-    if not pending or pending.expires_at.replace(tzinfo=None) < datetime.utcnow():
+    if not pending or pending.expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
         return JSONResponse(status_code=404, content={"detail": "Token expired or not found"})
 
     # SECURITY (H6): the deposit token must belong to the confirming account,

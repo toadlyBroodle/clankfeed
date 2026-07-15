@@ -15,7 +15,7 @@ class NostrEvent(Base):
     tags = Column(Text, nullable=False)  # JSON-serialized
     content = Column(Text, nullable=False)
     sig = Column(String(128), nullable=False)  # 64-byte hex Schnorr sig
-    stored_at = Column(DateTime, default=lambda: datetime.utcnow())
+    stored_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     sats_clank = Column(Integer, default=0)  # clankfeed-paid value (posts + votes)
     value_usd = Column(Text, default="0")
     sats_ext = Column(Integer, default=0)  # external NIP-57 zaps, kept separate for fair ranking
@@ -42,7 +42,7 @@ class Account(Base):
     nostr_pubkey = Column(String(64), nullable=True)  # derived x-only public key (hex)
     balance_sats = Column(Integer, default=0)
     balance_usd = Column(Text, default="0")
-    created_at = Column(DateTime, default=lambda: datetime.utcnow())
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
         Index("ix_accounts_pubkey", "pubkey"),
@@ -59,7 +59,7 @@ class Vote(Base):
     amount_sats = Column(Integer, default=0)
     amount_usd = Column(Text, default="0")
     payment_id = Column(String(128), nullable=False)
-    created_at = Column(DateTime, default=lambda: datetime.utcnow())
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
         Index("ix_votes_event_id", "event_id"),
@@ -71,7 +71,7 @@ class ConsumedPayment(Base):
     __tablename__ = "consumed_payments"
 
     payment_hash = Column(String(64), primary_key=True)
-    consumed_at = Column(DateTime, default=lambda: datetime.utcnow())
+    consumed_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 class PendingEvent(Base):
@@ -82,7 +82,7 @@ class PendingEvent(Base):
     payment_hash = Column(String(64), nullable=False, default="")
     amount_sats = Column(Integer, default=0)
     amount_usd = Column(Text, default="0")
-    created_at = Column(DateTime, default=lambda: datetime.utcnow())
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     expires_at = Column(DateTime, nullable=False)
 
     __table_args__ = (

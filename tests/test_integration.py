@@ -228,10 +228,10 @@ class TestTempoConfirm:
         # Expire the pending event by manipulating the DB
         from app.database import async_session
         from app.models import PendingEvent
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, timezone
         async with async_session() as db:
             pending = await db.get(PendingEvent, token)
-            pending.expires_at = datetime.utcnow() - timedelta(minutes=1)
+            pending.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
             await db.commit()
 
         with _mock_tempo_verify(paid=True):

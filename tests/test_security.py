@@ -1054,7 +1054,7 @@ class TestVoteFloorM1:
         Free + credits paths are covered elsewhere; this hits confirm_vote so a
         re-inline of unfloored math on the paid path cannot ship undetected.
         """
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, timezone
 
         from app.database import async_session
         from app.models import NostrEvent, PendingEvent
@@ -1083,8 +1083,8 @@ class TestVoteFloorM1:
                 payment_hash=payment_hash,
                 amount_sats=500,
                 amount_usd="0.01",
-                created_at=datetime.utcnow(),
-                expires_at=datetime.utcnow() + timedelta(minutes=10),
+                created_at=datetime.now(timezone.utc),
+                expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
             ))
             await db.commit()
 
@@ -1662,3 +1662,143 @@ class TestErrorSanitizeL2:
         )
         assert client_safe_detail(400, "Content is required") == "Content is required"
         assert client_safe_detail(500, None) == "Internal server error"
+
+
+# ---------------------------------------------------------------------------
+# S-L1: Replace deprecated datetime.utcnow() with datetime.now(timezone.utc)
+# ---------------------------------------------------------------------------
+
+class TestUtcnowL1:
+    """L1: app code must not call datetime.utcnow(); use timezone-aware UTC."""
+
+    _APP_FILES = (
+        "app/relay.py",
+        "app/payment.py",
+        "app/api_v1.py",
+        "app/models.py",
+        "app/main.py",
+    )
+
+    def test_l1_no_utcnow_in_app_sources(self):
+        """Adversarial source scan: utcnow must be absent from production modules."""
+        root = Path(__file__).resolve().parents[1]
+        offenders = []
+        for rel in self._APP_FILES:
+            text = (root / rel).read_text(encoding="utf-8")
+            if "utcnow" in text:
+                offenders.append(rel)
+        assert offenders == [], f"utcnow still present in: {offenders}"
+
+    def test_l1_model_defaults_use_aware_now(self):
+        """Model DateTime defaults must call datetime.now(timezone.utc), not utcnow."""
+        import re
+        from datetime import datetime, timezone
+
+        text = (Path(__file__).resolve().parents[1] / "app/models.py").read_text(
+            encoding="utf-8"
+        )
+        assert "utcnow" not in text
+        defaults = re.findall(
+            r"default=lambda:\s*datetime\.now\(timezone\.utc\)",
+            text,
+        )
+        assert len(defaults) >= 5, (
+            f"expected ≥5 aware DateTime defaults in models.py, found {len(defaults)}"
+        )
+        # Callable itself must return aware UTC (pre-persist; SQLite may strip on store)
+        value = datetime.now(timezone.utc)
+        assert value.tzinfo is not None
+        assert value.utcoffset().total_seconds() == 0
+
+    @pytest.mark.asyncio
+    async def test_l1_store_pending_no_utcnow_and_defaults_fire(self, client):
+        """store_pending_event + model inserts must not emit utcnow DeprecationWarning."""
+        import warnings
+
+        from app.database import async_session
+        from app.models import Account, ConsumedPayment, NostrEvent, PendingEvent, Vote
+        from app.relay import store_pending_event
+
+        event = _make_event("l1-defaults")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            async with async_session() as db:
+                token = await store_pending_event(db, event, amount_sats=1)
+                pending = await db.get(PendingEvent, token)
+                assert pending is not None
+                assert pending.created_at is not None
+                assert pending.expires_at is not None
+
+                acct = Account(id="k" * 64, balance_sats=0)
+                vote = Vote(
+                    id="v" * 64,
+                    event_id="e" * 64,
+                    pubkey="p" * 64,
+                    direction=1,
+                    payment_id="pay1",
+                )
+                consumed = ConsumedPayment(payment_hash="h" * 64)
+                note = NostrEvent(
+                    id=event["id"],
+                    pubkey=event["pubkey"],
+                    created_at=event["created_at"],
+                    kind=event["kind"],
+                    tags="[]",
+                    content=event["content"],
+                    sig=event["sig"],
+                )
+                db.add_all([acct, vote, consumed, note])
+                await db.commit()
+                await db.refresh(acct)
+                await db.refresh(vote)
+                await db.refresh(consumed)
+                await db.refresh(note)
+                assert acct.created_at is not None
+                assert vote.created_at is not None
+                assert consumed.consumed_at is not None
+                assert note.stored_at is not None
+
+            utcnow_warns = [
+                w for w in caught
+                if issubclass(w.category, DeprecationWarning)
+                and "utcnow" in str(w.message).lower()
+            ]
+            assert utcnow_warns == [], f"utcnow DeprecationWarning: {utcnow_warns}"
+
+    @pytest.mark.asyncio
+    async def test_l1_pending_expiry_compare_works_with_aware_now(self, client):
+        """Expired pending token must 404; live token must not — no naive/aware crash."""
+        import warnings
+        from datetime import datetime, timedelta, timezone
+
+        from app.database import async_session
+        from app.models import PendingEvent
+        from app.relay import store_pending_event
+
+        event = _make_event("l1-expiry")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            async with async_session() as db:
+                token = await store_pending_event(db, event, amount_sats=21)
+            utcnow_warns = [
+                w for w in caught
+                if issubclass(w.category, DeprecationWarning)
+                and "utcnow" in str(w.message).lower()
+            ]
+            assert utcnow_warns == [], f"utcnow DeprecationWarning: {utcnow_warns}"
+
+        # Still-valid pending: GET /pay may 402 or return challenge, not 404-expired
+        resp = await client.get(f"/pay?token={token}")
+        assert resp.status_code != 404
+
+        # Force expiry and assert 404 without TypeError on aware/naive compare
+        async with async_session() as db:
+            pending = await db.get(PendingEvent, token)
+            pending.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+            await db.commit()
+
+        resp = await client.get(f"/pay?token={token}")
+        assert resp.status_code == 404
+        assert "expired" in resp.json().get("detail", "").lower() or "not found" in (
+            resp.json().get("detail", "").lower()
+        )
