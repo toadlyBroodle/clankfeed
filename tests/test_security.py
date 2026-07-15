@@ -1522,3 +1522,106 @@ class TestCspM4:
         p = _Attr()
         p.feed(fragment)
         assert p.name == name, f"apostrophe lost in data-name: {p.name!r}"
+
+
+# ---------------------------------------------------------------------------
+# S-L2: Sanitize error details (no internals in 4xx/5xx bodies)
+# ---------------------------------------------------------------------------
+
+class TestErrorSanitizeL2:
+    """L2: 5xx (and unhandled) responses must not echo exception/SQL/path internals."""
+
+    _LEAK = (
+        "SQLAlchemy OperationalError: /home/rob/Dev/clankfeed/db/relay.db locked"
+    )
+
+    @pytest.mark.asyncio
+    async def test_l2_http_500_leaky_detail_sanitized(self, client):
+        """HTTPException(500, detail=<internals>) must not return the leaky detail."""
+        from fastapi import HTTPException
+        from fastapi.routing import APIRoute
+
+        from app.main import app
+
+        async def leaky_health():
+            raise HTTPException(status_code=500, detail=self._LEAK)
+
+        route = next(
+            r for r in app.routes
+            if isinstance(r, APIRoute) and r.path == "/health"
+        )
+        orig_ep, orig_call = route.endpoint, route.dependant.call
+        route.endpoint = leaky_health
+        route.dependant.call = leaky_health
+        try:
+            resp = await client.get("/health")
+            assert resp.status_code == 500
+            body = resp.text
+            assert self._LEAK not in body
+            assert "/home/rob" not in body
+            assert "SQLAlchemy" not in body
+            assert "relay.db" not in body
+            data = resp.json()
+            assert data.get("detail") == "Internal server error"
+        finally:
+            route.endpoint = orig_ep
+            route.dependant.call = orig_call
+
+    @pytest.mark.asyncio
+    async def test_l2_unhandled_exception_no_internals(self, client):
+        """Unhandled Exception → 500 JSON without exception message / paths."""
+        from fastapi.routing import APIRoute
+        from httpx import ASGITransport, AsyncClient
+
+        from app.main import app
+
+        async def boom_health():
+            raise RuntimeError("LEAKED_INTERNAL_/home/rob/secret.db traceback")
+
+        route = next(
+            r for r in app.routes
+            if isinstance(r, APIRoute) and r.path == "/health"
+        )
+        orig_ep, orig_call = route.endpoint, route.dependant.call
+        route.endpoint = boom_health
+        route.dependant.call = boom_health
+        try:
+            # Unhandled exceptions re-raise under default ASGITransport; disable that.
+            transport = ASGITransport(app=app, raise_app_exceptions=False)
+            async with AsyncClient(
+                transport=transport,
+                base_url="http://test",
+                headers={"X-Requested-With": "XMLHttpRequest"},
+            ) as c:
+                resp = await c.get("/health")
+            assert resp.status_code == 500
+            body = resp.text
+            assert "LEAKED_INTERNAL_" not in body
+            assert "/home/rob" not in body
+            assert "traceback" not in body.lower()
+            data = resp.json()
+            assert data.get("detail") == "Internal server error"
+        finally:
+            route.endpoint = orig_ep
+            route.dependant.call = orig_call
+
+    @pytest.mark.asyncio
+    async def test_l2_4xx_intentional_detail_preserved(self, client):
+        """Adversarial: intentional 4xx client messages must still reach the client."""
+        resp = await client.post(
+            "/api/v1/post",
+            json={},  # missing content
+        )
+        assert resp.status_code == 400
+        assert resp.json().get("detail") == "Content is required"
+
+    def test_l2_client_safe_detail_unit(self):
+        """Unit: 5xx strips internals; allowlisted 502 kept; 4xx passthrough."""
+        from app.main import client_safe_detail
+
+        assert client_safe_detail(500, self._LEAK) == "Internal server error"
+        assert client_safe_detail(502, "Payment service unavailable") == (
+            "Payment service unavailable"
+        )
+        assert client_safe_detail(400, "Content is required") == "Content is required"
+        assert client_safe_detail(500, None) == "Internal server error"

@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Depends
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -329,6 +329,51 @@ def _custom_openapi():
 app.openapi = _custom_openapi
 
 
+# SECURITY L2: client-facing error bodies must not echo exception/SQL/path internals.
+_GENERIC_5XX = "Internal server error"
+_SAFE_5XX_DETAILS = frozenset({
+    _GENERIC_5XX,
+    "Payment service unavailable",
+})
+
+
+def client_safe_detail(status_code: int, detail) -> str:
+    """Return a client-safe detail string for error responses.
+
+    4xx: pass through intentional validation messages.
+    5xx: allowlist only known public messages; everything else → generic.
+    """
+    if status_code < 500:
+        if detail is None or detail == "":
+            return "Bad request"
+        if isinstance(detail, str):
+            return detail
+        return str(detail)
+    if isinstance(detail, str) and detail in _SAFE_5XX_DETAILS:
+        return detail
+    return _GENERIC_5XX
+
+
+async def _http_exception_handler(request: Request, exc: HTTPException):
+    """Sanitize HTTPException details (esp. 5xx) before returning to clients."""
+    detail = client_safe_detail(exc.status_code, exc.detail)
+    headers = dict(exc.headers) if exc.headers else None
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": detail},
+        headers=headers,
+    )
+
+
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    """Log unhandled errors; never return traceback or exception text to clients."""
+    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": _GENERIC_5XX},
+    )
+
+
 async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
     """Return 429 with Retry-After header on rate limit breach."""
     retry_after = 60
@@ -339,13 +384,16 @@ async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
         retry_after = 60
     elif "hour" in detail:
         retry_after = 3600
+    # L2: do not echo slowapi's raw detail string to clients
     return JSONResponse(
         status_code=429,
-        content={"detail": f"Rate limit exceeded: {detail}"},
+        content={"detail": "Rate limit exceeded"},
         headers={"Retry-After": str(retry_after)},
     )
 
 
+app.add_exception_handler(HTTPException, _http_exception_handler)
+app.add_exception_handler(Exception, _unhandled_exception_handler)
 app.add_exception_handler(RateLimitExceeded, _rate_limit_handler)
 app.add_middleware(OriginCheckMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
