@@ -1,4 +1,4 @@
-"""6.13–6.16: Playwright runtime coverage for CSP M4 (no script-src unsafe-inline).
+"""6.13–6.17: Playwright runtime coverage for CSP M4 (no script-src unsafe-inline).
 
 TestCspM4 in test_security.py is ASGI/source-only. These drive a real browser under
 the live CSP header and assert:
@@ -6,6 +6,7 @@ the live CSP header and assert:
 - 6.14: organic post→402→showPaymentWidget (Lightning/Tempo tabs + cancel) under CSP
 - 6.15: upvote/downvote/cancel-vote/toggle-replies + multi-note cardinality under CSP
 - 6.16: profile deposit→402→showPaymentWidget under live CSP
+- 6.17: empty-feed zero-row (#empty-feed visible, zero .note-card) under live CSP
 """
 
 from __future__ import annotations
@@ -258,6 +259,116 @@ async def test_m4_csp_zero_script_src_violations_and_data_action(live_server):
         assert csp_violations, (
             "expected CSP console violation after adversarial inline script inject; "
             "collector may be broken"
+        )
+
+        await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_m4_empty_feed_zero_row_under_csp(live_server):
+    """6.17: empty DB → #empty-feed visible, zero .note-card, clean CSP console.
+
+    6.15 only covers the multi-note (≥2) end under live CSP. UI3.6 covers empty
+    DOM without CSP script-src collection. This closes the zero-row CSP path.
+    Avoid page.wait_for_function — CSP script-src lacks unsafe-eval.
+    """
+    playwright = pytest.importorskip("playwright.async_api")
+    async_playwright = playwright.async_playwright
+
+    base = live_server["base"]
+    # Confirm DB is empty (no seed) — adversarial if prior test pollution
+    with httpx.Client(base_url=base, timeout=10.0) as c:
+        events = c.get("/api/v1/events?kinds=1&origin=clankfeed").json()["events"]
+        assert events == [], f"expected empty DB, got {len(events)} events"
+
+    csp_violations: list[str] = []
+
+    async def _empty_visible(page) -> bool:
+        loc = page.locator("#empty-feed")
+        if await loc.count() != 1:
+            return False
+        return await loc.is_visible()
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+
+        def _on_console(msg):
+            text = msg.text
+            if _is_csp_script_src_violation(text):
+                csp_violations.append(text)
+
+        page.on("console", _on_console)
+
+        await page.goto(base, wait_until="domcontentloaded", timeout=30_000)
+        await page.wait_for_selector("#feed-clankfeed", timeout=10_000)
+
+        for _ in range(100):
+            if (
+                await _empty_visible(page)
+                and await page.locator("#notes-feed .note-card").count() == 0
+            ):
+                break
+            await page.wait_for_timeout(100)
+        else:
+            raise AssertionError(
+                "#empty-feed not visible after empty clankfeed load under CSP "
+                f"(count={await page.locator('#empty-feed').count()}, "
+                f"cards={await page.locator('#notes-feed .note-card').count()})"
+            )
+
+        # Let deferred scripts settle, then assert clean CSP
+        await page.wait_for_timeout(1200)
+        assert not csp_violations, (
+            f"CSP script-src violations on empty /: {csp_violations}"
+        )
+
+        empty = page.locator("#empty-feed")
+        assert await empty.count() == 1
+        assert await empty.is_visible()
+        text = (await empty.inner_text()).strip()
+        assert "No notes yet" in text or "first to post" in text.lower()
+        assert await page.locator(".note-card").count() == 0
+        assert await page.locator("#notes-feed .note-card").count() == 0
+
+        # Adversarial: seed one local note + reload → empty-feed hides, ≥1 card,
+        # still zero new script-src violations (nonempty end under same CSP path)
+        with httpx.Client(
+            base_url=base,
+            timeout=10.0,
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        ) as c:
+            note_id = c.post(
+                "/api/v1/post", json={"content": "csp-m4-empty-then-one"}
+            ).json()["event"]["id"]
+
+        csp_violations.clear()
+        await page.goto(base, wait_until="domcontentloaded", timeout=30_000)
+        await page.wait_for_selector(f"#note-{note_id}", timeout=15_000)
+        await page.wait_for_timeout(800)
+
+        assert await page.locator("#empty-feed").is_hidden(), (
+            "nonempty feed must hide #empty-feed under CSP"
+        )
+        assert await page.locator(".note-card").count() >= 1
+        assert not csp_violations, (
+            f"CSP script-src violations on nonempty reload: {csp_violations}"
+        )
+
+        # Adversarial: inline script still blocked (collector live on this page)
+        csp_violations.clear()
+        await page.evaluate(
+            """() => {
+              const s = document.createElement('script');
+              s.textContent = 'window.__cspM4EmptyProbe = 1';
+              document.body.appendChild(s);
+            }"""
+        )
+        await page.wait_for_timeout(400)
+        probe = await page.evaluate("() => window.__cspM4EmptyProbe")
+        assert probe is None, "inline script executed despite CSP"
+        assert csp_violations, (
+            "expected CSP console violation after adversarial inline script inject"
         )
 
         await browser.close()
