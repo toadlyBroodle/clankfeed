@@ -1306,3 +1306,91 @@ class TestReplyCountsM2a:
         gate_pos = body.index("_EVENT_ID_RE.fullmatch")
         contains_pos = body.index("tags.contains")
         assert gate_pos < contains_pos
+
+
+# ---------------------------------------------------------------------------
+# S-M5: Per-connection WebSocket message rate limiting
+# ---------------------------------------------------------------------------
+
+class TestWsMsgRateLimitM5:
+    """M5: a single WS connection may not flood messages; abusers are disconnected."""
+
+    def test_m5_connection_allows_under_limit(self, monkeypatch):
+        from app import config
+        from app.relay import Connection
+
+        monkeypatch.setattr(config, "WS_MSG_RATE_LIMIT", 5)
+        monkeypatch.setattr(config, "WS_MSG_RATE_WINDOW", 1.0)
+        conn = Connection(ws=None)
+        t0 = 1000.0
+        for i in range(5):
+            assert conn.allow_message(now=t0 + i * 0.01) is True
+
+    def test_m5_connection_rejects_over_limit(self, monkeypatch):
+        from app import config
+        from app.relay import Connection
+
+        monkeypatch.setattr(config, "WS_MSG_RATE_LIMIT", 5)
+        monkeypatch.setattr(config, "WS_MSG_RATE_WINDOW", 1.0)
+        conn = Connection(ws=None)
+        t0 = 1000.0
+        for i in range(5):
+            assert conn.allow_message(now=t0 + i * 0.01) is True
+        assert conn.allow_message(now=t0 + 0.05) is False
+
+    def test_m5_window_expiry_resets_budget(self, monkeypatch):
+        from app import config
+        from app.relay import Connection
+
+        monkeypatch.setattr(config, "WS_MSG_RATE_LIMIT", 3)
+        monkeypatch.setattr(config, "WS_MSG_RATE_WINDOW", 1.0)
+        conn = Connection(ws=None)
+        t0 = 1000.0
+        for i in range(3):
+            assert conn.allow_message(now=t0) is True
+        assert conn.allow_message(now=t0 + 0.5) is False
+        # After window elapses, budget recovers
+        assert conn.allow_message(now=t0 + 1.01) is True
+
+    def test_m5_flood_disconnects_websocket(self, client, monkeypatch):
+        """Exceeding the per-connection limit closes the socket (policy violation)."""
+        from starlette.testclient import TestClient
+        from starlette.websockets import WebSocketDisconnect
+        from app import config
+        from app.main import app
+
+        monkeypatch.setattr(config, "WS_MSG_RATE_LIMIT", 5)
+        monkeypatch.setattr(config, "WS_MSG_RATE_WINDOW", 1.0)
+
+        with TestClient(app) as tc:
+            with tc.websocket_connect("/") as ws:
+                ws.receive_json()  # AUTH challenge
+                disconnected = False
+                close_code = None
+                for i in range(20):
+                    try:
+                        ws.send_json(["REQ", f"m5-{i}", {"kinds": [1], "limit": 1}])
+                        # Drain until EOSE (or CLOSED); do not block forever after EOSE
+                        while True:
+                            msg = ws.receive_json()
+                            if msg[0] in ("EOSE", "CLOSED"):
+                                break
+                    except WebSocketDisconnect as e:
+                        disconnected = True
+                        close_code = getattr(e, "code", None)
+                        break
+                assert disconnected, "abusive connection must be disconnected"
+                assert i >= 5, f"should disconnect after limit, got i={i}"
+                if close_code is not None:
+                    assert close_code == 1008
+
+    def test_m5_source_checks_rate_in_ws_loop(self):
+        """websocket_relay must call allow_message (or equivalent) before handle_message."""
+        src = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text()
+        start = src.index("async def websocket_relay")
+        end = src.index("\n@", start + 1) if "\n@" in src[start:] else len(src)
+        # Find end of function more reliably
+        body = src[start:start + 800]
+        assert "allow_message" in body
+        assert "handle_message" in body
+        assert body.index("allow_message") < body.index("handle_message")

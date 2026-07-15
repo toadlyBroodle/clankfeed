@@ -4,6 +4,8 @@ import json
 import logging
 import re
 import secrets
+import time
+from collections import deque
 from datetime import datetime, timezone, timedelta
 
 from fastapi import WebSocket
@@ -27,6 +29,7 @@ from app.config import (
     ZAP_EVENT_KINDS,
     MAX_ZAP_TAG_VALUE_LENGTH,
 )
+from app import config as _cfg
 from app.models import NostrEvent, PendingEvent, Vote
 from app.nostr import validate_event, verify_event_id, verify_signature
 from app.zaps import (
@@ -46,6 +49,17 @@ class Connection:
         self.subscriptions: dict[str, list[dict]] = {}  # sub_id -> [filter, ...]
         self.challenge: str = secrets.token_hex(16)  # NIP-42 auth challenge
         self.authed_pubkeys: set[str] = set()  # pubkeys authenticated via NIP-42
+        self._msg_times: deque[float] = deque()  # SECURITY M5 sliding window
+
+    def allow_message(self, now: float | None = None) -> bool:
+        """Record an inbound message; return False if over WS_MSG_RATE_LIMIT in window."""
+        t = time.monotonic() if now is None else now
+        while self._msg_times and t - self._msg_times[0] >= _cfg.WS_MSG_RATE_WINDOW:
+            self._msg_times.popleft()
+        if len(self._msg_times) >= _cfg.WS_MSG_RATE_LIMIT:
+            return False
+        self._msg_times.append(t)
+        return True
 
     async def send(self, msg: list):
         await self.ws.send_text(json.dumps(msg))

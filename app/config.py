@@ -81,6 +81,9 @@ RATE_PAY = "30/minute"
 RATE_PAY_STATUS = "30/minute"
 RATE_POST_CONFIRM = "10/minute"
 RATE_EVENTS_READ = "30/minute"
+# SECURITY M5: per-connection WebSocket inbound message rate (sliding window)
+WS_MSG_RATE_LIMIT = 30  # max messages per window
+WS_MSG_RATE_WINDOW = 1.0  # seconds
 
 # NIP-98 HTTP Auth
 NIP98_TIME_WINDOW = 60  # seconds of clock skew tolerance

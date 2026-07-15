@@ -465,6 +465,10 @@ async def websocket_relay(ws: WebSocket):
     try:
         while True:
             raw = await ws.receive_text()
+            # SECURITY M5: per-connection inbound message rate limit
+            if not conn.allow_message():
+                await ws.close(code=1008, reason="rate limit exceeded")
+                break
             async with async_session() as db:
                 await handle_message(conn, raw, db)
     except WebSocketDisconnect:
