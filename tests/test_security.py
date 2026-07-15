@@ -1052,3 +1052,71 @@ class TestVoteFloorM1:
         assert data["new_sats_ext"] == 0
         assert data["new_sats_clank"] >= 0
         assert data["new_sats_ext"] >= 0
+
+    @pytest.mark.asyncio
+    async def test_m1a_confirm_vote_overshoot_floors_at_zero(self, client):
+        """S-M1a: paid POST .../vote/confirm must floor overshoot downvote at 0.
+
+        Free + credits paths are covered elsewhere; this hits confirm_vote so a
+        re-inline of unfloored math on the paid path cannot ship undetected.
+        """
+        from datetime import datetime, timedelta
+
+        from app.database import async_session
+        from app.models import NostrEvent, PendingEvent
+
+        resp = await client.post("/api/v1/post", json={
+            "content": "m1a confirm overshoot", "amount_sats": 21,
+        })
+        assert resp.status_code == 200
+        eid = resp.json()["event"]["id"]
+
+        payment_hash = "ab" * 32
+        token = "cd" * 32
+        vote_data = {
+            "vote_event_id": eid,
+            "direction": -1,
+            "amount_sats": 500,
+            "amount_usd": "0.01",
+        }
+
+        async with async_session() as db:
+            row = await db.get(NostrEvent, eid)
+            row.sats_ext = 10
+            db.add(PendingEvent(
+                token=token,
+                event_json=json.dumps(vote_data),
+                payment_hash=payment_hash,
+                amount_sats=500,
+                amount_usd="0.01",
+                created_at=datetime.utcnow(),
+                expires_at=datetime.utcnow() + timedelta(minutes=10),
+            ))
+            await db.commit()
+
+        with (
+            patch("app.api_v1.check_payment_status", new_callable=AsyncMock, return_value=True),
+            patch("app.api_v1.check_and_consume_payment", new_callable=AsyncMock, return_value=True),
+        ):
+            resp = await client.post(
+                f"/api/v1/events/{eid}/vote/confirm",
+                json={
+                    "token": token,
+                    "method": "lightning",
+                    "payment_hash": payment_hash,
+                },
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["voted"] is True
+        assert data["direction"] == -1
+        assert data["new_sats_clank"] == 0  # 21 - 500 floored (not -479)
+        assert data["new_sats_ext"] == 0    # 10 - 500 floored (not -490)
+        assert data["new_sats_clank"] >= 0
+        assert data["new_sats_ext"] >= 0
+
+        async with async_session() as db:
+            row = await db.get(NostrEvent, eid)
+            assert row.sats_clank == 0
+            assert (row.sats_ext or 0) == 0
