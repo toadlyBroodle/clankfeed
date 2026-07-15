@@ -122,7 +122,7 @@ Copy `.env.example` to `.env` (or set environment variables):
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `AUTH_ROOT_KEY` | Yes | HMAC secret for payment challenges. Set to `test-mode` to disable payments. |
+| `AUTH_ROOT_KEY` | Yes | HMAC secret for MPP challenges and L402 macaroon root. Set to `test-mode` to disable payments. |
 | `RELAY_PRIVATE_KEY` | Yes | 64-char hex secp256k1 private key for relay-signed events |
 | `PAYMENT_URL` | For Lightning | LNBits instance URL |
 | `PAYMENT_KEY` | For Lightning | LNBits API key |

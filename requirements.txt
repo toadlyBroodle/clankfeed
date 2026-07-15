@@ -8,6 +8,7 @@ httpx
 coincurve
 slowapi
 cryptography
+pymacaroons
 pytest
 pytest-asyncio
 playwright>=1.49.0
