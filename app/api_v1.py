@@ -644,16 +644,29 @@ async def reply_counts(request: Request, db: AsyncSession = Depends(get_db)):
     if not isinstance(event_ids, list) or len(event_ids) > 200:
         return JSONResponse(status_code=400, content={"detail": "event_ids must be a list (max 200)"})
 
-    from sqlalchemy import select, func, and_
-    counts = {}
-    for eid in event_ids:
-        stmt = select(func.count()).select_from(NostrEvent).where(
-            and_(NostrEvent.kind == 1, NostrEvent.tags.contains(f'"e", "{eid}"'))
+    # Dedupe while preserving order; empty batch → no SQL
+    unique_ids = list(dict.fromkeys(eid for eid in event_ids if isinstance(eid, str) and eid))
+    if not unique_ids:
+        return {"counts": {}}
+
+    from sqlalchemy import select, func, and_, or_, case
+
+    # One SELECT with CASE + GROUP BY (was N COUNT queries — SECURITY M2)
+    parent_case = case(
+        *[(NostrEvent.tags.contains(f'"e", "{eid}"'), eid) for eid in unique_ids],
+    )
+    stmt = (
+        select(parent_case.label("parent_id"), func.count().label("cnt"))
+        .where(
+            and_(
+                NostrEvent.kind == 1,
+                or_(*[NostrEvent.tags.contains(f'"e", "{eid}"') for eid in unique_ids]),
+            )
         )
-        result = await db.execute(stmt)
-        c = result.scalar()
-        if c:
-            counts[eid] = c
+        .group_by(parent_case)
+    )
+    result = await db.execute(stmt)
+    counts = {row.parent_id: row.cnt for row in result if row.parent_id and row.cnt}
     return {"counts": counts}
 
 

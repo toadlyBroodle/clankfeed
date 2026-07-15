@@ -1120,3 +1120,111 @@ class TestVoteFloorM1:
             row = await db.get(NostrEvent, eid)
             assert row.sats_clank == 0
             assert (row.sats_ext or 0) == 0
+
+
+# ---------------------------------------------------------------------------
+# S-M2: reply-counts must be one batched query (not N+1)
+# ---------------------------------------------------------------------------
+
+class TestReplyCountsM2:
+    """M2: POST /events/reply-counts must not issue one SQL query per event_id."""
+
+    @pytest.mark.asyncio
+    async def test_m2_counts_match_replies(self, client):
+        """Functional: batch counts equal per-parent reply totals; zeros omitted."""
+        parents = []
+        for i in range(3):
+            resp = await client.post("/api/v1/post", json={"content": f"m2 parent {i}"})
+            assert resp.status_code == 200
+            parents.append(resp.json()["event"]["id"])
+
+        for i in range(2):
+            r = await client.post("/api/v1/post", json={
+                "content": f"reply to p0 #{i}", "reply_to": parents[0],
+            })
+            assert r.status_code == 200
+        r = await client.post("/api/v1/post", json={
+            "content": "reply to p1 #0", "reply_to": parents[1],
+        })
+        assert r.status_code == 200
+        # parents[2] has zero replies
+
+        orphan = "aa" * 32  # valid hex, no replies
+        resp = await client.post(
+            "/api/v1/events/reply-counts",
+            json={"event_ids": parents + [orphan]},
+        )
+        assert resp.status_code == 200
+        counts = resp.json()["counts"]
+        assert counts[parents[0]] == 2
+        assert counts[parents[1]] == 1
+        assert parents[2] not in counts
+        assert orphan not in counts
+
+    @pytest.mark.asyncio
+    async def test_m2_single_sql_execute(self, client):
+        """Adversarial DoS guard: N event_ids must not yield N SQL executes."""
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        parents = []
+        for i in range(5):
+            resp = await client.post("/api/v1/post", json={"content": f"m2 q parent {i}"})
+            assert resp.status_code == 200
+            pid = resp.json()["event"]["id"]
+            parents.append(pid)
+            await client.post("/api/v1/post", json={
+                "content": f"reply {i}", "reply_to": pid,
+            })
+
+        execute_calls = {"n": 0}
+        orig_execute = AsyncSession.execute
+
+        async def counting_execute(self, *args, **kwargs):
+            execute_calls["n"] += 1
+            return await orig_execute(self, *args, **kwargs)
+
+        with patch.object(AsyncSession, "execute", counting_execute):
+            resp = await client.post(
+                "/api/v1/events/reply-counts",
+                json={"event_ids": parents},
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["counts"][parents[0]] == 1
+        # Pre-fix: 5 queries (N+1). Post-fix: exactly one SELECT.
+        assert execute_calls["n"] == 1, (
+            f"expected 1 SQL execute for batch reply-counts, got {execute_calls['n']}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_m2_rejects_over_200(self, client):
+        ids = [f"{i:064x}" for i in range(201)]
+        resp = await client.post(
+            "/api/v1/events/reply-counts",
+            json={"event_ids": ids},
+        )
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_m2_rejects_non_list(self, client):
+        resp = await client.post(
+            "/api/v1/events/reply-counts",
+            json={"event_ids": "not-a-list"},
+        )
+        assert resp.status_code == 400
+
+    def test_m2_source_uses_group_by_or_single_select(self):
+        """Source must batch (GROUP BY / single select), not per-id execute loop."""
+        src = (Path(__file__).resolve().parents[1] / "app" / "api_v1.py").read_text()
+        # Locate reply_counts handler body (until next route decorator)
+        start = src.index("async def reply_counts")
+        end = src.index("@router.", start + 1)
+        body = src[start:end]
+        assert "for eid in event_ids:" not in body or "db.execute" not in body.split("for eid in event_ids:")[1].split("\n    return")[0]
+        # Prefer explicit batch markers
+        assert (
+            "group_by" in body.lower()
+            or "GROUP BY" in body
+            or "or_(" in body
+            or "func.sum" in body
+        )
