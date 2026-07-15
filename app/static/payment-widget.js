@@ -26,8 +26,8 @@ function _ensureWidgetDOM() {
       <button class="text-xs px-2 py-1 rounded bg-alt" id="pw-cancel-btn">Cancel</button>
     </div>
     <div id="pw-tabs" class="flex gap-2 mb-3 text-xs">
-      <button id="pw-tab-ln" class="px-3 py-1 rounded bg-primary" onclick="_pwSwitchTab('lightning')">Lightning</button>
-      <button id="pw-tab-tempo" class="hidden px-3 py-1 rounded bg-alt" onclick="_pwSwitchTab('tempo')">Tempo (USD)</button>
+      <button id="pw-tab-ln" class="px-3 py-1 rounded bg-primary">Lightning</button>
+      <button id="pw-tab-tempo" class="hidden px-3 py-1 rounded bg-alt">Tempo (USD)</button>
     </div>
     <div id="pw-lightning">
       <div class="flex gap-4 items-start">
@@ -62,6 +62,8 @@ function _ensureWidgetDOM() {
     </div>
   `;
   document.body.appendChild(div);  // temporary; moved by showPaymentWidget
+  document.getElementById('pw-tab-ln').addEventListener('click', () => _pwSwitchTab('lightning'));
+  document.getElementById('pw-tab-tempo').addEventListener('click', () => _pwSwitchTab('tempo'));
 }
 
 function showPaymentWidget(data, onConfirm, onCancel, anchorEl) {

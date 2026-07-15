@@ -105,10 +105,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
-        # 'unsafe-inline' required for inline <script> in index.html and Tailwind CDN.
+        # script-src: no 'unsafe-inline' (M4) — page JS is external; style-src keeps
+        # 'unsafe-inline' for Tailwind CDN + small inline style attrs.
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdn.jsdelivr.net https://esm.sh; "
+            "script-src 'self' https://cdn.tailwindcss.com https://cdn.jsdelivr.net https://esm.sh; "
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' https: data:; "
             "connect-src 'self' wss: ws: https://esm.sh; "

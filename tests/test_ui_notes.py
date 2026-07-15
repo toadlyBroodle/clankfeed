@@ -33,7 +33,7 @@ class TestNoteContentOverflowUI1:
         )
 
     def test_index_renderNoteCard_uses_note_content_class(self):
-        index = (_STATIC / "index.html").read_text()
+        index = ((_STATIC / "index.js").read_text() + "\n" + (_STATIC / "index.html").read_text())
         assert "function renderNoteCard" in index
         fn = index.split("function renderNoteCard", 1)[1].split("\nfunction ", 1)[0]
         assert "note-content" in fn
@@ -41,7 +41,7 @@ class TestNoteContentOverflowUI1:
         assert "note-content" in fn and ("n.content" in fn or "${esc(n.content)}" in fn)
 
     def test_profile_notes_use_note_content_class(self):
-        profile = (_STATIC / "profile.html").read_text()
+        profile = ((_STATIC / "profile.js").read_text() + "\n" + (_STATIC / "profile.html").read_text())
         assert "note-content" in profile
         assert "whitespace-pre-wrap" in profile or "note-content" in profile
 
@@ -50,13 +50,13 @@ class TestSatsExtDisplayUI2:
     """Note cards must show sats_ext (external zaps) alongside sats_clank."""
 
     def test_index_renderNoteCard_reads_sats_ext(self):
-        index = (_STATIC / "index.html").read_text()
+        index = ((_STATIC / "index.js").read_text() + "\n" + (_STATIC / "index.html").read_text())
         fn = index.split("function renderNoteCard", 1)[1].split("\nfunction ", 1)[0]
         assert "sats_ext" in fn
         assert "sats_clank" in fn
 
     def test_index_renderNoteCard_renders_both_tallies(self):
-        index = (_STATIC / "index.html").read_text()
+        index = ((_STATIC / "index.js").read_text() + "\n" + (_STATIC / "index.html").read_text())
         fn = index.split("function renderNoteCard", 1)[1].split("\nfunction ", 1)[0]
         # Both values must appear in the card HTML (vote column or adjacent)
         assert "sats_ext" in fn
@@ -65,19 +65,19 @@ class TestSatsExtDisplayUI2:
         assert "ext-" in fn or "sats-ext-" in fn or "zap-" in fn
 
     def test_voteSuccess_updates_sats_ext(self):
-        index = (_STATIC / "index.html").read_text()
+        index = ((_STATIC / "index.js").read_text() + "\n" + (_STATIC / "index.html").read_text())
         assert "function voteSuccess" in index
         fn = index.split("function voteSuccess", 1)[1].split("\nfunction ", 1)[0]
         assert "sats_ext" in fn or "newSatsExt" in fn or "new_sats_ext" in fn
 
     def test_vote_handlers_pass_new_sats_ext(self):
-        index = (_STATIC / "index.html").read_text()
+        index = ((_STATIC / "index.js").read_text() + "\n" + (_STATIC / "index.html").read_text())
         assert "new_sats_ext" in index
         # credit path + confirm path both forward ext tally
         assert "data.new_sats_ext" in index or "d.new_sats_ext" in index
 
     def test_profile_notes_show_sats_ext(self):
-        profile = (_STATIC / "profile.html").read_text()
+        profile = ((_STATIC / "profile.js").read_text() + "\n" + (_STATIC / "profile.html").read_text())
         assert "sats_ext" in profile
         assert "sats_clank" in profile
 
@@ -86,20 +86,20 @@ class TestTwoFeedsUI3:
     """UI-3: clankfeed tab (origin=clankfeed, sats_clank) + external tab (all, sats_ext)."""
 
     def test_index_has_feed_tabs(self):
-        index = (_STATIC / "index.html").read_text()
+        index = ((_STATIC / "index.js").read_text() + "\n" + (_STATIC / "index.html").read_text())
         assert 'id="feed-clankfeed"' in index or "feed-clankfeed" in index
         assert 'id="feed-external"' in index or "feed-external" in index
         assert "setFeed" in index or "currentFeed" in index
 
     def test_clankfeed_tab_queries_origin_clankfeed(self):
-        index = (_STATIC / "index.html").read_text()
+        index = ((_STATIC / "index.js").read_text() + "\n" + (_STATIC / "index.html").read_text())
         # REST fetch must pass origin=clankfeed for the clankfeed feed
         assert "origin=clankfeed" in index
         # Default ranking for that tab uses clank/value sort
         assert "sort=clank" in index or "sort=value" in index or "currentSort" in index
 
     def test_external_tab_queries_all_ranked_by_ext(self):
-        index = (_STATIC / "index.html").read_text()
+        index = ((_STATIC / "index.js").read_text() + "\n" + (_STATIC / "index.html").read_text())
         # External tab shows everything ranked by sats_ext
         assert "sort=ext" in index or "sort=zaps" in index
         # Must not force origin=external-only for the "everything" tab
@@ -114,7 +114,7 @@ class TestTwoFeedsUI3:
         assert "ext" in fn or "zaps" in fn or "external" in fn
 
     def test_feed_fetch_uses_origin_param(self):
-        index = (_STATIC / "index.html").read_text()
+        index = ((_STATIC / "index.js").read_text() + "\n" + (_STATIC / "index.html").read_text())
         assert "origin=" in index
         assert "clankfeed" in index
 
@@ -123,7 +123,7 @@ class TestFeed1HideZeroSatsExternal:
     """FEED-1: web client must not render origin=external notes with 0 sats."""
 
     def test_addNote_skips_zero_sats_external(self):
-        index = (_STATIC / "index.html").read_text()
+        index = ((_STATIC / "index.js").read_text() + "\n" + (_STATIC / "index.html").read_text())
         fn = index.split("function addNote", 1)[1].split("\nfunction ", 1)[0]
         assert "external" in fn
         # Must gate on sats_ext / sats_clank (or both zero) for external origin
@@ -136,7 +136,7 @@ class TestEmptyFeedUI36:
 
     def test_empty_feed_is_sibling_not_child_of_notes_feed(self):
         """innerHTML wipe of #notes-feed must not destroy #empty-feed."""
-        index = (_STATIC / "index.html").read_text()
+        index = ((_STATIC / "index.js").read_text() + "\n" + (_STATIC / "index.html").read_text())
         assert 'id="notes-feed"' in index
         assert 'id="empty-feed"' in index
         # Empty state must sit outside the notes-feed container
@@ -161,7 +161,7 @@ class TestEmptyFeedUI36:
         assert 'id="empty-feed"' not in between[:first_close]
 
     def test_renderNotes_toggles_empty_visibility(self):
-        index = (_STATIC / "index.html").read_text()
+        index = ((_STATIC / "index.js").read_text() + "\n" + (_STATIC / "index.html").read_text())
         fn = index.split("function renderNotes", 1)[1].split("\nfunction ", 1)[0]
         assert "empty-feed" in fn or "empty" in fn
         # Must show empty state when no notes (not only hide when non-empty)

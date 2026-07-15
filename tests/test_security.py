@@ -159,7 +159,7 @@ class TestDOMXSSClient:
                     dyn not in chunk
                     for dyn in ("${data", "${bolt11", "${token", "${recipient")
                 )
-        index = (_STATIC / "index.html").read_text()
+        index = (_STATIC / "index.js").read_text()
         # showVotePayment must delegate to the safe widget, not build its own HTML
         assert "function showVotePayment" in index
         vote_fn = index.split("function showVotePayment", 1)[1].split("\nfunction ", 1)[0]
@@ -168,7 +168,7 @@ class TestDOMXSSClient:
 
     def test_m7_no_showApiKey_innerhtml_path(self):
         """S-M7: showApiKey must not exist; API keys must not be assigned via innerHTML."""
-        for path in _STATIC.glob("*.{html,js}"):
+        for path in list(_STATIC.glob("*.html")) + list(_STATIC.glob("*.js")):
             text = path.read_text()
             assert "function showApiKey" not in text, f"showApiKey still in {path.name}"
             assert "showApiKey(" not in text, f"showApiKey call in {path.name}"
@@ -180,24 +180,17 @@ class TestDOMXSSClient:
                         raise AssertionError(f"API key via innerHTML in {path.name}: {line}")
 
     def test_l4_onclick_handlers_use_jsstr_not_single_quote_interp(self):
-        """S-L4: dynamic onclick args must use jsStr/JSON.stringify, not '${...}'."""
-        index = (_STATIC / "index.html").read_text()
-        # Vulnerable patterns (single-quoted JS string interp inside double-quoted attr)
+        """S-L4 under M4: no dynamic onclick; data-action + esc() attrs (no quote interp)."""
+        index = (_STATIC / "index.js").read_text()
+        fn = index.split("function renderNoteCard", 1)[1].split("\nfunction ", 1)[0]
+        # Legacy vulnerable onclick patterns must stay gone
         assert "onclick=\"startReply('${n.id}', '${esc(displayName || pk)}')\"" not in index
         assert "onclick=\"startVote('${n.id}', 1)\"" not in index
-        assert "onclick=\"startVote('${n.id}', -1)\"" not in index
-        assert "onclick=\"toggleReplies('${n.id}')\"" not in index
-        assert "onclick=\"submitVote('${n.id}')\"" not in index
-        assert "onclick=\"cancelVote('${n.id}')\"" not in index
-        assert "onclick=\"scrollToNote('${parentId}')\"" not in index
-        # Handlers must go through jsStr(...) — do not lock a single-quoted attr form
-        # that truncates on apostrophes (see test_l4_html_attr_preserves_apostrophe_name).
-        assert "jsStr(n.id)" in index
-        assert "jsStr(displayName || pk)" in index
-        assert "jsStr(parentId)" in index
-        assert "startReply(${jsStr(" in index
-        assert "startVote(${jsStr(" in index
-        assert "toggleReplies(${jsStr(" in index
+        assert "onclick='" not in fn and 'onclick="' not in fn
+        # M4: delegated data-action handlers with HTML-escaped attrs
+        assert 'data-action="reply"' in fn
+        assert "data-name=" in fn
+        assert "esc(" in fn
 
     def test_l4_jsstr_helper_uses_json_stringify_and_html_attr_escape(self):
         """jsStr must JSON.stringify AND neutralize raw apostrophes for HTML attrs."""
@@ -896,13 +889,14 @@ class TestOriginCheckH5:
         auth_src = (Path(__file__).resolve().parents[1] / "app" / "static" / "nostr-auth.js").read_text()
         assert "X-Requested-With" in auth_src
         assert "function apiFetch" in auth_src
-        index_src = (Path(__file__).resolve().parents[1] / "app" / "static" / "index.html").read_text()
+        _st = Path(__file__).resolve().parents[1] / "app" / "static"
+        index_src = (_st / "index.js").read_text() + "\n" + (_st / "index.html").read_text()
         # Mutating POSTs that skip authFetch must use apiFetch (sets XRW)
         assert "apiFetch" in index_src
         assert "apiFetch('/api/post/confirm'" in index_src or 'apiFetch("/api/post/confirm"' in index_src
         assert "apiFetch(`/api/v1/events/${eventId}/vote/confirm`" in index_src
         # Profile paid-path POSTs (confirm + deposit) must use XRW wrappers (6.6)
-        profile_src = (Path(__file__).resolve().parents[1] / "app" / "static" / "profile.html").read_text()
+        profile_src = (_st / "profile.js").read_text() + "\n" + (_st / "profile.html").read_text()
         assert "apiFetch('/api/post/confirm'" in profile_src or 'apiFetch("/api/post/confirm"' in profile_src
         assert "authFetch('/api/v1/account/deposit'" in profile_src or 'authFetch("/api/v1/account/deposit"' in profile_src
         assert (
@@ -1394,3 +1388,137 @@ class TestWsMsgRateLimitM5:
         assert "allow_message" in body
         assert "handle_message" in body
         assert body.index("allow_message") < body.index("handle_message")
+
+
+# ---------------------------------------------------------------------------
+# S-M4: CSP script-src without unsafe-inline
+# ---------------------------------------------------------------------------
+
+class TestCspM4:
+    """M4: remove script-src 'unsafe-inline'; externalize page JS; no inline handlers."""
+
+    @pytest.mark.asyncio
+    async def test_m4_csp_script_src_has_no_unsafe_inline(self, client):
+        """CSP on HTML responses must not allow 'unsafe-inline' in script-src."""
+        resp = await client.get("/")
+        assert resp.status_code == 200
+        csp = resp.headers.get("content-security-policy", "")
+        assert "script-src" in csp
+        # Isolate script-src directive (CSP directives are ';'-separated)
+        script_src = ""
+        for part in csp.split(";"):
+            part = part.strip()
+            if part.startswith("script-src"):
+                script_src = part
+                break
+        assert script_src, f"no script-src in CSP: {csp!r}"
+        assert "'unsafe-inline'" not in script_src, (
+            f"script-src still allows unsafe-inline: {script_src!r}"
+        )
+        # 'self' + known CDNs remain
+        assert "'self'" in script_src
+        assert "cdn.tailwindcss.com" in script_src
+        assert "cdn.jsdelivr.net" in script_src
+        assert "esm.sh" in script_src
+
+    @pytest.mark.asyncio
+    async def test_m4_csp_still_on_api_and_profile(self, client):
+        """CSP applies site-wide; profile + health also lack script-src unsafe-inline."""
+        for path in ("/health", "/profile"):
+            resp = await client.get(path)
+            assert resp.status_code == 200
+            csp = resp.headers.get("content-security-policy", "")
+            script_src = next(
+                (p.strip() for p in csp.split(";") if p.strip().startswith("script-src")),
+                "",
+            )
+            assert script_src and "'unsafe-inline'" not in script_src, path
+
+    def test_m4_html_has_no_inline_script_bodies(self):
+        """index/profile HTML may only load scripts via src= (no inline bodies)."""
+        import re
+
+        for name in ("index.html", "profile.html"):
+            html = (_STATIC / name).read_text()
+            # Strip comments
+            html_nc = re.sub(r"<!--.*?-->", "", html, flags=re.DOTALL)
+            for m in re.finditer(r"<script\b([^>]*)>(.*?)</script>", html_nc, re.DOTALL | re.I):
+                attrs, body = m.group(1), m.group(2)
+                assert body.strip() == "", (
+                    f"{name}: inline script body not allowed under CSP without "
+                    f"unsafe-inline; attrs={attrs!r} body_preview={body.strip()[:80]!r}"
+                )
+                assert re.search(r"\bsrc\s*=", attrs, re.I), (
+                    f"{name}: script tag missing src= : {attrs!r}"
+                )
+
+    def test_m4_page_js_externalized(self):
+        """Page logic lives in external /static/*.js files referenced by HTML."""
+        for page, js_name in (("index.html", "index.js"), ("profile.html", "profile.js")):
+            html = (_STATIC / page).read_text()
+            assert (_STATIC / js_name).is_file(), f"missing {js_name}"
+            assert f"/static/{js_name}" in html, f"{page} must load /static/{js_name}"
+        # Shared bitcoin-connect / noble crypto module
+        assert (_STATIC / "bc-crypto.js").is_file()
+        for page in ("index.html", "profile.html"):
+            html = (_STATIC / page).read_text()
+            assert "/static/bc-crypto.js" in html
+
+    def test_m4_no_inline_event_handlers_in_templates(self):
+        """onclick/onerror/etc. are blocked without unsafe-inline — use data-action."""
+        import re
+
+        handler_re = re.compile(
+            # HTML attrs / template attrs — not JS property assigns like el.onclick =
+            r"(?<![\w.])on(?:click|error|load|submit|change|input|keyup|keydown)\s*=",
+            re.I,
+        )
+        paths = list(_STATIC.glob("*.html")) + list(_STATIC.glob("*.js"))
+        assert paths, "no static html/js to scan"
+        hits = []
+        for path in paths:
+            text = path.read_text()
+            for i, line in enumerate(text.splitlines(), 1):
+                stripped = line.strip()
+                if stripped.startswith("//") or stripped.startswith("*") or stripped.startswith("<!--"):
+                    continue
+                if handler_re.search(line):
+                    hits.append(f"{path.name}:{i}: {stripped[:100]}")
+        assert not hits, "inline event handlers forbidden under M4:\n" + "\n".join(hits[:20])
+
+    def test_m4_note_cards_use_data_action_not_onclick(self):
+        """Dynamic note UI must wire actions via data-* + delegation, not onclick."""
+        index_js = (_STATIC / "index.js").read_text()
+        assert "function renderNoteCard" in index_js
+        fn = index_js.split("function renderNoteCard", 1)[1].split("\nfunction ", 1)[0]
+        assert "onclick=" not in fn
+        assert "onerror=" not in fn
+        assert "data-action=" in fn or "data-action =" in fn
+        # Reply needs a name that may contain apostrophes — attr-escaped, not jsStr/onclick
+        assert "data-name=" in fn or "data-name =" in fn
+        assert "esc(" in fn  # HTML-escape attribute values
+
+    def test_m4_data_name_preserves_apostrophe_via_html_attr(self):
+        """Adversarial: O'Brien in data-name survives HTML parse (L4 goal under M4)."""
+        import html.parser
+
+        name = "O'Brien"
+        # Mimic esc() for text nodes / attrs (entities)
+        from html import escape as html_escape
+
+        escaped = html_escape(name, quote=True)
+        fragment = f'<button data-action="reply" data-name="{escaped}">reply</button>'
+
+        class _Attr(html.parser.HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.name = None
+
+            def handle_starttag(self, tag, attrs):
+                d = dict(attrs)
+                if "data-name" in d:
+                    self.name = d["data-name"]
+
+        p = _Attr()
+        p.feed(fragment)
+        assert p.name == name, f"apostrophe lost in data-name: {p.name!r}"

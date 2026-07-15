@@ -95,14 +95,14 @@ class TestAutolinkUI4Source:
         assert "function linkify" in js
 
     def test_index_renderNoteCard_uses_linkify_for_content(self):
-        index = (_STATIC / "index.html").read_text()
+        index = ((_STATIC / "index.js").read_text() + "\n" + (_STATIC / "index.html").read_text())
         fn = index.split("function renderNoteCard", 1)[1].split("\nfunction ", 1)[0]
         assert "linkify(" in fn
         # Must not dump raw esc(content) alone into the content paragraph
         assert "linkify(n.content)" in fn or "linkify(n.content ||" in fn
 
     def test_profile_notes_use_linkify(self):
-        profile = (_STATIC / "profile.html").read_text()
+        profile = ((_STATIC / "profile.js").read_text() + "\n" + (_STATIC / "profile.html").read_text())
         assert "linkify(" in profile
         assert "linkify(n.content)" in profile or "linkify(n.content ||" in profile
 
@@ -157,7 +157,7 @@ class TestHandlesUI6Source:
     """getDisplayName must prefer kind:0 name, then display_name, then nip05."""
 
     def test_getDisplayName_reads_display_name_and_nip05(self):
-        index = (_STATIC / "index.html").read_text()
+        index = ((_STATIC / "index.js").read_text() + "\n" + (_STATIC / "index.html").read_text())
         fn = index.split("function getDisplayName", 1)[1].split("\nfunction ", 1)[0]
         assert "display_name" in fn
         assert "nip05" in fn
@@ -636,27 +636,27 @@ class TestAvatarUI5Source:
     """UI-5 source contract: getAvatar reads kind:0 picture; renderNoteCard uses it."""
 
     def test_getAvatar_reads_picture(self):
-        index = (_STATIC / "index.html").read_text()
+        index = ((_STATIC / "index.js").read_text() + "\n" + (_STATIC / "index.html").read_text())
         fn = index.split("function getAvatar", 1)[1].split("\nfunction ", 1)[0]
         assert "picture" in fn
         assert "metadataCache" in fn
 
     def test_renderNoteCard_uses_getAvatar(self):
-        index = (_STATIC / "index.html").read_text()
+        index = ((_STATIC / "index.js").read_text() + "\n" + (_STATIC / "index.html").read_text())
         fn = index.split("function renderNoteCard", 1)[1].split("\nfunction ", 1)[0]
         assert "getAvatar(" in fn
         assert "img" in fn and "avatar" in fn
         assert "avatar-placeholder" in fn
 
     def test_profile_shows_picture_when_present(self):
-        profile = (_STATIC / "profile.html").read_text()
+        profile = ((_STATIC / "profile.js").read_text() + "\n" + (_STATIC / "profile.html").read_text())
         assert "meta.picture" in profile or "picture" in profile
         assert "prof-picture" in profile
         assert "pub-avatar" in profile
 
     def test_profile_no_picture_keeps_placeholder(self):
         """UI-5.1 source: else branch keeps #pub-avatar.avatar-placeholder."""
-        profile = (_STATIC / "profile.html").read_text()
+        profile = ((_STATIC / "profile.js").read_text() + "\n" + (_STATIC / "profile.html").read_text())
         # Public profile: picture → replace with img; else set initial on placeholder
         assert "pub-avatar" in profile
         assert "avatar-placeholder" in profile
