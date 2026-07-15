@@ -649,6 +649,13 @@ async def reply_counts(request: Request, db: AsyncSession = Depends(get_db)):
     if not unique_ids:
         return {"counts": {}}
 
+    # SECURITY M2a: exact 64-hex only — never pass LIKE wildcards into the query
+    if any(not _EVENT_ID_RE.fullmatch(eid) for eid in unique_ids):
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "each event_id must be 64 lowercase hex characters"},
+        )
+
     from sqlalchemy import select, func, and_, or_, case
 
     # One SELECT with CASE + GROUP BY (was N COUNT queries — SECURITY M2)

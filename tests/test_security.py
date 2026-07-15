@@ -1228,3 +1228,81 @@ class TestReplyCountsM2:
             or "or_(" in body
             or "func.sum" in body
         )
+
+
+# ---------------------------------------------------------------------------
+# S-M2a: reply-counts event_ids must be 64 hex before LIKE
+# ---------------------------------------------------------------------------
+
+class TestReplyCountsM2a:
+    """M2a: wildcards in event_ids must not reach tags.contains LIKE (same class as M3)."""
+
+    @pytest.mark.asyncio
+    async def test_m2a_percent_wildcard_rejected(self, client):
+        resp = await client.post(
+            "/api/v1/events/reply-counts",
+            json={"event_ids": ["%"]},
+        )
+        assert resp.status_code == 400
+        detail = resp.json().get("detail", "").lower()
+        assert "event" in detail or "hex" in detail or "id" in detail
+
+    @pytest.mark.asyncio
+    async def test_m2a_underscore_wildcard_rejected(self, client):
+        bad = "a" * 63 + "_"  # 64 chars but not hex
+        resp = await client.post(
+            "/api/v1/events/reply-counts",
+            json={"event_ids": [bad]},
+        )
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_m2a_mixed_valid_and_wildcard_rejected_no_sql(self, client):
+        """Any invalid id → 400 before SQL; LIKE must not see %/_."""
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        good = "ab" * 32
+        execute_calls = {"n": 0, "sql": []}
+        orig_execute = AsyncSession.execute
+
+        async def counting_execute(self, *args, **kwargs):
+            execute_calls["n"] += 1
+            execute_calls["sql"].append(str(args[0]) if args else "")
+            return await orig_execute(self, *args, **kwargs)
+
+        with patch.object(AsyncSession, "execute", counting_execute):
+            resp = await client.post(
+                "/api/v1/events/reply-counts",
+                json={"event_ids": [good, "%", "aa" * 32]},
+            )
+
+        assert resp.status_code == 400
+        assert execute_calls["n"] == 0, (
+            f"invalid event_ids must not reach SQL (got {execute_calls['n']} executes)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_m2a_valid_hex_still_ok(self, client):
+        parent_resp = await client.post("/api/v1/post", json={"content": "m2a parent"})
+        assert parent_resp.status_code == 200
+        parent = parent_resp.json()["event"]["id"]
+        await client.post("/api/v1/post", json={"content": "m2a reply", "reply_to": parent})
+
+        resp = await client.post(
+            "/api/v1/events/reply-counts",
+            json={"event_ids": [parent]},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["counts"][parent] == 1
+
+    def test_m2a_source_gates_with_event_id_re(self):
+        src = (Path(__file__).resolve().parents[1] / "app" / "api_v1.py").read_text()
+        start = src.index("async def reply_counts")
+        end = src.index("@router.", start + 1)
+        body = src[start:end]
+        assert "_EVENT_ID_RE.fullmatch" in body
+        assert "tags.contains" in body
+        # Gate must appear before any tags.contains construction
+        gate_pos = body.index("_EVENT_ID_RE.fullmatch")
+        contains_pos = body.index("tags.contains")
+        assert gate_pos < contains_pos
