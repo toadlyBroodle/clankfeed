@@ -1,9 +1,11 @@
-"""6.13 / 6.14: Playwright runtime coverage for CSP M4 (no script-src unsafe-inline).
+"""6.13–6.16: Playwright runtime coverage for CSP M4 (no script-src unsafe-inline).
 
 TestCspM4 in test_security.py is ASGI/source-only. These drive a real browser under
 the live CSP header and assert:
 - 6.13: zero CSP script-src console violations on / + /profile; data-action click fires
 - 6.14: organic post→402→showPaymentWidget (Lightning/Tempo tabs + cancel) under CSP
+- 6.15: upvote/downvote/cancel-vote/toggle-replies + multi-note cardinality under CSP
+- 6.16: profile deposit→402→showPaymentWidget under live CSP
 """
 
 from __future__ import annotations
@@ -108,18 +110,33 @@ def live_server(tmp_path):
 
 @pytest.mark.asyncio
 async def test_m4_csp_zero_script_src_violations_and_data_action(live_server):
-    """6.13: / + /profile load clean under CSP; note-card data-action still works."""
+    """6.13+6.15: / + /profile clean under CSP; all note-card data-actions fire.
+
+    6.15: seed ≥2 notes (one with a child), exercise upvote/downvote/cancel-vote/
+    toggle-replies + reply, assert multi-note cardinality and zero new script-src
+    violations after each action.
+    """
     playwright = pytest.importorskip("playwright.async_api")
     async_playwright = playwright.async_playwright
 
     base = live_server["base"]
 
-    # Seed a note so data-action controls exist on the feed
+    # Seed ≥2 notes; note_a gets a child for toggle-replies
     with httpx.Client(
         base_url=base, timeout=10.0, headers={"X-Requested-With": "XMLHttpRequest"}
     ) as c:
-        note = c.post("/api/v1/post", json={"content": "csp-m4-data-action-target"}).json()
-        note_id = note["event"]["id"]
+        note_a = c.post(
+            "/api/v1/post", json={"content": "csp-m4-parent-a"}
+        ).json()["event"]["id"]
+        note_b = c.post(
+            "/api/v1/post", json={"content": "csp-m4-sibling-b"}
+        ).json()["event"]["id"]
+        reply = c.post(
+            "/api/v1/post",
+            json={"content": "csp-m4-child-of-a", "reply_to": note_a},
+        ).json()["event"]["id"]
+        assert note_a != note_b
+        assert reply != note_a
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -133,26 +150,88 @@ async def test_m4_csp_zero_script_src_violations_and_data_action(live_server):
 
         page.on("console", _on_console)
 
-        # --- index: clean load + data-action click ---
+        def _new_csp_since(baseline: list[str]) -> list[str]:
+            return [v for v in csp_violations if v not in baseline]
+
+        # --- index: clean load + multi-note cardinality ---
         await page.goto(base, wait_until="domcontentloaded", timeout=30_000)
-        await page.wait_for_selector(f"#note-{note_id}", timeout=15_000)
-        # Let deferred scripts settle
-        await page.wait_for_timeout(800)
+        await page.wait_for_selector(f"#note-{note_a}", timeout=15_000)
+        await page.wait_for_selector(f"#note-{note_b}", timeout=15_000)
+        # Let deferred scripts + reply-count fetch settle
+        await page.wait_for_timeout(1200)
 
         clean_index = list(csp_violations)
         assert not clean_index, (
             f"CSP script-src violations on / before click: {clean_index}"
         )
 
-        # data-action="reply" must fire (delegation, not inline onclick)
-        await page.click(f'#note-{note_id} button[data-action="reply"]')
+        # Both top-level notes must expose the full data-action set
+        for nid in (note_a, note_b):
+            for action in ("upvote", "downvote", "reply", "toggle-replies"):
+                assert (
+                    await page.locator(
+                        f'#note-{nid} button[data-action="{action}"]'
+                    ).count()
+                    == 1
+                ), f"missing data-action={action} on note {nid[:8]}"
+
+        # --- upvote → vote-prompt.active + status ---
+        await page.click(f'#note-{note_a} button[data-action="upvote"]')
+        await page.wait_for_selector(
+            f"#vote-prompt-{note_a}.active", timeout=5_000
+        )
+        status = await page.locator(f"#vote-status-{note_a}").text_content()
+        assert status is not None and "Upvote" in status
+        assert not _new_csp_since(clean_index), (
+            f"CSP after upvote: {_new_csp_since(clean_index)}"
+        )
+
+        # --- cancel-vote → prompt inactive ---
+        await page.click(f'#note-{note_a} button[data-action="cancel-vote"]')
+        await page.wait_for_function(
+            f"() => !document.getElementById('vote-prompt-{note_a}')"
+            f".classList.contains('active')",
+            timeout=5_000,
+        )
+        assert not _new_csp_since(clean_index), (
+            f"CSP after cancel-vote: {_new_csp_since(clean_index)}"
+        )
+
+        # --- downvote on sibling note (multi-note cardinality) ---
+        await page.click(f'#note-{note_b} button[data-action="downvote"]')
+        await page.wait_for_selector(
+            f"#vote-prompt-{note_b}.active", timeout=5_000
+        )
+        status_b = await page.locator(f"#vote-status-{note_b}").text_content()
+        assert status_b is not None and "Downvote" in status_b
+        # note_a prompt must still be inactive (per-note state)
+        assert (
+            await page.locator(f"#vote-prompt-{note_a}.active").count() == 0
+        )
+        assert not _new_csp_since(clean_index), (
+            f"CSP after downvote: {_new_csp_since(clean_index)}"
+        )
+        await page.click(f'#note-{note_b} button[data-action="cancel-vote"]')
+
+        # --- toggle-replies on parent (child must appear) ---
+        await page.click(f'#note-{note_a} button[data-action="toggle-replies"]')
+        await page.wait_for_selector(
+            f"#replies-{note_a}:not(.hidden)", timeout=10_000
+        )
+        await page.wait_for_selector(
+            f"#replies-{note_a} #note-{reply}", timeout=10_000
+        )
+        assert not _new_csp_since(clean_index), (
+            f"CSP after toggle-replies: {_new_csp_since(clean_index)}"
+        )
+
+        # --- reply (6.13 baseline) still works ---
+        await page.click(f'#note-{note_b} button[data-action="reply"]')
         await page.wait_for_selector("#reply-context:not(.hidden)", timeout=5_000)
         ctx_name = await page.locator("#reply-context-name").text_content()
         assert ctx_name is not None and ctx_name.strip() != ""
-
-        after_click = [v for v in csp_violations if v not in clean_index]
-        assert not after_click, (
-            f"CSP script-src violations after data-action click: {after_click}"
+        assert not _new_csp_since(clean_index), (
+            f"CSP after reply: {_new_csp_since(clean_index)}"
         )
 
         # --- profile: clean load under same CSP ---
@@ -298,5 +377,130 @@ async def test_m4_organic_post_shows_payment_widget_under_csp(live_server):
         visible = await page.locator("#pw-widget:not(.hidden)").count()
         assert visible == 0, "widget opened without bolt11/tempo (empty 402)"
         assert hidden in (0, 1)  # 0 if never created, 1 if hidden
+
+        await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_m4_profile_deposit_shows_payment_widget_under_csp(live_server):
+    """6.16: route-mock profile deposit→402→showPaymentWidget under live CSP.
+
+    6.14 covers feed post only; startDeposit must open #pw-widget with
+    Lightning/Tempo tabs + cancel without script-src violations. Adversarial
+    empty-402 (token only, no bolt11/tempo methods) must not leave a usable
+    multi-method widget (tabs stay hidden / cancel still works).
+    """
+    playwright = pytest.importorskip("playwright.async_api")
+    async_playwright = playwright.async_playwright
+
+    base = live_server["base"]
+    pay_hash = "ef" * 32
+    fake_token = "dep-" + ("ab" * 16)
+    csp_violations: list[str] = []
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+
+        def _on_console(msg):
+            text = msg.text
+            if _is_csp_script_src_violation(text):
+                csp_violations.append(text)
+
+        page.on("console", _on_console)
+
+        async def _route_handler(route):
+            req = route.request
+            url = req.url
+            if (
+                req.method == "POST"
+                and "/api/v1/account/deposit" in url
+                and "/confirm" not in url
+            ):
+                tempo_recipient = "0x" + ("ab" * 20)
+                tempo_currency = "0x" + ("cd" * 20)
+                body = (
+                    '{"status":"payment_required","token":"%s",'
+                    '"deposit_amount_sats":5000,"methods":["lightning","tempo"],'
+                    '"bolt11":"lnbc1m4deptestinvoice","payment_hash":"%s",'
+                    '"lightning":{"bolt11":"lnbc1m4deptestinvoice",'
+                    '"payment_hash":"%s","amount_sats":5000,"expires_in":600},'
+                    '"tempo":{"amount_usd":"0.05","recipient":"%s",'
+                    '"currency":"%s","testnet":true}}'
+                ) % (fake_token, pay_hash, pay_hash, tempo_recipient, tempo_currency)
+                await route.fulfill(
+                    status=402,
+                    content_type="application/json",
+                    body=body,
+                )
+                return
+            await route.continue_()
+
+        await page.route("**/*", _route_handler)
+        await page.goto(f"{base}/profile", wait_until="domcontentloaded", timeout=30_000)
+        await page.wait_for_function(
+            "() => !!(window.__nostrCrypto && window.__nostrCrypto.getPublicKey)",
+            timeout=60_000,
+        )
+        await page.wait_for_selector("#view-login", timeout=10_000)
+        await page.click("text=Generate New Identity")
+        await page.wait_for_selector("#section-deposit", state="visible", timeout=15_000)
+        await page.wait_for_timeout(500)
+
+        assert not csp_violations, (
+            f"CSP script-src violations before deposit: {csp_violations}"
+        )
+
+        await page.fill("#deposit-amount", "5000")
+        await page.locator("#btn-deposit").click()
+
+        await page.wait_for_selector("#pw-widget:not(.hidden)", timeout=10_000)
+        assert await page.locator("#pw-tab-ln:not(.hidden)").count() == 1
+        assert await page.locator("#pw-tab-tempo:not(.hidden)").count() == 1
+        title = await page.locator("#pw-title").text_content()
+        assert title and "Deposit" in title
+
+        await page.click("#pw-tab-tempo")
+        await page.wait_for_selector("#pw-tempo:not(.hidden)", timeout=5_000)
+        assert await page.locator("#pw-lightning.hidden").count() == 1
+
+        await page.click("#pw-cancel-btn")
+        await page.wait_for_selector("#pw-widget.hidden", state="attached", timeout=5_000)
+
+        assert not csp_violations, (
+            f"CSP script-src violations during deposit widget path: {csp_violations}"
+        )
+
+        # Adversarial: token-only 402 without lightning/tempo methods → no usable tabs
+        await page.unroute("**/*")
+
+        async def _empty_402(route):
+            req = route.request
+            if (
+                req.method == "POST"
+                and "/api/v1/account/deposit" in req.url
+                and "/confirm" not in req.url
+            ):
+                await route.fulfill(
+                    status=402,
+                    content_type="application/json",
+                    body=(
+                        '{"status":"payment_required","token":"x",'
+                        '"deposit_amount_sats":100,"methods":[]}'
+                    ),
+                )
+                return
+            await route.continue_()
+
+        await page.route("**/*", _empty_402)
+        await page.fill("#deposit-amount", "100")
+        await page.locator("#btn-deposit").click()
+        await page.wait_for_timeout(800)
+        # startDeposit opens widget whenever token is present, but tabs must stay hidden
+        ln_visible = await page.locator("#pw-tab-ln:not(.hidden)").count()
+        tempo_visible = await page.locator("#pw-tab-tempo:not(.hidden)").count()
+        assert ln_visible == 0 and tempo_visible == 0, (
+            "payment-method tabs visible without lightning/tempo methods"
+        )
 
         await browser.close()
