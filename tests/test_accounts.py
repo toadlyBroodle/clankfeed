@@ -241,6 +241,32 @@ class TestCreditSpendingPaymentMode:
         assert resp.json()["balance_sats"] == 129
 
     @pytest.mark.asyncio
+    async def test_downvote_with_credits_floors_at_zero(self, tempo_client):
+        """S-M1: credits downvote path also floors sats_clank/sats_ext at 0."""
+        await _create_and_fund(tempo_client, TEST_SK, 500)
+
+        post_url = "http://test/api/v1/post"
+        resp = await tempo_client.post(
+            "/api/v1/post",
+            json={"content": "credits floor target", "amount_sats": 21},
+            headers=_nip98_json(post_url, "POST"),
+        )
+        event_id = resp.json()["event"]["id"]
+
+        vote_url = f"http://test/api/v1/events/{event_id}/vote"
+        resp = await tempo_client.post(
+            f"/api/v1/events/{event_id}/vote",
+            json={"direction": -1, "amount_sats": 100},
+            headers=_nip98_json(vote_url, "POST"),
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["voted"] is True
+        assert body.get("credits_used") is True
+        assert body["new_sats_clank"] == 0
+        assert body["new_sats_ext"] == 0
+
+    @pytest.mark.asyncio
     async def test_agent_event_with_credits(self, tempo_client):
         """Agent-signed event posted with credits."""
         await _create_and_fund(tempo_client, TEST_SK, 100)

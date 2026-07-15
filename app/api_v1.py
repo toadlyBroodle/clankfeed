@@ -50,6 +50,13 @@ def _invalid_event_id(event_id: str) -> JSONResponse | None:
         )
     return None
 
+
+def _apply_vote_delta(row: NostrEvent, direction: int, amount_sats: int) -> None:
+    """Apply upvote/downvote to sats_clank and sats_ext, floored at 0 (SECURITY M1)."""
+    row.sats_clank = max(0, (row.sats_clank or 0) + (direction * amount_sats))
+    row.sats_ext = max(0, (row.sats_ext or 0) + (direction * amount_sats))
+
+
 router = APIRouter(prefix="/api/v1")
 
 
@@ -740,8 +747,7 @@ async def vote_event(request: Request, event_id: str, db: AsyncSession = Depends
             payment_id="free",
         )
         db.add(vote)
-        row.sats_clank = (row.sats_clank or 0) + (direction * req_sats)
-        row.sats_ext = (row.sats_ext or 0) + (direction * req_sats)
+        _apply_vote_delta(row, direction, req_sats)
         await db.commit()
         logger.info("Vote recorded (free): event=%s dir=%+d amount=%d sats new_value=%d",
                     event_id[:12], direction, req_sats, row.sats_clank)
@@ -761,8 +767,7 @@ async def vote_event(request: Request, event_id: str, db: AsyncSession = Depends
             payment_id=f"credits:{api_key[:16]}",
         )
         db.add(vote)
-        row.sats_clank = (row.sats_clank or 0) + (direction * req_sats)
-        row.sats_ext = (row.sats_ext or 0) + (direction * req_sats)
+        _apply_vote_delta(row, direction, req_sats)
         await db.commit()
         logger.info("Vote recorded (credits): event=%s dir=%+d amount=%d sats new_value=%d account=%s",
                     event_id[:12], direction, req_sats, row.sats_clank, api_key[:12])
@@ -889,8 +894,7 @@ async def confirm_vote(request: Request, event_id: str, db: AsyncSession = Depen
         payment_id=payment_id,
     )
     db.add(vote)
-    row.sats_clank = (row.sats_clank or 0) + (direction * v_sats)
-    row.sats_ext = (row.sats_ext or 0) + (direction * v_sats)
+    _apply_vote_delta(row, direction, v_sats)
     await db.delete(pending)
     await db.commit()
     logger.info("Vote confirmed (paid): event=%s dir=%+d amount=%d sats method=%s new_value=%d",

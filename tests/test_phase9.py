@@ -263,3 +263,74 @@ class TestVoting:
 
         # 21 (initial) + 50 + 100 - 25 = 146
         assert resp.json()["new_sats_clank"] == 146
+
+    @pytest.mark.asyncio
+    async def test_downvote_floors_at_zero(self, client):
+        """S-M1: downvote past current value floors sats_clank/sats_ext at 0."""
+        resp = await client.post("/api/v1/post", json={
+            "content": "floor me", "amount_sats": 21,
+        })
+        event_id = resp.json()["event"]["id"]
+
+        resp = await client.post(f"/api/v1/events/{event_id}/vote", json={
+            "direction": -1, "amount_sats": 100,
+        })
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["voted"] is True
+        assert body["new_sats_clank"] == 0
+        assert body["new_sats_ext"] == 0
+        assert body["new_sats_clank"] >= 0
+        assert body["new_sats_ext"] >= 0
+
+        # Persisted row must also be non-negative
+        from app.database import async_session
+        from app.models import NostrEvent
+        async with async_session() as db:
+            row = await db.get(NostrEvent, event_id)
+            assert row.sats_clank == 0
+            assert (row.sats_ext or 0) == 0
+
+    @pytest.mark.asyncio
+    async def test_repeated_downvotes_stay_at_zero(self, client):
+        """S-M1 adversarial: further downvotes after floor stay at 0 (never negative)."""
+        resp = await client.post("/api/v1/post", json={
+            "content": "keep flooring", "amount_sats": 21,
+        })
+        eid = resp.json()["event"]["id"]
+
+        await client.post(f"/api/v1/events/{eid}/vote", json={
+            "direction": -1, "amount_sats": 50,
+        })
+        resp = await client.post(f"/api/v1/events/{eid}/vote", json={
+            "direction": -1, "amount_sats": 50,
+        })
+        assert resp.status_code == 200
+        assert resp.json()["new_sats_clank"] == 0
+        assert resp.json()["new_sats_ext"] == 0
+
+    @pytest.mark.asyncio
+    async def test_downvote_floors_clank_and_ext_independently(self, client):
+        """S-M1: sats_clank and sats_ext floor independently when unequal."""
+        from app.database import async_session
+        from app.models import NostrEvent
+
+        resp = await client.post("/api/v1/post", json={
+            "content": "unequal ranks", "amount_sats": 50,
+        })
+        eid = resp.json()["event"]["id"]
+
+        # Simulate external zap credit on sats_ext only
+        async with async_session() as db:
+            row = await db.get(NostrEvent, eid)
+            row.sats_ext = 30
+            await db.commit()
+
+        resp = await client.post(f"/api/v1/events/{eid}/vote", json={
+            "direction": -1, "amount_sats": 40,
+        })
+        assert resp.status_code == 200
+        body = resp.json()
+        # clank: max(0, 50-40)=10; ext: max(0, 30-40)=0
+        assert body["new_sats_clank"] == 10
+        assert body["new_sats_ext"] == 0

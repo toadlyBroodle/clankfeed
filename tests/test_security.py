@@ -1027,3 +1027,28 @@ class TestSubIdLengthL5:
                         if msg[0] == "NOTICE":
                             continue
                         break
+
+
+# ---------------------------------------------------------------------------
+# S-M1: Floor sats_clank / sats_ext at 0 on downvotes
+# ---------------------------------------------------------------------------
+
+class TestVoteFloorM1:
+    """M1: downvotes must not drive sats_clank / sats_ext negative."""
+
+    @pytest.mark.asyncio
+    async def test_m1_downvote_overshoot_returns_zero_not_negative(self, client):
+        resp = await client.post("/api/v1/post", json={
+            "content": "m1 overshoot", "amount_sats": 21,
+        })
+        eid = resp.json()["event"]["id"]
+        resp = await client.post(
+            f"/api/v1/events/{eid}/vote",
+            json={"direction": -1, "amount_sats": 500},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["new_sats_clank"] == 0
+        assert data["new_sats_ext"] == 0
+        assert data["new_sats_clank"] >= 0
+        assert data["new_sats_ext"] >= 0
