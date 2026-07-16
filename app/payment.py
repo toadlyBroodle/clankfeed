@@ -38,35 +38,46 @@ async def _error_402_with_challenge(
     amount_sats: int = 0,
     description: str = "Pay to post a note on clankfeed relay",
 ) -> "RawResponse":
-    """Build a 402 error response with fresh WWW-Authenticate challenge headers (Core 1.7)."""
+    """Build a 402 error response with L402 + MPP WWW-Authenticate challenges."""
     from starlette.responses import Response as RawResponse
-    from app.l402 import build_how_to_pay
+    from app.l402 import build_how_to_pay, l402_www_authenticate
 
     sats = amount_sats or settings.POST_PRICE_SATS
+    include_l402 = False
     body = dict(error_body)
-    body.setdefault("how_to_pay", build_how_to_pay())
+    www_headers: list[str] = []
+
+    if payments_enabled():
+        try:
+            invoice_data = await create_invoice(sats, description)
+            www_headers.append(
+                l402_www_authenticate(
+                    invoice_data["payment_hash"],
+                    invoice_data["payment_request"],
+                )
+            )
+            include_l402 = True
+            www_headers.append(
+                build_mpp_challenge(
+                    sats, invoice_data["payment_hash"],
+                    invoice_data["payment_request"], description,
+                )
+            )
+        except Exception as e:
+            logger.warning("Could not generate Lightning challenge for error 402: %s", e)
+
+    if tempo_enabled():
+        www_headers.append(build_tempo_challenge(settings.TEMPO_PRICE_USD, description))
+
+    body["how_to_pay"] = build_how_to_pay(include_l402=include_l402)
     response = RawResponse(
         content=json.dumps(body),
         status_code=402,
         media_type="application/json",
     )
     response.headers["Cache-Control"] = "no-store"
-
-    if payments_enabled():
-        try:
-            invoice_data = await create_invoice(sats, description)
-            challenge = build_mpp_challenge(
-                sats, invoice_data["payment_hash"],
-                invoice_data["payment_request"], description,
-            )
-            response.headers.append("WWW-Authenticate", challenge)
-        except Exception as e:
-            logger.warning("Could not generate Lightning challenge for error 402: %s", e)
-
-    if tempo_enabled():
-        tempo_challenge = build_tempo_challenge(settings.TEMPO_PRICE_USD, description)
-        response.headers.append("WWW-Authenticate", tempo_challenge)
-
+    for h in www_headers:
+        response.headers.append("WWW-Authenticate", h)
     return response
 
 
@@ -85,7 +96,13 @@ async def pay_get(request: Request, token: str, db: AsyncSession = Depends(get_d
     pending.payment_hash = invoice_data["payment_hash"]
     await db.commit()
 
-    # Build Lightning challenge
+    from app.l402 import build_how_to_pay, l402_www_authenticate
+
+    # L402 primary + MPP co-challenge (same invoice) for WS payment-required URL
+    l402_challenge = l402_www_authenticate(
+        invoice_data["payment_hash"],
+        invoice_data["payment_request"],
+    )
     lightning_challenge = build_mpp_challenge(
         price,
         invoice_data["payment_hash"],
@@ -99,9 +116,8 @@ async def pay_get(request: Request, token: str, db: AsyncSession = Depends(get_d
         "amount_sats": price,
         "token": token,
         "methods": ["lightning"],
+        "how_to_pay": build_how_to_pay(include_l402=True),
     }
-    from app.l402 import build_how_to_pay
-    body["how_to_pay"] = build_how_to_pay()
 
     # Multiple WWW-Authenticate headers via raw Response
     from starlette.responses import Response as RawResponse
@@ -110,6 +126,7 @@ async def pay_get(request: Request, token: str, db: AsyncSession = Depends(get_d
         status_code=402,
         media_type="application/json",
     )
+    response.headers.append("WWW-Authenticate", l402_challenge)
     response.headers.append("WWW-Authenticate", lightning_challenge)
     response.headers["Cache-Control"] = "no-store"
 
@@ -272,6 +289,17 @@ async def api_post(request: Request, db: AsyncSession = Depends(get_db)):
         await broadcast_event(signed)
         return {"event": signed, "paid": True}
 
+    # L402 / LSAT (14.3)
+    from app.l402 import try_l402, build_how_to_pay, l402_www_authenticate
+    from fastapi import HTTPException
+    try:
+        if await try_l402(request, db=db, amount_sats=settings.POST_PRICE_SATS, memo="clankfeed note posting"):
+            await store_event(db, signed)
+            await broadcast_event(signed)
+            return {"event": signed, "paid": True}
+    except HTTPException:
+        raise
+
     # Store as pending (requires payment via Lightning or Tempo)
     token = await store_pending_event(db, signed)
 
@@ -281,7 +309,7 @@ async def api_post(request: Request, db: AsyncSession = Depends(get_db)):
         "methods": [],
     }
 
-    # Add Lightning if payments enabled (has LNBits)
+    # Add Lightning if payments enabled (has LNBits) — return 402 with L402+MPP
     if payments_enabled():
         price = settings.POST_PRICE_SATS
         invoice_data = await create_invoice(price, "clankfeed note posting")
@@ -292,8 +320,46 @@ async def api_post(request: Request, db: AsyncSession = Depends(get_db)):
         result["payment_hash"] = invoice_data["payment_hash"]
         result["amount_sats"] = price
         result["methods"].append("lightning")
+        result["how_to_pay"] = build_how_to_pay(include_l402=True)
 
-    # Add Tempo if configured (works in both test and prod mode)
+        if tempo_enabled():
+            result["methods"].append("tempo")
+            result["tempo"] = {
+                "recipient": settings.TEMPO_RECIPIENT,
+                "currency": settings.TEMPO_CURRENCY,
+                "amount_usd": settings.TEMPO_PRICE_USD,
+                "chain": "tempo",
+                "testnet": settings.TEMPO_TESTNET,
+            }
+
+        from starlette.responses import Response as RawResponse
+        response = RawResponse(
+            content=json.dumps(result),
+            status_code=402,
+            media_type="application/json",
+        )
+        response.headers.append(
+            "WWW-Authenticate",
+            l402_www_authenticate(invoice_data["payment_hash"], invoice_data["payment_request"]),
+        )
+        response.headers.append(
+            "WWW-Authenticate",
+            build_mpp_challenge(
+                price,
+                invoice_data["payment_hash"],
+                invoice_data["payment_request"],
+                "clankfeed note posting",
+            ),
+        )
+        response.headers["Cache-Control"] = "no-store"
+        if tempo_enabled():
+            response.headers.append(
+                "WWW-Authenticate",
+                build_tempo_challenge(settings.TEMPO_PRICE_USD, "clankfeed note posting"),
+            )
+        return response
+
+    # Tempo-only (no Lightning)
     if tempo_enabled():
         result["methods"].append("tempo")
         result["tempo"] = {
@@ -303,6 +369,7 @@ async def api_post(request: Request, db: AsyncSession = Depends(get_db)):
             "chain": "tempo",
             "testnet": settings.TEMPO_TESTNET,
         }
+        result["how_to_pay"] = build_how_to_pay(include_l402=False)
 
     return result
 

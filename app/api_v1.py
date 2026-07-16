@@ -66,50 +66,103 @@ async def _error_402_with_challenge(
     amount_usd: str = "",
     description: str = "Pay to post a note on clankfeed relay",
 ) -> "RawResponse":
-    """Build a 402 error response with fresh WWW-Authenticate challenge headers (Core 1.7)."""
+    """Build a 402 error response with L402 + MPP (+ Tempo) WWW-Authenticate challenges."""
     from starlette.responses import Response as RawResponse
-    from app.l402 import build_how_to_pay
+    from app.l402 import build_how_to_pay, l402_www_authenticate
 
     sats = amount_sats or settings.POST_PRICE_SATS
     usd = amount_usd or settings.TEMPO_PRICE_USD
+    include_l402 = False
     body = dict(error_body)
-    body.setdefault("how_to_pay", build_how_to_pay())
+    www_headers: list[str] = []
+
+    if payments_enabled():
+        try:
+            invoice_data = await create_invoice(sats, description)
+            www_headers.append(
+                l402_www_authenticate(
+                    invoice_data["payment_hash"],
+                    invoice_data["payment_request"],
+                )
+            )
+            include_l402 = True
+            www_headers.append(
+                build_mpp_challenge(
+                    sats, invoice_data["payment_hash"],
+                    invoice_data["payment_request"], description,
+                )
+            )
+        except Exception as e:
+            logger.warning("Could not generate Lightning challenge for error 402: %s", e)
+
+    if tempo_enabled():
+        www_headers.append(build_tempo_challenge(usd, description))
+
+    body["how_to_pay"] = build_how_to_pay(include_l402=include_l402)
     response = RawResponse(
         content=json.dumps(body),
         status_code=402,
         media_type="application/json",
     )
     response.headers["Cache-Control"] = "no-store"
-
-    if payments_enabled():
-        try:
-            invoice_data = await create_invoice(sats, description)
-            challenge = build_mpp_challenge(
-                sats, invoice_data["payment_hash"],
-                invoice_data["payment_request"], description,
-            )
-            response.headers.append("WWW-Authenticate", challenge)
-        except Exception as e:
-            logger.warning("Could not generate Lightning challenge for error 402: %s", e)
-
-    if tempo_enabled():
-        tempo_challenge = build_tempo_challenge(usd, description)
-        response.headers.append("WWW-Authenticate", tempo_challenge)
-
+    for h in www_headers:
+        response.headers.append("WWW-Authenticate", h)
     return response
 
 
 async def _try_spend_credits(request: Request, db: AsyncSession, amount_sats: int) -> tuple[bool, str]:
-    """Check auth (NIP-98 or X-Account-Key) and try to spend credits.
+    """REMOVED (14.3): credit-spend bypass disabled. Always returns (False, "")."""
+    return False, ""
 
-    Returns (spent, api_key). If spent=True, credits were deducted.
-    """
-    from app.auth import get_auth
-    acct, pubkey, _ = await get_auth(request, db)
-    if not acct:
-        return False, ""
-    ok, _ = await spend_credits(db, acct.id, amount_sats)
-    return ok, acct.id
+
+def _payment_required_response(
+    content: dict,
+    *,
+    payment_hash: str = "",
+    bolt11: str = "",
+    amount_sats: int = 0,
+    amount_usd: str = "",
+    description: str = "Pay to post a note on clankfeed relay",
+) -> "RawResponse":
+    """402 JSON body with L402 (+ MPP) WWW-Authenticate when a Lightning invoice exists."""
+    from starlette.responses import Response as RawResponse
+    from app.l402 import l402_www_authenticate, build_how_to_pay
+    from app.mpp import build_mpp_challenge as _mpp
+
+    sats = amount_sats or settings.POST_PRICE_SATS
+    include_l402 = bool(payments_enabled() and bolt11 and payment_hash)
+    body = dict(content)
+    body.update(
+        _build_payment_options(
+            payment_hash, bolt11, amount_sats=sats, amount_usd=amount_usd,
+            include_l402=include_l402,
+        )
+    )
+    # Ensure how_to_pay reflects L402 when we attach the header
+    if include_l402:
+        body["how_to_pay"] = build_how_to_pay(include_l402=True)
+
+    response = RawResponse(
+        content=json.dumps(body),
+        status_code=402,
+        media_type="application/json",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    if include_l402:
+        response.headers.append(
+            "WWW-Authenticate",
+            l402_www_authenticate(payment_hash, bolt11),
+        )
+        response.headers.append(
+            "WWW-Authenticate",
+            _mpp(sats, payment_hash, bolt11, description),
+        )
+    if tempo_enabled():
+        response.headers.append(
+            "WWW-Authenticate",
+            build_tempo_challenge(amount_usd or settings.TEMPO_PRICE_USD, description),
+        )
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +174,8 @@ def _build_payment_options(
     bolt11: str = "",
     amount_sats: int = 0,
     amount_usd: str = "",
+    *,
+    include_l402: bool = False,
 ) -> dict:
     """Build the payment options dict for 402 responses."""
     from app.l402 import build_how_to_pay
@@ -150,7 +205,7 @@ def _build_payment_options(
         }
 
     result["methods"] = methods
-    result["how_to_pay"] = build_how_to_pay()
+    result["how_to_pay"] = build_how_to_pay(include_l402=include_l402)
     return result
 
 
@@ -233,7 +288,7 @@ async def submit_event(request: Request, db: AsyncSession = Depends(get_db)):
         return await _error_402_with_challenge({
             "type": "https://paymentauth.org/problems/payment-required",
             "title": "Payment required",
-            "detail": "Submit with Authorization: Payment header or fund your account",
+            "detail": "Submit with Authorization: L402 or Payment header",
         })
 
     try:
@@ -294,12 +349,16 @@ async def submit_event(request: Request, db: AsyncSession = Depends(get_db)):
         await broadcast_event(event)
         return {"paid": True, "event": event, "sats_clank": req_sats}
 
-    # Try spending credits (X-Account-Key header)
-    spent, _ = await _try_spend_credits(request, db, req_sats)
-    if spent:
-        await store_event(db, event, sats_clank=req_sats, value_usd=req_usd)
-        await broadcast_event(event)
-        return {"paid": True, "event": event, "sats_clank": req_sats, "credits_used": True}
+    # L402 / LSAT (14.3) — primary Lightning gate; no credit-spend bypass
+    from app.l402 import try_l402
+    from fastapi import HTTPException
+    try:
+        if await try_l402(request, db=db, amount_sats=req_sats, memo="clankfeed note posting"):
+            await store_event(db, event, sats_clank=req_sats, value_usd=req_usd)
+            await broadcast_event(event)
+            return {"paid": True, "event": event, "sats_clank": req_sats}
+    except HTTPException:
+        raise
 
     # Check for inline MPP credential (one-shot payment)
     auth = request.headers.get("Authorization", "")
@@ -332,17 +391,16 @@ async def submit_event(request: Request, db: AsyncSession = Depends(get_db)):
         payment_hash = invoice_data["payment_hash"]
         bolt11 = invoice_data["payment_request"]
 
-    options = _build_payment_options(payment_hash, bolt11, amount_sats=req_sats, amount_usd=req_usd)
-
-    return JSONResponse(
-        status_code=402,
-        content={
+    return _payment_required_response(
+        {
             "status": "payment_required",
             "token": token,
             "event_id": event["id"],
-            **options,
         },
-        headers={"Cache-Control": "no-store"},
+        payment_hash=payment_hash,
+        bolt11=bolt11,
+        amount_sats=req_sats,
+        amount_usd=req_usd,
     )
 
 
@@ -530,7 +588,7 @@ async def relay_post(request: Request, db: AsyncSession = Depends(get_db)):
         return await _error_402_with_challenge({
             "type": "https://paymentauth.org/problems/payment-required",
             "title": "Payment required",
-            "detail": "Submit with Authorization: Payment header or fund your account",
+            "detail": "Submit with Authorization: L402 or Payment header",
         })
 
     try:
@@ -596,12 +654,16 @@ async def relay_post(request: Request, db: AsyncSession = Depends(get_db)):
         await broadcast_event(signed)
         return {"paid": True, "event": signed, "sats_clank": req_sats}
 
-    # Try spending credits
-    spent, _ = await _try_spend_credits(request, db, req_sats)
-    if spent:
-        await store_event(db, signed, sats_clank=req_sats, value_usd=req_usd)
-        await broadcast_event(signed)
-        return {"paid": True, "event": signed, "sats_clank": req_sats, "credits_used": True}
+    # L402 / LSAT (14.3) — no credit-spend bypass
+    from app.l402 import try_l402
+    from fastapi import HTTPException
+    try:
+        if await try_l402(request, db=db, amount_sats=req_sats, memo="clankfeed note posting"):
+            await store_event(db, signed, sats_clank=req_sats, value_usd=req_usd)
+            await broadcast_event(signed)
+            return {"paid": True, "event": signed, "sats_clank": req_sats}
+    except HTTPException:
+        raise
 
     # Store as pending
     token = await store_pending_event(db, signed, amount_sats=req_sats, amount_usd=req_usd)
@@ -616,13 +678,28 @@ async def relay_post(request: Request, db: AsyncSession = Depends(get_db)):
         payment_hash = invoice_data["payment_hash"]
         bolt11 = invoice_data["payment_request"]
 
-    options = _build_payment_options(payment_hash, bolt11, amount_sats=req_sats, amount_usd=req_usd)
+    # Tempo-only (no Lightning): keep 200 token body for transitional Tempo clients
+    if not payments_enabled() and tempo_enabled():
+        options = _build_payment_options(
+            payment_hash, bolt11, amount_sats=req_sats, amount_usd=req_usd,
+        )
+        return {
+            "token": token,
+            "event_id": signed["id"],
+            **options,
+        }
 
-    return {
-        "token": token,
-        "event_id": signed["id"],
-        **options,
-    }
+    return _payment_required_response(
+        {
+            "status": "payment_required",
+            "token": token,
+            "event_id": signed["id"],
+        },
+        payment_hash=payment_hash,
+        bolt11=bolt11,
+        amount_sats=req_sats,
+        amount_usd=req_usd,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -779,25 +856,35 @@ async def vote_event(request: Request, event_id: str, db: AsyncSession = Depends
                     event_id[:12], direction, req_sats, row.sats_clank)
         return {"voted": True, "direction": direction, "amount_sats": req_sats, "new_sats_clank": row.sats_clank, "new_sats_ext": row.sats_ext}
 
-    # Try spending credits
-    spent, api_key = await _try_spend_credits(request, db, req_sats)
-    if spent:
-        from app.models import Vote
-        vote = Vote(
-            id=secrets.token_hex(32),
-            event_id=event_id,
-            pubkey=api_key[:16],
-            direction=direction,
-            amount_sats=req_sats,
-            amount_usd=req_usd,
-            payment_id=f"credits:{api_key[:16]}",
-        )
-        db.add(vote)
-        _apply_vote_delta(row, direction, req_sats)
-        await db.commit()
-        logger.info("Vote recorded (credits): event=%s dir=%+d amount=%d sats new_value=%d account=%s",
-                    event_id[:12], direction, req_sats, row.sats_clank, api_key[:12])
-        return {"voted": True, "direction": direction, "amount_sats": req_sats, "new_sats_clank": row.sats_clank, "new_sats_ext": row.sats_ext, "credits_used": True}
+    # L402 / LSAT (14.3) — no credit-spend bypass
+    from app.l402 import try_l402
+    from fastapi import HTTPException
+    try:
+        if await try_l402(request, db=db, amount_sats=req_sats, memo=f"clankfeed vote on {event_id[:12]}"):
+            from app.models import Vote
+            vote = Vote(
+                id=secrets.token_hex(32),
+                event_id=event_id,
+                pubkey="l402",
+                direction=direction,
+                amount_sats=req_sats,
+                amount_usd=req_usd,
+                payment_id="l402",
+            )
+            db.add(vote)
+            _apply_vote_delta(row, direction, req_sats)
+            await db.commit()
+            logger.info("Vote recorded (l402): event=%s dir=%+d amount=%d sats new_value=%d",
+                        event_id[:12], direction, req_sats, row.sats_clank)
+            return {
+                "voted": True,
+                "direction": direction,
+                "amount_sats": req_sats,
+                "new_sats_clank": row.sats_clank,
+                "new_sats_ext": row.sats_ext,
+            }
+    except HTTPException:
+        raise
 
     # Store vote intent as pending event (reuse PendingEvent table)
     token = await store_pending_event(
@@ -817,18 +904,34 @@ async def vote_event(request: Request, event_id: str, db: AsyncSession = Depends
         payment_hash = invoice_data["payment_hash"]
         bolt11 = invoice_data["payment_request"]
 
-    options = _build_payment_options(payment_hash, bolt11, amount_sats=req_sats, amount_usd=req_usd)
+    if not payments_enabled() and tempo_enabled():
+        options = _build_payment_options(
+            payment_hash, bolt11, amount_sats=req_sats, amount_usd=req_usd,
+        )
+        return JSONResponse(
+            status_code=402,
+            content={
+                "status": "payment_required",
+                "token": token,
+                "event_id": event_id,
+                "direction": direction,
+                **options,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
 
-    return JSONResponse(
-        status_code=402,
-        content={
+    return _payment_required_response(
+        {
             "status": "payment_required",
             "token": token,
             "event_id": event_id,
             "direction": direction,
-            **options,
         },
-        headers={"Cache-Control": "no-store"},
+        payment_hash=payment_hash,
+        bolt11=bolt11,
+        amount_sats=req_sats,
+        amount_usd=req_usd,
+        description=f"Pay to vote on {event_id[:12]}",
     )
 
 
@@ -1241,19 +1344,24 @@ async def account_update_profile(request: Request, db: AsyncSession = Depends(ge
     }
     signed = sign_event(decrypt_field(acct.nostr_privkey), event)
 
-    # Try spending credits
     req_sats = settings.POST_PRICE_SATS
-    spent, _ = await _try_spend_credits(request, db, req_sats)
-    if spent:
-        await store_event(db, signed, sats_clank=req_sats)
-        await broadcast_event(signed)
-        return {"updated": True, "event": signed, "metadata": metadata}
 
     # No payment configured: store directly
     if not payments_enabled() and not tempo_enabled():
         await store_event(db, signed, sats_clank=req_sats)
         await broadcast_event(signed)
         return {"updated": True, "event": signed, "metadata": metadata}
+
+    # L402 / LSAT (14.3) — no credit-spend bypass
+    from app.l402 import try_l402
+    from fastapi import HTTPException
+    try:
+        if await try_l402(request, db=db, amount_sats=req_sats, memo="clankfeed profile update"):
+            await store_event(db, signed, sats_clank=req_sats)
+            await broadcast_event(signed)
+            return {"updated": True, "event": signed, "metadata": metadata}
+    except HTTPException:
+        raise
 
     # Requires payment
     token = await store_pending_event(db, signed, amount_sats=req_sats)
@@ -1268,14 +1376,25 @@ async def account_update_profile(request: Request, db: AsyncSession = Depends(ge
         payment_hash = invoice_data["payment_hash"]
         bolt11 = invoice_data["payment_request"]
 
-    options = _build_payment_options(payment_hash, bolt11, amount_sats=req_sats)
+    if not payments_enabled() and tempo_enabled():
+        options = _build_payment_options(payment_hash, bolt11, amount_sats=req_sats)
+        return JSONResponse(
+            status_code=402,
+            content={
+                "status": "payment_required",
+                "token": token,
+                **options,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
 
-    return JSONResponse(
-        status_code=402,
-        content={
+    return _payment_required_response(
+        {
             "status": "payment_required",
             "token": token,
-            **options,
         },
-        headers={"Cache-Control": "no-store"},
+        payment_hash=payment_hash,
+        bolt11=bolt11,
+        amount_sats=req_sats,
+        description="Pay to update profile",
     )

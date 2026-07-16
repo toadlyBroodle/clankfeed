@@ -145,15 +145,20 @@ class TestApiPostMethods:
 
     @pytest.mark.asyncio
     async def test_full_returns_both_methods(self, full_client):
-        """When both are enabled, response has methods=['lightning', 'tempo']."""
+        """When both are enabled, 402 has methods=['lightning', 'tempo'] + L402 challenge."""
         with _mock_create_invoice():
             resp = await full_client.post("/api/post", json={"content": "both methods"})
-        assert resp.status_code == 200
+        assert resp.status_code == 402
         data = resp.json()
         assert "lightning" in data["methods"]
         assert "tempo" in data["methods"]
         assert "bolt11" in data
         assert data["tempo"]["recipient"] == "0xRecipientAddress"
+        assert "L402" in data.get("how_to_pay", {})
+        www = resp.headers.get_list("www-authenticate") if hasattr(resp.headers, "get_list") else [
+            v for k, v in resp.headers.multi_items() if k.lower() == "www-authenticate"
+        ]
+        assert any(h.strip().startswith("L402 ") for h in www)
 
     @pytest.mark.asyncio
     async def test_no_payment_returns_paid_directly(self, client):

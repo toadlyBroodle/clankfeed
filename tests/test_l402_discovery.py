@@ -1,9 +1,8 @@
-"""Phase 14.2/14.11: L402 discovery — well-known, OpenAPI scheme, honest how_to_pay.
+"""Phase 14.2/14.3: L402 discovery — well-known, OpenAPI scheme, live how_to_pay.
 
-Until 14.3 gates endpoints with L402, live MPP 402s must not advertise L402
-(how_to_pay.L402 / OpenAPI security+protocols). well-known + securitySchemes.L402
-remain forward-looking. require_l402 challenges that emit L402 WWW-Authenticate
-still include how_to_pay.L402.
+After 14.3, paid endpoints emit L402 WWW-Authenticate challenges, so OpenAPI
+and 402 how_to_pay advertise L402 (alongside MPP). well-known remains the
+canonical L402 docs surface.
 """
 
 from unittest.mock import AsyncMock, patch
@@ -84,7 +83,7 @@ class TestWellKnownL402:
 class TestOpenApiL402Scheme:
     @pytest.mark.asyncio
     async def test_openapi_includes_l402_security_scheme(self, client):
-        """securitySchemes.L402 may remain forward-looking until 14.3."""
+        """securitySchemes.L402 is advertised for paid routes."""
         resp = await client.get("/openapi.json")
         assert resp.status_code == 200
         schema = resp.json()
@@ -96,27 +95,27 @@ class TestOpenApiL402Scheme:
         assert "macaroon" in l402["description"].lower() or "preimage" in l402["description"].lower()
 
     @pytest.mark.asyncio
-    async def test_openapi_paid_routes_do_not_require_l402_until_gated(self, client):
-        """14.11: until 14.3, paid routes must not declare L402 as required security."""
+    async def test_openapi_paid_routes_require_l402(self, client):
+        """14.3: paid routes declare L402 as required security."""
         resp = await client.get("/openapi.json")
         schema = resp.json()
         events_post = schema["paths"]["/api/v1/events"]["post"]
         security = events_post.get("security", [])
-        assert not any("L402" in entry for entry in security), (
-            f"POST /api/v1/events must not require L402 until gated; got {security}"
+        assert any("L402" in entry for entry in security), (
+            f"POST /api/v1/events must require L402 after 14.3; got {security}"
         )
         assert "402" in events_post.get("responses", {})
 
     @pytest.mark.asyncio
-    async def test_openapi_paid_routes_protocols_mpp_only_until_gated(self, client):
-        """14.11: x-payment-info.protocols must be mpp-only until L402 challenges exist."""
+    async def test_openapi_paid_routes_protocols_include_l402(self, client):
+        """14.3: x-payment-info.protocols includes l402 (+ mpp alternate)."""
         resp = await client.get("/openapi.json")
         schema = resp.json()
         events_post = schema["paths"]["/api/v1/events"]["post"]
         protocols = events_post.get("x-payment-info", {}).get("protocols", [])
         assert "mpp" in protocols
-        assert "l402" not in protocols, (
-            f"protocols must not advertise l402 until gated; got {protocols}"
+        assert "l402" in protocols, (
+            f"protocols must advertise l402 after 14.3; got {protocols}"
         )
 
 
@@ -151,10 +150,17 @@ async def paid_client(monkeypatch):
 
 class TestHowToPayHonesty:
     @pytest.mark.asyncio
-    async def test_mpp_payment_required_402_omits_how_to_pay_l402(self, paid_client):
-        """14.11: MPP-only 402s must not tell agents to extract L402 from WWW-Authenticate."""
+    async def test_payment_required_402_includes_how_to_pay_l402(self, paid_client):
+        """14.3: live 402s emit L402 WWW-Authenticate and advertise how_to_pay.L402."""
         with patch(
             "app.api_v1.create_invoice",
+            new_callable=AsyncMock,
+            return_value={
+                "payment_hash": "a" * 64,
+                "payment_request": "lnbc210n1fake",
+            },
+        ), patch(
+            "app.l402.create_invoice",
             new_callable=AsyncMock,
             return_value={
                 "payment_hash": "a" * 64,
@@ -168,17 +174,17 @@ class TestHowToPayHonesty:
         assert resp.status_code == 402
         body = resp.json()
         assert "how_to_pay" in body
-        assert "L402" not in body["how_to_pay"], (
-            "MPP 402 must not advertise how_to_pay.L402 without L402 WWW-Authenticate"
+        assert "L402" in body["how_to_pay"], (
+            "gated 402 must advertise how_to_pay.L402 with L402 WWW-Authenticate"
         )
         assert "MPP" in body["how_to_pay"]
-        assert "steps" in body["how_to_pay"]["MPP"]
+        assert "steps" in body["how_to_pay"]["L402"]
         www = resp.headers.get_list("www-authenticate") if hasattr(resp.headers, "get_list") else [
             v for k, v in resp.headers.multi_items() if k.lower() == "www-authenticate"
         ]
         assert www, "expected at least one WWW-Authenticate challenge"
-        assert not any(h.strip().startswith("L402 ") for h in www), (
-            f"MPP payment path must not emit L402 challenge yet; got {www}"
+        assert any(h.strip().startswith("L402 ") for h in www), (
+            f"gated payment path must emit L402 challenge; got {www}"
         )
 
     @pytest.mark.asyncio

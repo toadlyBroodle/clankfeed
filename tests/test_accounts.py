@@ -175,9 +175,11 @@ async def _create_and_fund(client, privkey=TEST_SK, amount=500):
 
 
 class TestCreditSpendingPaymentMode:
+    """14.3: credits must not bypass payment when a payment method is configured."""
+
     @pytest.mark.asyncio
-    async def test_post_with_credits_skips_payment(self, tempo_client):
-        """With sufficient credits, post succeeds without payment."""
+    async def test_post_with_credits_no_longer_skips_payment(self, tempo_client):
+        """Funded account still gets payment_required; balance untouched."""
         await _create_and_fund(tempo_client, TEST_SK, 500)
 
         url = "http://test/api/v1/post"
@@ -186,89 +188,86 @@ class TestCreditSpendingPaymentMode:
             json={"content": "paid with credits!", "amount_sats": 21},
             headers=_nip98_json(url, "POST"),
         )
-        assert resp.status_code == 200
-        assert resp.json()["paid"] is True
-        assert resp.json().get("credits_used") is True
+        assert resp.json().get("credits_used") is not True
+        assert resp.json().get("paid") is not True
+        assert "token" in resp.json() or resp.status_code == 402
 
-        # Check balance deducted
         bal_url = "http://test/api/v1/account/balance"
         resp = await tempo_client.get("/api/v1/account/balance", headers=_nip98(bal_url, "GET"))
-        assert resp.json()["balance_sats"] == 479  # 500 - 21
+        assert resp.json()["balance_sats"] == 500  # unchanged
 
     @pytest.mark.asyncio
-    async def test_post_insufficient_credits_returns_402(self, tempo_client):
-        """With insufficient credits, returns 402 for payment."""
-        # Trigger auto-account creation via NIP-98 (0 balance)
+    async def test_post_insufficient_credits_returns_payment_options(self, tempo_client):
+        """Unauthenticated-balance NIP-98 still gets Tempo payment options (no credit path)."""
         url = "http://test/api/v1/post"
         resp = await tempo_client.post(
             "/api/v1/post",
             json={"content": "no credits"},
             headers=_nip98_json(url, "POST", TEST_SK2),
         )
-        # Authenticated but insufficient credits: returns payment options
         assert resp.status_code == 200
         assert "token" in resp.json()
         assert "tempo" in resp.json().get("methods", [])
+        assert resp.json().get("credits_used") is not True
 
     @pytest.mark.asyncio
-    async def test_vote_with_credits(self, tempo_client):
-        """Vote using credits in payment mode."""
+    async def test_vote_with_credits_no_longer_bypasses(self, tempo_client):
+        """Funded account cannot vote via credits; gets payment_required."""
         await _create_and_fund(tempo_client, TEST_SK, 200)
 
-        # Post a note first
-        post_url = "http://test/api/v1/post"
-        resp = await tempo_client.post(
-            "/api/v1/post",
-            json={"content": "vote target"},
-            headers=_nip98_json(post_url, "POST"),
-        )
-        event_id = resp.json()["event"]["id"]
+        # Seed a note directly (credits no longer store via POST)
+        from app.database import async_session
+        from app.relay import store_event
+        from app.nostr import sign_event as _sign
+        event = _sign(TEST_SK, {
+            "created_at": int(time.time()),
+            "kind": 1,
+            "tags": kind1_tags(TEST_SK),
+            "content": "vote target",
+        })
+        async with async_session() as db:
+            await store_event(db, event, sats_clank=21)
+        event_id = event["id"]
 
-        # Vote with credits
         vote_url = f"http://test/api/v1/events/{event_id}/vote"
         resp = await tempo_client.post(
             f"/api/v1/events/{event_id}/vote",
             json={"direction": 1, "amount_sats": 50},
             headers=_nip98_json(vote_url, "POST"),
         )
-        assert resp.status_code == 200
-        assert resp.json()["voted"] is True
-        assert resp.json().get("credits_used") is True
+        assert resp.status_code == 402
+        assert resp.json().get("credits_used") is not True
+        assert "token" in resp.json()
 
-        # Balance: 200 - 21 (post) - 50 (vote) = 129
         bal_url = "http://test/api/v1/account/balance"
         resp = await tempo_client.get("/api/v1/account/balance", headers=_nip98(bal_url, "GET"))
-        assert resp.json()["balance_sats"] == 129
+        assert resp.json()["balance_sats"] == 200
 
     @pytest.mark.asyncio
-    async def test_downvote_with_credits_floors_at_zero(self, tempo_client):
-        """S-M1: credits downvote path also floors sats_clank/sats_ext at 0."""
-        await _create_and_fund(tempo_client, TEST_SK, 500)
-
+    async def test_downvote_floor_still_via_free_path(self, client):
+        """S-M1 floor remains on free (test-mode) downvote path — not credit bypass."""
         post_url = "http://test/api/v1/post"
-        resp = await tempo_client.post(
+        resp = await client.post(
             "/api/v1/post",
-            json={"content": "credits floor target", "amount_sats": 21},
-            headers=_nip98_json(post_url, "POST"),
+            json={"content": "floor target", "amount_sats": 21},
         )
+        assert resp.status_code == 200
         event_id = resp.json()["event"]["id"]
 
-        vote_url = f"http://test/api/v1/events/{event_id}/vote"
-        resp = await tempo_client.post(
+        resp = await client.post(
             f"/api/v1/events/{event_id}/vote",
             json={"direction": -1, "amount_sats": 100},
-            headers=_nip98_json(vote_url, "POST"),
         )
         assert resp.status_code == 200
         body = resp.json()
         assert body["voted"] is True
-        assert body.get("credits_used") is True
+        assert body.get("credits_used") is not True
         assert body["new_sats_clank"] == 0
         assert body["new_sats_ext"] == 0
 
     @pytest.mark.asyncio
-    async def test_agent_event_with_credits(self, tempo_client):
-        """Agent-signed event posted with credits."""
+    async def test_agent_event_with_credits_no_longer_bypasses(self, tempo_client):
+        """Agent-signed event with funded account still requires payment."""
         await _create_and_fund(tempo_client, TEST_SK, 100)
 
         event = sign_event(TEST_SK, {
@@ -283,9 +282,9 @@ class TestCreditSpendingPaymentMode:
             json={"event": event},
             headers=_nip98_json(url, "POST"),
         )
-        assert resp.status_code == 200
-        assert resp.json()["paid"] is True
-        assert resp.json().get("credits_used") is True
+        assert resp.status_code == 402
+        assert resp.json().get("credits_used") is not True
+        assert resp.json().get("paid") is not True
 
 
 # ---------------------------------------------------------------------------

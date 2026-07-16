@@ -120,9 +120,9 @@ def http_base_url() -> str:
 def build_how_to_pay(*, include_l402: bool = False) -> dict:
     """Agent-facing how_to_pay block for 402 bodies.
 
-    include_l402=True only when the response also emits WWW-Authenticate: L402
-    (require_l402). MPP/Tempo payment-required 402s must omit L402 until 14.3
-    gates endpoints and issues L402 challenges (14.11 honesty).
+    include_l402=True when the response also emits WWW-Authenticate: L402
+    (require_l402 / gated paid endpoints). Omit L402 when only MPP/Tempo
+    challenges are present.
     """
     base = http_base_url()
     out: dict = {
@@ -202,6 +202,33 @@ def well_known_l402_document() -> dict:
         },
         "docs": f"{base}/.well-known/l402",
     }
+
+
+async def try_l402(
+    request: Request,
+    db=None,
+    amount_sats: int | None = None,
+    memo: str | None = None,
+) -> bool:
+    """If Authorization is L402|LSAT, verify via require_l402 and return True.
+
+    Returns False when no L402/LSAT header is present so callers can fall through
+    to MPP/Tempo/token flows. Raises HTTPException on invalid/unpaid L402.
+    Skips (returns False) when payments are disabled (test mode).
+    """
+    if not payments_enabled():
+        return False
+    auth = request.headers.get("Authorization", "")
+    if not (auth.startswith("L402 ") or auth.startswith("LSAT ")):
+        return False
+    await require_l402(request=request, db=db, amount_sats=amount_sats, memo=memo)
+    return True
+
+
+def l402_www_authenticate(payment_hash: str, payment_request: str) -> str:
+    """Build WWW-Authenticate: L402 macaroon=…, invoice=… for a minted invoice."""
+    macaroon_b64 = mint_macaroon(payment_hash)
+    return f'L402 macaroon="{macaroon_b64}", invoice="{payment_request}"'
 
 
 async def require_l402(
