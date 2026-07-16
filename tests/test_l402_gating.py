@@ -320,6 +320,90 @@ class TestNoCreditBypass:
 
 
 # ---------------------------------------------------------------------------
+# 14.12: POST /pay must accept L402|LSAT (GET /pay already advertises them)
+# ---------------------------------------------------------------------------
+
+
+class TestPayPostAcceptsL402:
+    """WS payment-required agents follow GET /pay → L402; POST /pay must complete."""
+
+    async def _pending_token(self, client) -> str:
+        with patch(
+            "app.payment.create_invoice",
+            new_callable=AsyncMock,
+            return_value=MOCK_INVOICE,
+        ), patch(
+            "app.l402.create_invoice",
+            new_callable=AsyncMock,
+            return_value=MOCK_INVOICE,
+        ):
+            resp = await client.post("/api/post", json={"content": "pending for l402 pay"})
+        assert resp.status_code == 402, resp.text
+        token = resp.json().get("token")
+        assert token, f"expected pending token in 402 body; got {resp.text}"
+        return token
+
+    @pytest.mark.asyncio
+    async def test_pay_post_with_valid_l402_stores_pending_event(self, paid_client):
+        token = await self._pending_token(paid_client)
+        auth, _ = _l402_header(b"pay-post-l402-preimage!!")
+        with patch("app.l402.check_payment_status", new_callable=AsyncMock) as mock_status, \
+             patch("app.lightning.check_and_consume_payment", new_callable=AsyncMock) as mock_consume:
+            mock_status.return_value = (True, 21)
+            mock_consume.return_value = True
+            resp = await paid_client.post(
+                f"/pay?token={token}",
+                headers={"Authorization": auth},
+            )
+        assert resp.status_code == 200, (
+            f"POST /pay must accept L402 (not reject non-Payment prefix); "
+            f"got {resp.status_code}: {resp.text}"
+        )
+        data = resp.json()
+        assert "event" in data
+        assert data["event"]["content"] == "pending for l402 pay"
+
+    @pytest.mark.asyncio
+    async def test_pay_post_accepts_lsat_prefix(self, paid_client):
+        token = await self._pending_token(paid_client)
+        auth = _lsat_header(b"pay-post-lsat-preimage!!!")
+        with patch("app.l402.check_payment_status", new_callable=AsyncMock) as mock_status, \
+             patch("app.lightning.check_and_consume_payment", new_callable=AsyncMock) as mock_consume:
+            mock_status.return_value = (True, 21)
+            mock_consume.return_value = True
+            resp = await paid_client.post(
+                f"/pay?token={token}",
+                headers={"Authorization": auth},
+            )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["event"]["content"] == "pending for l402 pay"
+
+    @pytest.mark.asyncio
+    async def test_pay_post_invalid_l402_gets_fresh_challenge(self, paid_client):
+        token = await self._pending_token(paid_client)
+        with patch(
+            "app.l402.create_invoice",
+            new_callable=AsyncMock,
+            return_value=MOCK_INVOICE,
+        ), patch(
+            "app.payment.create_invoice",
+            new_callable=AsyncMock,
+            return_value=MOCK_INVOICE,
+        ):
+            resp = await paid_client.post(
+                f"/pay?token={token}",
+                headers={"Authorization": "L402 not-a-mac:deadbeef"},
+            )
+        assert resp.status_code == 402, resp.text
+        www = _www_auth_values(resp)
+        assert any(h.strip().startswith("L402 ") for h in www), (
+            f"invalid L402 on POST /pay must mint fresh L402 challenge; got {www}"
+        )
+        # Must not be the old "Authorization header must start with Payment" dead-end
+        assert "must start with 'Payment '" not in resp.text
+
+
+# ---------------------------------------------------------------------------
 # Adversarial / OpenAPI
 # ---------------------------------------------------------------------------
 

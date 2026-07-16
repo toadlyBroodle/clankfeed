@@ -154,10 +154,31 @@ async def pay_get(request: Request, token: str, db: AsyncSession = Depends(get_d
 @router.post("/pay")
 @limiter.limit(RATE_PAY)
 async def pay_post(request: Request, token: str, db: AsyncSession = Depends(get_db)):
-    """Verify MPP credential and store the paid event."""
+    """Verify L402 or MPP credential and store the paid event."""
     pending = await db.get(PendingEvent, token)
     if not pending or pending.expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
         return JSONResponse(status_code=404, content={"detail": "Token expired or not found"})
+
+    # L402 / LSAT (14.12) — GET /pay advertises L402; accept it before MPP parse
+    from app.l402 import try_l402
+    from fastapi import HTTPException
+    try:
+        if await try_l402(
+            request, db=db, amount_sats=settings.POST_PRICE_SATS, memo="clankfeed note posting",
+        ):
+            event = json.loads(pending.event_json)
+            await store_event(db, event)
+            await db.delete(pending)
+            await db.commit()
+            await broadcast_event(event)
+            logger.info("Payment confirmed (L402): event=%s", event["id"][:12])
+            return JSONResponse(
+                status_code=200,
+                content={"event": event},
+                headers={"Cache-Control": "private"},
+            )
+    except HTTPException:
+        raise
 
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Payment "):
