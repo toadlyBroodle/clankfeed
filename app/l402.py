@@ -117,18 +117,15 @@ def http_base_url() -> str:
     return settings.BASE_URL.replace("wss://", "https://").replace("ws://", "http://").rstrip("/")
 
 
-def build_how_to_pay() -> dict:
-    """Agent-facing how_to_pay block for 402 bodies (satring parity)."""
+def build_how_to_pay(*, include_l402: bool = False) -> dict:
+    """Agent-facing how_to_pay block for 402 bodies.
+
+    include_l402=True only when the response also emits WWW-Authenticate: L402
+    (require_l402). MPP/Tempo payment-required 402s must omit L402 until 14.3
+    gates endpoints and issues L402 challenges (14.11 honesty).
+    """
     base = http_base_url()
-    return {
-        "L402": {
-            "steps": [
-                "1. Extract macaroon and invoice from WWW-Authenticate header",
-                "2. Pay the BOLT11 Lightning invoice",
-                "3. Retry with header: Authorization: L402 <macaroon>:<preimage>",
-            ],
-            "docs": f"{base}/.well-known/l402",
-        },
+    out: dict = {
         "MPP": {
             "steps": [
                 "1. Extract Payment challenge from WWW-Authenticate header",
@@ -139,15 +136,28 @@ def build_how_to_pay() -> dict:
             "docs": f"{base}/openapi.json",
         },
     }
+    if include_l402:
+        out = {
+            "L402": {
+                "steps": [
+                    "1. Extract macaroon and invoice from WWW-Authenticate header",
+                    "2. Pay the BOLT11 Lightning invoice",
+                    "3. Retry with header: Authorization: L402 <macaroon>:<preimage>",
+                ],
+                "docs": f"{base}/.well-known/l402",
+            },
+            **out,
+        }
+    return out
 
 
 def l402_402_detail(message: str, amount_sats: int | None = None) -> dict:
-    """Structured 402 detail with how_to_pay.L402 for agent discovery."""
+    """Structured 402 detail with how_to_pay.L402 (for require_l402 challenges)."""
     price = amount_sats if amount_sats is not None else settings.POST_PRICE_SATS
     return {
         "detail": message,
         "price": {"sats": price},
-        "how_to_pay": build_how_to_pay(),
+        "how_to_pay": build_how_to_pay(include_l402=True),
     }
 
 
@@ -185,8 +195,8 @@ def well_known_l402_document() -> dict:
                 "preimage = pay_invoice(invoice)  # your wallet SDK\n"
                 "# 3. Retry with L402 auth\n"
                 f"r = httpx.post('{base}/api/v1/post',\n"
-                "    json={{'content': 'hello'}},\n"
-                "    headers={{'Authorization': f'L402 {{macaroon}}:{{preimage}}'}}\n"
+                "    json={'content': 'hello'},\n"
+                "    headers={'Authorization': f'L402 {macaroon}:{preimage}'}\n"
                 ")\n"
             ),
         },
