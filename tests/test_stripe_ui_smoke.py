@@ -1,4 +1,4 @@
-"""7a.11: Playwright e2e for Stripe Card tab / Elements / SPT settle / downvote fallthrough.
+"""7a.11–7a.12: Playwright e2e for Stripe Card tab / Elements / SPT / downvote L402 paths.
 
 TestStripeWebClientWidget in test_stripe.py is source-string only. These drive a real
 browser against live CSP + route-mocked 402 producer shapes (from _build_payment_options).
@@ -425,6 +425,152 @@ async def test_playwright_stripe_downvote_l402_fail_fallthrough_shows_card_tab(
         await page.wait_for_selector(
             '#pw-stripe-card [data-mock-stripe-element="card"]',
             timeout=10_000,
+        )
+
+        await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_playwright_l402_downvote_success_keeps_pw_widget_hidden(live_server):
+    """7a.12: successful L402 downvote settle must leave #pw-widget hidden (no Stripe tab).
+
+    Contrasts 7a.11 fallthrough (L402 fail → Card tab). WebLN stubs a preimage; retry
+    returns voted:true. Invariant: widget stays .hidden / #pw-tab-stripe not forced.
+    """
+    playwright = pytest.importorskip("playwright.async_api")
+    async_playwright = playwright.async_playwright
+
+    base = live_server["base"]
+    headless = not bool(os.environ.get("DISPLAY"))
+    l402_retries: list[str] = []
+
+    with httpx.Client(
+        base_url=base, timeout=10.0, headers={"X-Requested-With": "XMLHttpRequest"}
+    ) as c:
+        note_id = c.post(
+            "/api/v1/post", json={"content": "7a12-l402-downvote-success-seed"}
+        ).json()["event"]["id"]
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=headless)
+        page = await browser.new_page()
+
+        async def _route(route):
+            req = route.request
+            url = req.url
+            if "js.stripe.com" in url:
+                await route.fulfill(
+                    status=200,
+                    content_type="application/javascript",
+                    body=_MOCK_STRIPE_JS,
+                )
+                return
+            if (
+                req.method == "POST"
+                and f"/api/v1/events/{note_id}/vote" in url
+                and "/confirm" not in url
+            ):
+                auth = req.headers.get("authorization") or ""
+                if auth.startswith("L402 "):
+                    l402_retries.append(auth)
+                    await route.fulfill(
+                        status=200,
+                        content_type="application/json",
+                        body=json.dumps(
+                            {
+                                "voted": True,
+                                "new_sats_clank": 42,
+                                "new_sats_ext": 0,
+                                "direction": -1,
+                                "amount_sats": 21,
+                            }
+                        ),
+                    )
+                    return
+                # Co-challenge L402 + stripe — success path must NOT open Stripe tab
+                body = json.loads(
+                    _stripe_402_body(
+                        token="vote-tok-7a12",
+                        include_l402=True,
+                        include_stripe=True,
+                        include_lightning=True,
+                    )
+                )
+                body["event_id"] = note_id
+                body["direction"] = -1
+                body["amount_sats"] = 21
+                # Override helper defaults so Auth header is attributable to this case
+                body["l402"] = {
+                    "macaroon": "mac_test_7a12",
+                    "invoice": "lnbc210n17a12playwright",
+                }
+                body["bolt11"] = body["l402"]["invoice"]
+                body["lightning"]["bolt11"] = body["l402"]["invoice"]
+                await route.fulfill(
+                    status=402,
+                    content_type="application/json",
+                    headers={
+                        "WWW-Authenticate": (
+                            'L402 macaroon="mac_test_7a12", '
+                            'invoice="lnbc210n17a12playwright"'
+                        ),
+                    },
+                    body=json.dumps(body),
+                )
+                return
+            await route.continue_()
+
+        await page.route("**/*", _route)
+        await page.goto(base, wait_until="domcontentloaded", timeout=30_000)
+        await page.wait_for_selector(f"#note-{note_id}", timeout=15_000)
+
+        # Stub WebLN so payL402AndRetry succeeds (preimage → Authorization: L402 retry)
+        await page.evaluate(
+            """() => {
+              window.__bcLaunchPaymentModal = undefined;
+              window.__bcConnected = false;
+              window.webln = {
+                enabled: true,
+                enable: async () => {},
+                sendPayment: async () => ({
+                  preimage: 'aa' + 'bb'.repeat(31),
+                }),
+              };
+            }"""
+        )
+
+        # #pw-widget is lazy-created by showPaymentWidget — must not exist yet
+        assert await page.locator("#pw-widget").count() == 0
+
+        await page.click(f'#note-{note_id} button[data-action="downvote"]')
+        await page.wait_for_selector(f"#vote-prompt-{note_id}.active", timeout=5_000)
+        await page.click(f'#note-{note_id} button[data-action="submit-vote"]')
+
+        for _ in range(80):
+            if l402_retries:
+                break
+            await page.wait_for_timeout(100)
+
+        assert l402_retries, "expected L402 Authorization retry after WebLN pay"
+        assert l402_retries[-1].startswith("L402 mac_test_7a12:"), l402_retries[-1]
+
+        # Poll voteSuccess status (CSP blocks page.wait_for_function / unsafe-eval)
+        status = ""
+        for _ in range(50):
+            status = (await page.locator(f"#vote-status-{note_id}").text_content()) or ""
+            if "sats" in status:
+                break
+            await page.wait_for_timeout(100)
+        assert "sats" in status and "-21" in status.replace(" ", ""), (
+            f"expected voteSuccess status, got {status!r}"
+        )
+
+        # Success invariant: widget must stay absent/hidden (7a.11 fallthrough would open it)
+        assert await page.locator("#pw-widget:not(.hidden)").count() == 0, (
+            "successful L402 downvote must leave #pw-widget hidden/absent"
+        )
+        assert await page.locator("#pw-tab-stripe:not(.hidden)").count() == 0, (
+            "successful L402 downvote must not force #pw-tab-stripe visible"
         )
 
         await browser.close()
