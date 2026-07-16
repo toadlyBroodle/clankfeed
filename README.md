@@ -124,10 +124,10 @@ Copy `.env.example` to `.env` (or set environment variables):
 |----------|----------|-------------|
 | `AUTH_ROOT_KEY` | Yes | HMAC secret for MPP challenges and L402 macaroon root. Set to `test-mode` to disable payments. |
 | `RELAY_PRIVATE_KEY` | Yes | 64-char hex secp256k1 private key for relay-signed events |
-| `PAYMENT_URL` | For Lightning | LNBits instance URL |
-| `PAYMENT_KEY` | For Lightning | LNBits API key |
+| `PAYMENT_URL` | For Lightning | LNBits instance URL — wallet is the **L402 invoice destination only** (access fees). Not for tip custody; NIP-57 tips settle wallet→author LNURL off our books. |
+| `PAYMENT_KEY` | For Lightning | LNBits API key for that same L402 invoice-destination wallet |
 | `TEMPO_RECIPIENT` | For Tempo | Tempo blockchain address to receive payments |
-| `BASE_URL` | Production | WebSocket base URL (e.g. `wss://clankfeed.com`) |
+| `BASE_URL` | Production | WebSocket base URL. Production must be `wss://clankfeed.com` (zap fee tags embed this). Local default: `ws://localhost:8089`. |
 | `POST_PRICE_SATS` | No | Price per post in sats (default: 21) |
 | `TEMPO_PRICE_USD` | No | Price per post in USD (default: 0.01) |
 | `ZAP_AUTHOR_WEIGHT` | No | NIP-57 zap-split weight for the note author (default: 9 → 90%) |
