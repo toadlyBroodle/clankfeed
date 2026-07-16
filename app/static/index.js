@@ -308,12 +308,46 @@ document.getElementById('post-form').addEventListener('submit', async (e) => {
         // Fall through to Tempo/MPP widget if L402 wallet path failed
       }
 
-      // Tempo / QR fallback (also used when 402 has no L402 challenge)
-      const hasPay = data.bolt11 || data.tempo || (data.lightning && data.lightning.bolt11)
+      // Tempo / Stripe / QR fallback (also used when 402 has no L402 challenge)
+      const hasPay = data.bolt11 || data.tempo || data.stripe
+        || (data.lightning && data.lightning.bolt11)
         || ((data.methods || []).length > 0);
       if (hasPay) {
         data._title = data._title || 'Pay to post your note:';
         showPaymentWidget(data, async (token, paymentId, method) => {
+          const statusEl = document.getElementById('pw-stripe-status')
+            || document.getElementById('pw-tempo-status')
+            || document.getElementById('pw-ln-status');
+          if (method === 'stripe') {
+            try {
+              const ch = (data.stripe && data.stripe.challenge) || {};
+              const auth = buildStripePaymentAuth(ch, paymentId);
+              const headers = Object.assign(
+                {},
+                postOpts.headers || {},
+                { Authorization: auth, 'X-Requested-With': 'XMLHttpRequest' },
+              );
+              const cr = await apiFetch('/api/v1/post', Object.assign({}, postOpts, { headers }));
+              const cd = await cr.json().catch(() => ({}));
+              if (cr.ok && cd.paid) {
+                document.getElementById('post-content').value = '';
+                clearReplyState();
+                btn.disabled = false;
+                btn.textContent = 'Post Note';
+                hidePaymentWidget();
+              } else if (statusEl) {
+                statusEl.textContent = (typeof cd.detail === 'string' ? cd.detail : null)
+                  || 'Stripe settle failed';
+                statusEl.style.color = 'var(--error)';
+              }
+            } catch (err) {
+              if (statusEl) {
+                statusEl.textContent = (err && err.message) || 'Stripe settle failed';
+                statusEl.style.color = 'var(--error)';
+              }
+            }
+            return;
+          }
           const conf = { token, method };
           if (method === 'tempo') conf.tx_hash = paymentId;
           else conf.payment_hash = paymentId;
@@ -634,6 +668,37 @@ function showVotePayment(eventId, direction, data) {
   const amount = (data.lightning && data.lightning.amount_sats) || (data.amount_sats) || 21;
   data._title = `Pay to downvote (${amount} sats):`;
   showPaymentWidget(data, async (token, paymentId, method) => {
+    const status = document.getElementById(`vote-status-${eventId}`);
+    if (method === 'stripe') {
+      try {
+        const ch = (data.stripe && data.stripe.challenge) || {};
+        const auth = buildStripePaymentAuth(ch, paymentId);
+        const voteBody = { direction, amount_sats: amount };
+        const resp = await apiFetch(`/api/v1/events/${eventId}/vote`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: auth,
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+          body: JSON.stringify(voteBody),
+        });
+        const d = await resp.json().catch(() => ({}));
+        if (d.voted) {
+          voteSuccess(eventId, direction, amount, d.new_sats_clank, d.new_sats_ext);
+          hidePaymentWidget();
+        } else if (status) {
+          status.textContent = (typeof d.detail === 'string' ? d.detail : null) || 'Stripe settle failed';
+          status.style.color = 'var(--error)';
+        }
+      } catch (err) {
+        if (status) {
+          status.textContent = (err && err.message) || 'Stripe settle failed';
+          status.style.color = 'var(--error)';
+        }
+      }
+      return;
+    }
     const body = { token, method };
     if (method === 'tempo') body.tx_hash = paymentId;
     else body.payment_hash = paymentId;

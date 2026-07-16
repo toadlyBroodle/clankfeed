@@ -112,10 +112,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         # 'unsafe-inline' for Tailwind CDN + small inline style attrs.
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
-            "script-src 'self' https://cdn.tailwindcss.com https://cdn.jsdelivr.net https://esm.sh; "
+            "script-src 'self' https://cdn.tailwindcss.com https://cdn.jsdelivr.net https://esm.sh https://js.stripe.com; "
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' https: data:; "
-            "connect-src 'self' wss: ws: https://esm.sh; "
+            "connect-src 'self' wss: ws: https://esm.sh https://api.stripe.com; "
+            "frame-src https://js.stripe.com https://hooks.stripe.com; "
             "font-src 'self'; "
             "object-src 'none'; "
             "frame-ancestors 'none'; "

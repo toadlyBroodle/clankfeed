@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any
 
 from app.config import settings
@@ -29,6 +30,10 @@ from app.mpp import (
     _format_expires,
     _MPP_REALM,
 )
+
+# Preview API version required for Shared Payment Token endpoints
+_STRIPE_SPT_API_VERSION = "2026-04-22.preview"
+_SPT_TTL_SECONDS = 600
 
 logger = logging.getLogger("clankfeed.stripe")
 
@@ -78,6 +83,101 @@ def build_stripe_challenge(amount_usd: str | None = None, description: str = "")
         parts.append(f'description="{safe_desc}"')
 
     return "Payment " + ", ".join(parts)
+
+
+def parse_stripe_challenge_header(header: str) -> dict[str, str]:
+    """Parse `Payment id="…", realm="…", …` into a dict of param values."""
+    params: dict[str, str] = {}
+    body = header[len("Payment "):] if header.startswith("Payment ") else header
+    for part in body.split(", "):
+        if "=" not in part:
+            continue
+        key, val = part.split("=", 1)
+        params[key.strip()] = val.strip().strip('"')
+    return params
+
+
+def stripe_challenge_echo(
+    amount_usd: str | None = None,
+    description: str = "",
+) -> dict[str, str]:
+    """Challenge fields for JSON 402 bodies (browser multi-WWW-Authenticate is flaky)."""
+    header = build_stripe_challenge(amount_usd, description)
+    params = parse_stripe_challenge_header(header)
+    return {
+        "id": params.get("id", ""),
+        "realm": params.get("realm", ""),
+        "method": params.get("method", "stripe"),
+        "intent": params.get("intent", "charge"),
+        "request": params.get("request", ""),
+        "expires": params.get("expires", ""),
+    }
+
+
+async def create_spt_from_payment_method(
+    payment_method: str,
+    *,
+    amount_cents: int | None = None,
+) -> str:
+    """Mint an SPT for a Stripe PaymentMethod (MPP createToken proxy).
+
+    Amount/currency/expiry are ALWAYS server-derived — never trust client values.
+    Test keys use test_helpers/shared_payment/granted_tokens; live keys use
+    shared_payment/issued_tokens scoped to STRIPE_PROFILE_ID.
+    """
+    if not payment_method or not str(payment_method).startswith("pm_"):
+        raise ValueError("payment_method must be a Stripe pm_… id")
+
+    cents = amount_cents if amount_cents is not None else usd_to_cents(settings.STRIPE_PRICE_USD)
+    if cents < 50:
+        # Stripe card SPT floor
+        cents = 50
+    expires_at = int(time.time()) + _SPT_TTL_SECONDS
+    secret = settings.STRIPE_SECRET_KEY or ""
+    network_id = settings.STRIPE_PROFILE_ID or ""
+
+    def _create() -> str:
+        import stripe
+
+        stripe.api_key = secret
+        params: dict[str, Any] = {
+            "payment_method": payment_method,
+            "usage_limits": {
+                "currency": "usd",
+                "max_amount": cents,
+                "expires_at": expires_at,
+            },
+        }
+        if secret.startswith("sk_test"):
+            path = "/v1/test_helpers/shared_payment/granted_tokens"
+        else:
+            path = "/v1/shared_payment/issued_tokens"
+            params["seller_details"] = {"network_business_profile": network_id}
+
+        resp = stripe.raw_request(
+            "post",
+            path,
+            params=params,
+            headers={"Stripe-Version": _STRIPE_SPT_API_VERSION},
+        )
+        # raw_request returns StripeResponse or similar with .data / parsed body
+        body = resp
+        if hasattr(resp, "data"):
+            body = resp.data
+        if isinstance(body, (bytes, bytearray)):
+            body = json.loads(body.decode())
+        elif isinstance(body, str):
+            body = json.loads(body)
+        elif not isinstance(body, dict):
+            # StripeObject
+            body = dict(body) if hasattr(body, "keys") else {"id": getattr(body, "id", "")}
+
+        spt_id = (body or {}).get("id") or ""
+        if not spt_id or not str(spt_id).startswith("spt_"):
+            raise RuntimeError(f"Stripe SPT mint returned unexpected body: {body!r}")
+        return str(spt_id)
+
+    return await asyncio.to_thread(_create)
 
 
 def extract_stripe_spt(credential: dict) -> str:

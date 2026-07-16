@@ -131,6 +131,36 @@ function parseL402Challenge(resp, body) {
   return null;
 }
 
+/** Base64url-encode bytes (no padding) for MPP Authorization: Payment credentials. */
+function _b64urlEncodeBytes(bytes) {
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/**
+ * Build Authorization: Payment <base64url> for Stripe SPT settle.
+ * challenge = data.stripe.challenge echo from 402 JSON; spt = spt_…
+ */
+function buildStripePaymentAuth(challenge, spt) {
+  if (!challenge || !challenge.id || !challenge.request || !spt) {
+    throw new Error('Missing Stripe challenge or SPT');
+  }
+  const credential = {
+    challenge: {
+      id: challenge.id,
+      realm: challenge.realm || '',
+      method: challenge.method || 'stripe',
+      intent: challenge.intent || 'charge',
+      request: challenge.request,
+      expires: challenge.expires || '',
+    },
+    payload: { spt: spt },
+  };
+  const bytes = new TextEncoder().encode(JSON.stringify(credential));
+  return 'Payment ' + _b64urlEncodeBytes(bytes);
+}
+
 /** Pay BOLT11 via WebLN / Bitcoin Connect; return hex preimage (no 0x). */
 async function payBolt11ForPreimage(bolt11, statusEl) {
   const setStatus = (msg, color) => {

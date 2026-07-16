@@ -1,6 +1,7 @@
 """Phase 7a: Stripe SPT (MPP method=stripe) — challenge/verify with mocked Stripe API."""
 
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -482,3 +483,184 @@ class TestStripeDiscovery:
         assert "Stripe" in guidance, guidance[:400]
         assert "Tempo" not in guidance, guidance[:400]
         app.openapi_schema = None
+
+
+# ---------------------------------------------------------------------------
+# 7a.5: Web client Stripe.js / SPT tab + create-spt proxy
+# ---------------------------------------------------------------------------
+
+STATIC = Path(__file__).resolve().parents[1] / "app" / "static"
+
+
+class TestStripeWebClientWidget:
+    """7a.5: payment widget shows Stripe tab when 402 includes stripe."""
+
+    def test_widget_has_stripe_tab_and_panel(self):
+        src = (STATIC / "payment-widget.js").read_text()
+        assert "pw-tab-stripe" in src
+        assert "pw-stripe" in src
+        assert "methods.includes('stripe')" in src or 'methods.includes("stripe")' in src
+
+    def test_widget_loads_stripe_js_when_stripe_present(self):
+        src = (STATIC / "payment-widget.js").read_text()
+        assert "js.stripe.com" in src or "loadStripe" in src or "Stripe(" in src
+        assert "publishable_key" in src
+
+    def test_widget_pay_builds_or_confirms_spt(self):
+        """Pay path must mint SPT via create-spt (or paste) then settle as stripe."""
+        src = (STATIC / "payment-widget.js").read_text()
+        assert "/payments/stripe-spt" in src or "stripe-spt" in src
+        assert "spt" in src.lower()
+        # Confirm callback with method stripe (Tempo pattern) or Authorization Payment
+        assert "'stripe'" in src or '"stripe"' in src
+
+    def test_index_handles_stripe_settle(self):
+        index = (STATIC / "index.js").read_text()
+        # Must wire stripe into post confirm / Authorization retry
+        assert "stripe" in index.lower()
+        assert (
+            "method === 'stripe'" in index
+            or 'method === "stripe"' in index
+            or "Payment " in index
+            or "buildStripe" in index
+            or "stripe-spt" in index
+        )
+
+    def test_adversarial_stripe_tab_hidden_by_default(self):
+        """Tab must start hidden; only shown when methods includes stripe."""
+        src = (STATIC / "payment-widget.js").read_text()
+        # Initial markup hides the stripe tab (same pattern as Tempo)
+        assert 'id="pw-tab-stripe"' in src
+        tab_line = [ln for ln in src.splitlines() if 'id="pw-tab-stripe"' in ln][0]
+        assert "hidden" in tab_line
+
+
+class TestStripeChallengeEchoInBody:
+    """Browser fetch collapses multi WWW-Authenticate; JSON must echo stripe challenge."""
+
+    def test_build_payment_options_includes_challenge_echo(self, monkeypatch):
+        from app.api_v1 import _build_payment_options
+
+        monkeypatch.setattr(config.settings, "STRIPE_SECRET_KEY", "sk_test_x")
+        monkeypatch.setattr(config.settings, "STRIPE_PROFILE_ID", "profile_test_abc")
+        monkeypatch.setattr(config.settings, "STRIPE_PUBLISHABLE_KEY", "pk_test_x")
+        monkeypatch.setattr(config.settings, "STRIPE_PRICE_USD", "0.50")
+        monkeypatch.setattr(config.settings, "AUTH_ROOT_KEY", "stripe-hmac-root")
+        monkeypatch.setattr(config.settings, "TEMPO_RECIPIENT", "")
+
+        with patch("app.api_v1.tempo_enabled", return_value=False), \
+             patch("app.api_v1.payments_enabled", return_value=False), \
+             patch("app.api_v1.stripe_enabled", return_value=True):
+            opts = _build_payment_options(amount_usd="0.50")
+            assert "stripe" in opts["methods"]
+            stripe = opts["stripe"]
+            # Challenge echo for MPP credential (id/realm/method/intent/request/expires)
+            ch = stripe.get("challenge") or {}
+            assert ch.get("id"), stripe
+            assert ch.get("method") == "stripe"
+            assert ch.get("request"), stripe
+            assert ch.get("expires"), stripe
+            assert ch.get("realm"), stripe
+            assert ch.get("intent") == "charge"
+
+
+class TestCreateStripeSptEndpoint:
+    """7a.5: POST /api/v1/payments/stripe-spt — server-derived SPT mint proxy."""
+
+    @pytest.mark.asyncio
+    async def test_create_spt_returns_spt(self, client, monkeypatch):
+        monkeypatch.setattr(config.settings, "STRIPE_SECRET_KEY", "sk_test_x")
+        monkeypatch.setattr(config.settings, "STRIPE_PROFILE_ID", "profile_test_abc")
+        monkeypatch.setattr(config.settings, "STRIPE_PRICE_USD", "0.50")
+        monkeypatch.setattr(config.settings, "AUTH_ROOT_KEY", "test-mode")
+
+        fake = MagicMock()
+        fake.id = "spt_test_minted_xyz"
+
+        with patch("app.stripe_pay.create_spt_from_payment_method", new_callable=AsyncMock) as mock_create:
+            mock_create.return_value = "spt_test_minted_xyz"
+            resp = await client.post(
+                "/api/v1/payments/stripe-spt",
+                json={"payment_method": "pm_card_visa"},
+                headers={"X-Requested-With": "XMLHttpRequest"},
+            )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["spt"] == "spt_test_minted_xyz"
+        mock_create.assert_awaited_once()
+        # Server derives amount — must NOT pass client amount as authority
+        kwargs = mock_create.await_args.kwargs if mock_create.await_args.kwargs else {}
+        args = mock_create.await_args.args if mock_create.await_args else ()
+        # payment_method is first positional or kw
+        assert "pm_card_visa" in args or kwargs.get("payment_method") == "pm_card_visa"
+
+    @pytest.mark.asyncio
+    async def test_create_spt_rejects_client_amount(self, client, monkeypatch):
+        """Adversarial: client-supplied amount/max_amount must not override server price."""
+        monkeypatch.setattr(config.settings, "STRIPE_SECRET_KEY", "sk_test_x")
+        monkeypatch.setattr(config.settings, "STRIPE_PROFILE_ID", "profile_test_abc")
+        monkeypatch.setattr(config.settings, "STRIPE_PRICE_USD", "0.50")
+        monkeypatch.setattr(config.settings, "AUTH_ROOT_KEY", "test-mode")
+
+        with patch("app.stripe_pay.create_spt_from_payment_method", new_callable=AsyncMock) as mock_create:
+            mock_create.return_value = "spt_ok"
+            resp = await client.post(
+                "/api/v1/payments/stripe-spt",
+                json={
+                    "payment_method": "pm_card_visa",
+                    "amount": "1",  # try underpay / override
+                    "max_amount": 1,
+                    "currency": "usd",
+                },
+                headers={"X-Requested-With": "XMLHttpRequest"},
+            )
+        assert resp.status_code == 200
+        # create must be called with server cents (50), not client 1
+        call_kwargs = mock_create.await_args.kwargs
+        call_args = mock_create.await_args.args
+        # Look for amount_cents=50 somewhere
+        combined = str(call_args) + str(call_kwargs)
+        assert "50" in combined or call_kwargs.get("amount_cents") == 50, combined
+
+    @pytest.mark.asyncio
+    async def test_create_spt_disabled_when_stripe_off(self, client, monkeypatch):
+        monkeypatch.setattr(config.settings, "STRIPE_SECRET_KEY", "")
+        monkeypatch.setattr(config.settings, "STRIPE_PROFILE_ID", "")
+        monkeypatch.setattr(config.settings, "AUTH_ROOT_KEY", "test-mode")
+        resp = await client.post(
+            "/api/v1/payments/stripe-spt",
+            json={"payment_method": "pm_card_visa"},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        assert resp.status_code in (402, 503, 501)
+        detail = str(resp.json()).lower()
+        assert "stripe" in detail or "not configured" in detail or "disabled" in detail
+
+    @pytest.mark.asyncio
+    async def test_create_spt_requires_payment_method(self, client, monkeypatch):
+        monkeypatch.setattr(config.settings, "STRIPE_SECRET_KEY", "sk_test_x")
+        monkeypatch.setattr(config.settings, "STRIPE_PROFILE_ID", "profile_test_abc")
+        monkeypatch.setattr(config.settings, "AUTH_ROOT_KEY", "test-mode")
+        resp = await client.post(
+            "/api/v1/payments/stripe-spt",
+            json={},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        assert resp.status_code == 400
+
+
+class TestStripeCspHosts:
+    """7a.5: CSP must allow Stripe.js + Elements frames/connect."""
+
+    @pytest.mark.asyncio
+    async def test_csp_allows_stripe_js(self, client):
+        resp = await client.get("/")
+        csp = resp.headers.get("content-security-policy", "")
+        assert "js.stripe.com" in csp
+        # Elements mounts iframes
+        assert "frame-src" in csp
+        assert "js.stripe.com" in csp
+        assert "hooks.stripe.com" in csp or "js.stripe.com" in [
+            p.strip() for p in csp.split(";") if "frame-src" in p
+        ][0]
+        assert "api.stripe.com" in csp  # connect-src for Stripe.js XHR

@@ -214,12 +214,14 @@ def _build_payment_options(
     if stripe_enabled():
         stripe_usd = amount_usd or settings.STRIPE_PRICE_USD
         methods.append("stripe")
+        from app.stripe_pay import stripe_challenge_echo
         result["stripe"] = {
             "network_id": settings.STRIPE_PROFILE_ID,
             "amount_usd": stripe_usd,
             "currency": "usd",
             "publishable_key": settings.STRIPE_PUBLISHABLE_KEY,
             "payment_method_types": ["card", "link"],
+            "challenge": stripe_challenge_echo(stripe_usd, "clankfeed payment"),
         }
 
     result["methods"] = methods
@@ -731,6 +733,55 @@ async def relay_post(request: Request, db: AsyncSession = Depends(get_db)):
         amount_sats=req_sats,
         amount_usd=req_usd,
     )
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/payments/stripe-spt  (MPP createToken proxy for web client)
+# ---------------------------------------------------------------------------
+
+@router.post("/payments/stripe-spt")
+@limiter.limit(RATE_INVOICE)
+async def create_stripe_spt(request: Request):
+    """Mint a Shared Payment Token from a Stripe PaymentMethod (7a.5).
+
+    Body: {"payment_method": "pm_…"}. Amount/currency/expiry are server-derived
+    from STRIPE_PRICE_USD — client-supplied amount fields are ignored.
+    """
+    if not stripe_enabled():
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Stripe is not configured"},
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"detail": "Invalid JSON body"})
+
+    payment_method = (body.get("payment_method") or "").strip()
+    if not payment_method or not payment_method.startswith("pm_"):
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "payment_method (pm_…) is required"},
+        )
+
+    from app.stripe_pay import create_spt_from_payment_method, usd_to_cents
+
+    # Server-derived amount only — ignore any client amount/max_amount/currency
+    amount_cents = usd_to_cents(settings.STRIPE_PRICE_USD)
+    try:
+        spt = await create_spt_from_payment_method(
+            payment_method,
+            amount_cents=amount_cents,
+        )
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+    except Exception as e:
+        logger.error("Stripe SPT mint failed: %s", e)
+        return JSONResponse(
+            status_code=502,
+            content={"detail": "Failed to create Shared Payment Token"},
+        )
+    return {"spt": spt}
 
 
 # ---------------------------------------------------------------------------

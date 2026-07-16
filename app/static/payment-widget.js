@@ -1,11 +1,11 @@
 /**
  * Shared payment widget for clankfeed.
- * Injects a full payment UI (Lightning QR + Tempo tabs) into the page.
- * Requires: nostr-auth.js (payInvoice, esc), QRious CDN.
+ * Injects a full payment UI (Lightning QR + Tempo + Stripe tabs) into the page.
+ * Requires: nostr-auth.js (payInvoice, esc, buildStripePaymentAuth), QRious CDN.
  *
  * Usage:
  *   showPaymentWidget(data, onConfirm, onCancel, anchorEl)
- *   - data: server response with token, bolt11/lightning, tempo, methods
+ *   - data: server response with token, bolt11/lightning, tempo, stripe, methods
  *   - onConfirm(token, paymentId, method): called after payment confirmed
  *   - onCancel: called when user clicks Cancel
  *   - anchorEl: DOM element to insert widget after (optional)
@@ -14,6 +14,9 @@
 let _pw_currentData = null;
 let _pw_currentBolt11 = '';
 let _pw_activeMethod = 'lightning';
+let _pw_stripe = null;
+let _pw_stripeCard = null;
+let _pw_stripeMounting = false;
 
 function _ensureWidgetDOM() {
   if (document.getElementById('pw-widget')) return;
@@ -28,6 +31,7 @@ function _ensureWidgetDOM() {
     <div id="pw-tabs" class="flex gap-2 mb-3 text-xs">
       <button id="pw-tab-ln" class="px-3 py-1 rounded bg-primary">Lightning</button>
       <button id="pw-tab-tempo" class="hidden px-3 py-1 rounded bg-alt">Tempo (USD)</button>
+      <button id="pw-tab-stripe" class="hidden px-3 py-1 rounded bg-alt">Card (Stripe)</button>
     </div>
     <div id="pw-lightning">
       <div class="flex gap-4 items-start">
@@ -60,10 +64,84 @@ function _ensureWidgetDOM() {
         <p class="text-xs c-dim" id="pw-tempo-status"></p>
       </div>
     </div>
+    <div id="pw-stripe" class="hidden">
+      <div class="text-xs space-y-2">
+        <p class="c-dim">Pay <span id="pw-stripe-amount" class="c-accent"></span> with card:</p>
+        <div id="pw-stripe-card" class="p-2 rounded" style="background:#111;min-height:40px;border:1px solid var(--border);"></div>
+        <div class="flex gap-2 items-center">
+          <button class="px-3 py-1 rounded text-xs" id="pw-stripe-pay-btn">Pay with card</button>
+        </div>
+        <div class="mt-2">
+          <label class="block mb-1 c-dim">Or paste SPT (agents):</label>
+          <div class="flex gap-2">
+            <input id="pw-stripe-spt" type="text" class="p-2 rounded text-xs flex-1" placeholder="spt_...">
+            <button class="px-3 py-1 rounded text-xs" id="pw-stripe-spt-btn">Confirm SPT</button>
+          </div>
+        </div>
+        <p class="text-xs c-dim" id="pw-stripe-status"></p>
+      </div>
+    </div>
   `;
   document.body.appendChild(div);  // temporary; moved by showPaymentWidget
   document.getElementById('pw-tab-ln').addEventListener('click', () => _pwSwitchTab('lightning'));
   document.getElementById('pw-tab-tempo').addEventListener('click', () => _pwSwitchTab('tempo'));
+  document.getElementById('pw-tab-stripe').addEventListener('click', () => _pwSwitchTab('stripe'));
+}
+
+function _loadStripeJs() {
+  return new Promise((resolve, reject) => {
+    if (window.Stripe) return resolve(window.Stripe);
+    const existing = document.querySelector('script[data-cf-stripe]');
+    if (existing) {
+      existing.addEventListener('load', () => resolve(window.Stripe));
+      existing.addEventListener('error', () => reject(new Error('Stripe.js failed to load')));
+      return;
+    }
+    const s = document.createElement('script');
+    s.src = 'https://js.stripe.com/v3/';
+    s.async = true;
+    s.setAttribute('data-cf-stripe', '1');
+    s.onload = () => resolve(window.Stripe);
+    s.onerror = () => reject(new Error('Stripe.js failed to load'));
+    document.head.appendChild(s);
+  });
+}
+
+async function _pwMountStripeCard(data) {
+  const statusEl = document.getElementById('pw-stripe-status');
+  const mountEl = document.getElementById('pw-stripe-card');
+  if (!data || !data.stripe || !data.stripe.publishable_key) {
+    if (statusEl) statusEl.textContent = 'Stripe publishable key missing';
+    return;
+  }
+  if (_pw_stripeCard || _pw_stripeMounting) return;
+  _pw_stripeMounting = true;
+  try {
+    const StripeCtor = await _loadStripeJs();
+    _pw_stripe = StripeCtor(data.stripe.publishable_key);
+    const elements = _pw_stripe.elements();
+    _pw_stripeCard = elements.create('card', {
+      style: {
+        base: { color: '#4ade80', '::placeholder': { color: '#666' }, fontSize: '14px' },
+        invalid: { color: '#f87171' },
+      },
+    });
+    if (mountEl) {
+      mountEl.innerHTML = '';
+      _pw_stripeCard.mount('#pw-stripe-card');
+    }
+    if (statusEl) {
+      statusEl.textContent = '';
+      statusEl.style.color = 'var(--dim)';
+    }
+  } catch (err) {
+    if (statusEl) {
+      statusEl.textContent = (err && err.message) || 'Failed to load Stripe';
+      statusEl.style.color = 'var(--error)';
+    }
+  } finally {
+    _pw_stripeMounting = false;
+  }
 }
 
 function showPaymentWidget(data, onConfirm, onCancel, anchorEl) {
@@ -92,6 +170,7 @@ function showPaymentWidget(data, onConfirm, onCancel, anchorEl) {
   // Tabs
   document.getElementById('pw-tab-ln').classList.toggle('hidden', !methods.includes('lightning'));
   document.getElementById('pw-tab-tempo').classList.toggle('hidden', !methods.includes('tempo'));
+  document.getElementById('pw-tab-stripe').classList.toggle('hidden', !methods.includes('stripe'));
 
   // Tempo fields
   if (data.tempo) {
@@ -101,6 +180,20 @@ function showPaymentWidget(data, onConfirm, onCancel, anchorEl) {
     document.getElementById('pw-tempo-network').textContent = data.tempo.testnet ? '(testnet)' : '(mainnet)';
     document.getElementById('pw-tempo-tx').value = '';
     document.getElementById('pw-tempo-status').textContent = '';
+  }
+
+  // Stripe fields
+  if (data.stripe) {
+    document.getElementById('pw-stripe-amount').textContent =
+      (data.stripe.amount_usd || '') + ' USD';
+    document.getElementById('pw-stripe-spt').value = '';
+    document.getElementById('pw-stripe-status').textContent = '';
+    // Unmount previous card element when re-showing
+    if (_pw_stripeCard) {
+      try { _pw_stripeCard.destroy(); } catch (e) {}
+      _pw_stripeCard = null;
+      _pw_stripe = null;
+    }
   }
 
   _pwSwitchTab(methods[0] || 'lightning');
@@ -132,6 +225,65 @@ function showPaymentWidget(data, onConfirm, onCancel, anchorEl) {
     const btn = document.getElementById('pw-tempo-copy');
     btn.textContent = '[copied!]';
     setTimeout(() => btn.textContent = '[copy]', 1500);
+  };
+
+  // Stripe: card pay via Elements → /api/v1/payments/stripe-spt → onConfirm(spt)
+  document.getElementById('pw-stripe-pay-btn').onclick = async () => {
+    const statusEl = document.getElementById('pw-stripe-status');
+    if (!_pw_stripe || !_pw_stripeCard) {
+      statusEl.textContent = 'Card form not ready — switch to Card tab again';
+      statusEl.style.color = 'var(--error)';
+      return;
+    }
+    statusEl.textContent = 'Creating payment method...';
+    statusEl.style.color = 'var(--dim)';
+    try {
+      const { paymentMethod, error } = await _pw_stripe.createPaymentMethod({
+        type: 'card',
+        card: _pw_stripeCard,
+      });
+      if (error) {
+        statusEl.textContent = error.message || 'Card error';
+        statusEl.style.color = 'var(--error)';
+        return;
+      }
+      statusEl.textContent = 'Minting SPT...';
+      const resp = await fetch('/api/v1/payments/stripe-spt', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
+        },
+        body: JSON.stringify({ payment_method: paymentMethod.id }),
+      });
+      const body = await resp.json().catch(() => ({}));
+      if (!resp.ok || !body.spt) {
+        statusEl.textContent = (typeof body.detail === 'string' ? body.detail : null)
+          || 'SPT mint failed';
+        statusEl.style.color = 'var(--error)';
+        return;
+      }
+      statusEl.textContent = 'Confirming...';
+      statusEl.style.color = 'var(--accent)';
+      if (onConfirm) await onConfirm(data.token, body.spt, 'stripe');
+    } catch (err) {
+      statusEl.textContent = (err && err.message) || 'Stripe pay failed';
+      statusEl.style.color = 'var(--error)';
+    }
+  };
+
+  // Stripe: paste SPT (agents)
+  document.getElementById('pw-stripe-spt-btn').onclick = async () => {
+    const spt = document.getElementById('pw-stripe-spt').value.trim();
+    const statusEl = document.getElementById('pw-stripe-status');
+    if (!spt || !spt.startsWith('spt_')) {
+      statusEl.textContent = 'Enter a valid SPT (spt_...)';
+      statusEl.style.color = 'var(--error)';
+      return;
+    }
+    statusEl.textContent = 'Confirming SPT...';
+    statusEl.style.color = 'var(--dim)';
+    if (onConfirm) await onConfirm(data.token, spt, 'stripe');
   };
 
   // Lightning: auto-pay via BC when onConfirm provided; else QR display only (L402 caller settles)
@@ -170,10 +322,13 @@ function _pwSwitchTab(method) {
   _pw_activeMethod = method;
   const ln = document.getElementById('pw-lightning');
   const tempo = document.getElementById('pw-tempo');
+  const stripe = document.getElementById('pw-stripe');
   if (ln) ln.classList.toggle('hidden', method !== 'lightning');
   if (tempo) tempo.classList.toggle('hidden', method !== 'tempo');
+  if (stripe) stripe.classList.toggle('hidden', method !== 'stripe');
   const lnTab = document.getElementById('pw-tab-ln');
   const tempoTab = document.getElementById('pw-tab-tempo');
+  const stripeTab = document.getElementById('pw-tab-stripe');
   if (lnTab) {
     const lnHidden = lnTab.classList.contains('hidden');
     lnTab.className = (lnHidden ? 'hidden ' : '') + (method === 'lightning' ? 'px-3 py-1 rounded bg-primary' : 'px-3 py-1 rounded bg-alt');
@@ -181,5 +336,12 @@ function _pwSwitchTab(method) {
   if (tempoTab) {
     const tempoHidden = tempoTab.classList.contains('hidden');
     tempoTab.className = (tempoHidden ? 'hidden ' : '') + (method === 'tempo' ? 'px-3 py-1 rounded bg-primary' : 'px-3 py-1 rounded bg-alt');
+  }
+  if (stripeTab) {
+    const stripeHidden = stripeTab.classList.contains('hidden');
+    stripeTab.className = (stripeHidden ? 'hidden ' : '') + (method === 'stripe' ? 'px-3 py-1 rounded bg-primary' : 'px-3 py-1 rounded bg-alt');
+  }
+  if (method === 'stripe' && _pw_currentData) {
+    _pwMountStripeCard(_pw_currentData);
   }
 }

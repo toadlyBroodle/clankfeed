@@ -44,6 +44,7 @@ from app.stripe_pay import (
     build_stripe_challenge,
     verify_stripe_credential,
     extract_stripe_payment_id,
+    stripe_challenge_echo,
 )
 
 from app.limiter import limiter
@@ -51,6 +52,19 @@ from app.limiter import limiter
 logger = logging.getLogger("clankfeed.payment")
 
 router = APIRouter()
+
+
+def _stripe_option_body(amount_usd: str | None = None, description: str = "clankfeed payment") -> dict:
+    """JSON stripe block for 402 bodies (includes challenge echo for web client)."""
+    usd = amount_usd or settings.STRIPE_PRICE_USD
+    return {
+        "network_id": settings.STRIPE_PROFILE_ID,
+        "amount_usd": usd,
+        "currency": "usd",
+        "publishable_key": settings.STRIPE_PUBLISHABLE_KEY,
+        "payment_method_types": ["card", "link"],
+        "challenge": stripe_challenge_echo(usd, description),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -121,13 +135,7 @@ async def payment_required_challenge(
         if "stripe" not in methods:
             methods.append("stripe")
         body["methods"] = methods
-        body["stripe"] = {
-            "network_id": settings.STRIPE_PROFILE_ID,
-            "amount_usd": stripe_usd,
-            "currency": "usd",
-            "publishable_key": settings.STRIPE_PUBLISHABLE_KEY,
-            "payment_method_types": ["card", "link"],
-        }
+        body["stripe"] = _stripe_option_body(stripe_usd, description or "clankfeed payment")
 
     body["how_to_pay"] = build_how_to_pay(include_l402=include_l402)
     response = RawResponse(
@@ -403,13 +411,9 @@ async def pay_get(request: Request, token: str, db: AsyncSession = Depends(get_d
             ),
         )
         body["methods"].append("stripe")
-        body["stripe"] = {
-            "network_id": settings.STRIPE_PROFILE_ID,
-            "amount_usd": settings.STRIPE_PRICE_USD,
-            "currency": "usd",
-            "publishable_key": settings.STRIPE_PUBLISHABLE_KEY,
-            "payment_method_types": ["card", "link"],
-        }
+        body["stripe"] = _stripe_option_body(
+            settings.STRIPE_PRICE_USD, "Pay to post a note on clankfeed relay",
+        )
 
     if tempo_enabled() or stripe_enabled():
         response.body = json.dumps(body).encode()
@@ -566,13 +570,9 @@ async def api_post(request: Request, db: AsyncSession = Depends(get_db)):
 
         if stripe_enabled():
             result["methods"].append("stripe")
-            result["stripe"] = {
-                "network_id": settings.STRIPE_PROFILE_ID,
-                "amount_usd": settings.STRIPE_PRICE_USD,
-                "currency": "usd",
-                "publishable_key": settings.STRIPE_PUBLISHABLE_KEY,
-                "payment_method_types": ["card", "link"],
-            }
+            result["stripe"] = _stripe_option_body(
+                settings.STRIPE_PRICE_USD, "clankfeed note posting",
+            )
 
         from starlette.responses import Response as RawResponse
         response = RawResponse(
@@ -620,13 +620,9 @@ async def api_post(request: Request, db: AsyncSession = Depends(get_db)):
 
     if stripe_enabled():
         result["methods"].append("stripe")
-        result["stripe"] = {
-            "network_id": settings.STRIPE_PROFILE_ID,
-            "amount_usd": settings.STRIPE_PRICE_USD,
-            "currency": "usd",
-            "publishable_key": settings.STRIPE_PUBLISHABLE_KEY,
-            "payment_method_types": ["card", "link"],
-        }
+        result["stripe"] = _stripe_option_body(
+            settings.STRIPE_PRICE_USD, "clankfeed note posting",
+        )
         result["how_to_pay"] = build_how_to_pay(include_l402=False)
 
     return result
