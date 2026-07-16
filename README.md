@@ -182,6 +182,10 @@ Copy `.env.example` to `.env` (or set environment variables):
 | `PAYMENT_URL` | For Lightning | LNBits instance URL — wallet is the **L402 invoice destination only** (access fees). Not for tip custody; NIP-57 tips settle wallet→author LNURL off our books. |
 | `PAYMENT_KEY` | For Lightning | LNBits API key for that same L402 invoice-destination wallet |
 | `TEMPO_RECIPIENT` | For Tempo | Tempo blockchain address to receive payments |
+| `STRIPE_SECRET_KEY` | For Stripe SPT | Stripe secret key; empty disables Stripe. Requires machine payments + `STRIPE_PROFILE_ID`. |
+| `STRIPE_PUBLISHABLE_KEY` | For Stripe UI | `pk_…` for Elements / web client (optional until 7a.5). |
+| `STRIPE_PROFILE_ID` | For Stripe SPT | Business Network `profile_…` id (`networkId` in MPP challenges). |
+| `STRIPE_PRICE_USD` | No | Stripe SPT price in USD (default: `0.50`; card SPT floor). |
 | `BASE_URL` | Production | WebSocket base URL. Production must be `wss://clankfeed.com` (zap fee tags embed this). Local default: `ws://localhost:8089`. |
 | `POST_PRICE_SATS` | No | Price per post in sats (default: 21) |
 | `TEMPO_PRICE_USD` | No | Price per post in USD (default: 0.01) |

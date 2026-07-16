@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import (
-    settings, payments_enabled, tempo_enabled,
+    settings, payments_enabled, tempo_enabled, stripe_enabled,
     RATE_POST, RATE_POST_CONFIRM, RATE_EVENTS_READ, RATE_PAY_STATUS,
     RATE_ACCOUNT_CREATE, RATE_INVOICE,
     ALLOWED_EVENT_KINDS, MAX_CONTENT_LENGTH, MAX_EVENT_TAGS,
@@ -33,6 +33,7 @@ from app.nostr import validate_event, sign_event
 from app.zaps import append_zap_split_tags, pubkey_from_privkey, validate_kind1_zap_fee_tags
 from app.relay import store_event, broadcast_event, store_pending_event, query_events, row_to_event
 from app.tempo_pay import build_tempo_challenge, verify_tempo_credential, extract_tempo_tx_hash
+from app.stripe_pay import build_stripe_challenge
 
 logger = logging.getLogger("clankfeed.api_v1")
 
@@ -95,6 +96,9 @@ async def _error_402_with_challenge(
 
     if tempo_enabled():
         www_headers.append(build_tempo_challenge(usd, description))
+
+    if stripe_enabled():
+        www_headers.append(build_stripe_challenge(amount_usd or settings.STRIPE_PRICE_USD, description))
 
     body["how_to_pay"] = build_how_to_pay(include_l402=include_l402)
     response = RawResponse(
@@ -160,6 +164,11 @@ def _payment_required_response(
             "WWW-Authenticate",
             build_tempo_challenge(amount_usd or settings.TEMPO_PRICE_USD, description),
         )
+    if stripe_enabled():
+        response.headers.append(
+            "WWW-Authenticate",
+            build_stripe_challenge(amount_usd or settings.STRIPE_PRICE_USD, description),
+        )
     return response
 
 
@@ -200,6 +209,17 @@ def _build_payment_options(
             "amount_usd": usd,
             "chain": "tempo",
             "testnet": settings.TEMPO_TESTNET,
+        }
+
+    if stripe_enabled():
+        stripe_usd = amount_usd or settings.STRIPE_PRICE_USD
+        methods.append("stripe")
+        result["stripe"] = {
+            "network_id": settings.STRIPE_PROFILE_ID,
+            "amount_usd": stripe_usd,
+            "currency": "usd",
+            "publishable_key": settings.STRIPE_PUBLISHABLE_KEY,
+            "payment_method_types": ["card", "link"],
         }
 
     result["methods"] = methods
@@ -290,7 +310,7 @@ async def submit_event(request: Request, db: AsyncSession = Depends(get_db)):
     # no Authorization header at all, return 402 before body validation.
     # This lets mppscan probe the endpoint without needing a valid body.
     auth_header = request.headers.get("authorization", "")
-    if (payments_enabled() or tempo_enabled()) and not auth_header:
+    if (payments_enabled() or tempo_enabled() or stripe_enabled()) and not auth_header:
         return await _error_402_with_challenge({
             "type": "https://paymentauth.org/problems/payment-required",
             "title": "Payment required",
@@ -350,7 +370,7 @@ async def submit_event(request: Request, db: AsyncSession = Depends(get_db)):
         req_usd = settings.TEMPO_PRICE_USD
 
     # No payment configured: store directly with minimum value
-    if not payments_enabled() and not tempo_enabled():
+    if not payments_enabled() and not tempo_enabled() and not stripe_enabled():
         await store_event(db, event, sats_clank=req_sats, value_usd=req_usd)
         await broadcast_event(event)
         return {"paid": True, "event": event, "sats_clank": req_sats}
@@ -374,9 +394,9 @@ async def submit_event(request: Request, db: AsyncSession = Depends(get_db)):
             or settlement.get("tx_hash")
             or ""
         )
-        # 14.15: MPP/Tempo settle must emit Payment-Receipt (mirror pay_post)
-        if protocol in ("mpp", "tempo") and payment_id:
-            method = "lightning" if protocol == "mpp" else "tempo"
+        # 14.15 / 7a: MPP/Tempo/Stripe settle must emit Payment-Receipt (mirror pay_post)
+        if protocol in ("mpp", "tempo", "stripe") and payment_id:
+            method = {"mpp": "lightning", "tempo": "tempo", "stripe": "stripe"}[protocol]
             return JSONResponse(
                 status_code=200,
                 content={"paid": True, "event": event, "sats_clank": req_sats},
@@ -603,7 +623,7 @@ async def relay_post(request: Request, db: AsyncSession = Depends(get_db)):
     # Early 402 for payment discovery only (empty body / no content, no auth).
     # Content-bearing unpaid posts fall through to pending + token/l402/lightning JSON
     # so the web client's Tempo/QR fallback can run (14.16).
-    if (payments_enabled() or tempo_enabled()) and not auth_header and not content:
+    if (payments_enabled() or tempo_enabled() or stripe_enabled()) and not auth_header and not content:
         return await _error_402_with_challenge({
             "type": "https://paymentauth.org/problems/payment-required",
             "title": "Payment required",
@@ -656,7 +676,7 @@ async def relay_post(request: Request, db: AsyncSession = Depends(get_db)):
         req_usd = settings.TEMPO_PRICE_USD
 
     # No payment configured: store directly
-    if not payments_enabled() and not tempo_enabled():
+    if not payments_enabled() and not tempo_enabled() and not stripe_enabled():
         await store_event(db, signed, sats_clank=req_sats, value_usd=req_usd)
         await broadcast_event(signed)
         return {"paid": True, "event": signed, "sats_clank": req_sats}
@@ -690,7 +710,7 @@ async def relay_post(request: Request, db: AsyncSession = Depends(get_db)):
         bolt11 = invoice_data["payment_request"]
 
     # Tempo-only (no Lightning): keep 200 token body for transitional Tempo clients
-    if not payments_enabled() and tempo_enabled():
+    if not payments_enabled() and (tempo_enabled() or stripe_enabled()):
         options = _build_payment_options(
             payment_hash, bolt11, amount_sats=req_sats, amount_usd=req_usd,
         )
@@ -858,7 +878,7 @@ async def vote_event(request: Request, event_id: str, db: AsyncSession = Depends
     }
 
     # No payment configured: apply vote directly
-    if not payments_enabled() and not tempo_enabled():
+    if not payments_enabled() and not tempo_enabled() and not stripe_enabled():
         from app.models import Vote
         vote = Vote(
             id=secrets.token_hex(32),
@@ -930,7 +950,7 @@ async def vote_event(request: Request, event_id: str, db: AsyncSession = Depends
         payment_hash = invoice_data["payment_hash"]
         bolt11 = invoice_data["payment_request"]
 
-    if not payments_enabled() and tempo_enabled():
+    if not payments_enabled() and (tempo_enabled() or stripe_enabled()):
         options = _build_payment_options(
             payment_hash, bolt11, amount_sats=req_sats, amount_usd=req_usd,
         )

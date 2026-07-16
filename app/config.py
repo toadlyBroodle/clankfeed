@@ -37,6 +37,12 @@ class Settings:
     TEMPO_PRICE_USD: str = os.getenv("TEMPO_PRICE_USD", "0.01")
     TEMPO_TESTNET: bool = os.getenv("TEMPO_TESTNET", "true").lower() == "true"
 
+    # Stripe SPT (MPP method=stripe). Card SPT minimum is $0.50.
+    STRIPE_SECRET_KEY: str = os.getenv("STRIPE_SECRET_KEY", "")
+    STRIPE_PUBLISHABLE_KEY: str = os.getenv("STRIPE_PUBLISHABLE_KEY", "")
+    STRIPE_PROFILE_ID: str = os.getenv("STRIPE_PROFILE_ID", "")  # Business Network profile_
+    STRIPE_PRICE_USD: str = os.getenv("STRIPE_PRICE_USD", "0.50")
+
     # NIP-57 zap fee split (Phase 13): author:relay weights for zap tags (default 9:1 = 90/10).
     ZAP_AUTHOR_WEIGHT: int = int(os.getenv("ZAP_AUTHOR_WEIGHT", "9"))
     ZAP_RELAY_WEIGHT: int = int(os.getenv("ZAP_RELAY_WEIGHT", "1"))
@@ -49,6 +55,11 @@ settings = Settings()
 def tempo_enabled() -> bool:
     """Return True if Tempo payments are configured."""
     return bool(settings.TEMPO_RECIPIENT)
+
+
+def stripe_enabled() -> bool:
+    """Return True if Stripe SPT (MPP method=stripe) is configured."""
+    return bool(settings.STRIPE_SECRET_KEY) and bool(settings.STRIPE_PROFILE_ID)
 
 
 def payments_enabled() -> bool:

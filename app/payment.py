@@ -2,8 +2,8 @@
 
 Unified router (satring payment.py pattern):
   - Authorization: L402|LSAT ... → L402 path (primary)
-  - Authorization: Payment ...   → MPP Lightning or Tempo (co-challenge)
-  - No auth                      → 402 with L402 + MPP (+ Tempo) challenges
+  - Authorization: Payment ...   → MPP Lightning, Tempo, or Stripe SPT (co-challenge)
+  - No auth                      → 402 with L402 + MPP (+ Tempo/Stripe) challenges
 
 Legacy HTTP routes: GET/POST /pay, GET /pay/status, POST /api/post, confirm.
 """
@@ -21,7 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import (
-    settings, payments_enabled, tempo_enabled, PENDING_EVENT_TTL,
+    settings, payments_enabled, tempo_enabled, stripe_enabled, PENDING_EVENT_TTL,
     RATE_POST, RATE_PAY, RATE_PAY_STATUS, RATE_POST_CONFIRM,
     MAX_CONTENT_LENGTH, MAX_DISPLAY_NAME,
 )
@@ -40,6 +40,11 @@ from app.nostr import sign_event
 from app.zaps import append_zap_split_tags, pubkey_from_privkey
 from app.relay import store_event, broadcast_event, store_pending_event
 from app.tempo_pay import build_tempo_challenge, verify_tempo_credential, extract_tempo_tx_hash
+from app.stripe_pay import (
+    build_stripe_challenge,
+    verify_stripe_credential,
+    extract_stripe_payment_id,
+)
 
 from app.limiter import limiter
 
@@ -59,7 +64,7 @@ async def payment_required_challenge(
     amount_usd: str = "",
     description: str = "Pay to post a note on clankfeed relay",
 ) -> "RawResponse":
-    """Flat 402 JSON with L402 (primary) + MPP (+ Tempo) WWW-Authenticate challenges.
+    """Flat 402 JSON with L402 (primary) + MPP (+ Tempo/Stripe) WWW-Authenticate challenges.
 
     Prefer this for agent-facing endpoints that expect how_to_pay at the top level.
     """
@@ -68,6 +73,7 @@ async def payment_required_challenge(
 
     sats = amount_sats or settings.POST_PRICE_SATS
     usd = amount_usd or settings.TEMPO_PRICE_USD
+    stripe_usd = amount_usd or settings.STRIPE_PRICE_USD
     include_l402 = False
     body = dict(error_body)
     www_headers: list[str] = []
@@ -109,6 +115,20 @@ async def payment_required_challenge(
     if tempo_enabled():
         www_headers.append(build_tempo_challenge(usd, description))
 
+    if stripe_enabled():
+        www_headers.append(build_stripe_challenge(stripe_usd, description))
+        methods = list(body.get("methods") or [])
+        if "stripe" not in methods:
+            methods.append("stripe")
+        body["methods"] = methods
+        body["stripe"] = {
+            "network_id": settings.STRIPE_PROFILE_ID,
+            "amount_usd": stripe_usd,
+            "currency": "usd",
+            "publishable_key": settings.STRIPE_PUBLISHABLE_KEY,
+            "payment_method_types": ["card", "link"],
+        }
+
     body["how_to_pay"] = build_how_to_pay(include_l402=include_l402)
     response = RawResponse(
         content=json.dumps(body),
@@ -132,6 +152,7 @@ async def _raise_unified_402(
 
     sats = amount_sats or settings.POST_PRICE_SATS
     usd = amount_usd or settings.TEMPO_PRICE_USD
+    stripe_usd = amount_usd or settings.STRIPE_PRICE_USD
     www_parts: list[str] = []
     include_l402 = False
 
@@ -155,6 +176,9 @@ async def _raise_unified_402(
 
     if tempo_enabled():
         www_parts.append(build_tempo_challenge(usd, memo))
+
+    if stripe_enabled():
+        www_parts.append(build_stripe_challenge(stripe_usd, memo))
 
     if not www_parts:
         raise HTTPException(status_code=402, detail=detail)
@@ -186,23 +210,24 @@ async def require_payment(
     amount_usd: str | None = None,
     challenge_on_missing: bool = True,
 ) -> dict | None:
-    """Unified payment gate: L402 (primary) + MPP Lightning + Tempo.
+    """Unified payment gate: L402 (primary) + MPP Lightning + Tempo + Stripe SPT.
 
     Returns a settlement dict on success:
       {"_protocol": "l402"} |
       {"_protocol": "mpp", "payment_hash": "..."} |
-      {"_protocol": "tempo", "tx_hash": "..."}
+      {"_protocol": "tempo", "tx_hash": "..."} |
+      {"_protocol": "stripe", "payment_hash": "pi_..."}
 
     Returns None when payments are disabled (test mode) or when there is no
     Authorization header and challenge_on_missing is False (caller handles
     pending-token / flat 402 flow).
 
-    Raises HTTPException(402) with L402+MPP(+Tempo) challenges when unpaid
+    Raises HTTPException(402) with L402+MPP(+Tempo/Stripe) challenges when unpaid
     (challenge_on_missing=True) or when credentials are invalid.
     """
     from app.l402 import require_l402
 
-    if not payments_enabled() and not tempo_enabled():
+    if not payments_enabled() and not tempo_enabled() and not stripe_enabled():
         return None
 
     auth = request.headers.get("Authorization", "")
@@ -217,7 +242,7 @@ async def require_payment(
         await require_l402(request=request, db=db, amount_sats=amount_sats, memo=memo)
         return {"_protocol": "l402"}
 
-    # MPP Payment auth (Lightning or Tempo)
+    # MPP Payment auth (Lightning, Tempo, or Stripe)
     if has_mpp:
         credential = parse_mpp_credential(auth)
         if not credential:
@@ -242,6 +267,23 @@ async def require_payment(
                         amount_sats, memo, usd, "Payment already consumed",
                     )
             return {"_protocol": "tempo", "tx_hash": tx_hash, "payment_hash": tx_hash}
+
+        if method == "stripe":
+            if not stripe_enabled():
+                await _raise_unified_402(amount_sats, memo, usd, "Stripe payments not configured")
+            valid = await verify_stripe_credential(credential)
+            if not valid:
+                await _raise_unified_402(amount_sats, memo, usd, "Invalid Stripe payment proof")
+            payment_id = extract_stripe_payment_id(credential)
+            if not payment_id:
+                await _raise_unified_402(amount_sats, memo, usd, "Missing Stripe payment id")
+            if db is not None:
+                consumed = await check_and_consume_payment(payment_id, db)
+                if not consumed:
+                    await _raise_unified_402(
+                        amount_sats, memo, usd, "Payment already consumed",
+                    )
+            return {"_protocol": "stripe", "payment_hash": payment_id}
 
         if method == "lightning" or method == "":
             if not payments_enabled():
@@ -336,7 +378,7 @@ async def pay_get(request: Request, token: str, db: AsyncSession = Depends(get_d
     response.headers.append("WWW-Authenticate", lightning_challenge)
     response.headers["Cache-Control"] = "no-store"
 
-    # Add Tempo challenge if configured
+    # Add Tempo / Stripe co-challenges if configured
     if tempo_enabled():
         tempo_challenge = build_tempo_challenge(
             settings.TEMPO_PRICE_USD,
@@ -351,7 +393,25 @@ async def pay_get(request: Request, token: str, db: AsyncSession = Depends(get_d
             "chain": "tempo",
             "testnet": settings.TEMPO_TESTNET,
         }
-        # Re-serialize body with tempo info
+
+    if stripe_enabled():
+        response.headers.append(
+            "WWW-Authenticate",
+            build_stripe_challenge(
+                settings.STRIPE_PRICE_USD,
+                "Pay to post a note on clankfeed relay",
+            ),
+        )
+        body["methods"].append("stripe")
+        body["stripe"] = {
+            "network_id": settings.STRIPE_PROFILE_ID,
+            "amount_usd": settings.STRIPE_PRICE_USD,
+            "currency": "usd",
+            "publishable_key": settings.STRIPE_PUBLISHABLE_KEY,
+            "payment_method_types": ["card", "link"],
+        }
+
+    if tempo_enabled() or stripe_enabled():
         response.body = json.dumps(body).encode()
 
     return response
@@ -392,8 +452,8 @@ async def pay_post(request: Request, token: str, db: AsyncSession = Depends(get_
     )
 
     headers = {"Cache-Control": "private"}
-    if protocol in ("mpp", "tempo") and payment_id:
-        method = "lightning" if protocol == "mpp" else "tempo"
+    if protocol in ("mpp", "tempo", "stripe") and payment_id:
+        method = {"mpp": "lightning", "tempo": "tempo", "stripe": "stripe"}[protocol]
         headers["Payment-Receipt"] = build_receipt(payment_id, method=method)
 
     return JSONResponse(
@@ -452,8 +512,8 @@ async def api_post(request: Request, db: AsyncSession = Depends(get_db)):
     }
     signed = sign_event(settings.RELAY_PRIVATE_KEY, event)
 
-    # Test mode without Tempo: skip payment entirely
-    if not payments_enabled() and not tempo_enabled():
+    # Test mode without Tempo/Stripe: skip payment entirely
+    if not payments_enabled() and not tempo_enabled() and not stripe_enabled():
         await store_event(db, signed)
         await broadcast_event(signed)
         return {"event": signed, "paid": True}
@@ -504,6 +564,16 @@ async def api_post(request: Request, db: AsyncSession = Depends(get_db)):
                 "testnet": settings.TEMPO_TESTNET,
             }
 
+        if stripe_enabled():
+            result["methods"].append("stripe")
+            result["stripe"] = {
+                "network_id": settings.STRIPE_PROFILE_ID,
+                "amount_usd": settings.STRIPE_PRICE_USD,
+                "currency": "usd",
+                "publishable_key": settings.STRIPE_PUBLISHABLE_KEY,
+                "payment_method_types": ["card", "link"],
+            }
+
         from starlette.responses import Response as RawResponse
         response = RawResponse(
             content=json.dumps(result),
@@ -529,9 +599,14 @@ async def api_post(request: Request, db: AsyncSession = Depends(get_db)):
                 "WWW-Authenticate",
                 build_tempo_challenge(settings.TEMPO_PRICE_USD, "clankfeed note posting"),
             )
+        if stripe_enabled():
+            response.headers.append(
+                "WWW-Authenticate",
+                build_stripe_challenge(settings.STRIPE_PRICE_USD, "clankfeed note posting"),
+            )
         return response
 
-    # Tempo-only (no Lightning)
+    # Tempo / Stripe only (no Lightning)
     if tempo_enabled():
         result["methods"].append("tempo")
         result["tempo"] = {
@@ -540,6 +615,17 @@ async def api_post(request: Request, db: AsyncSession = Depends(get_db)):
             "amount_usd": settings.TEMPO_PRICE_USD,
             "chain": "tempo",
             "testnet": settings.TEMPO_TESTNET,
+        }
+        result["how_to_pay"] = build_how_to_pay(include_l402=False)
+
+    if stripe_enabled():
+        result["methods"].append("stripe")
+        result["stripe"] = {
+            "network_id": settings.STRIPE_PROFILE_ID,
+            "amount_usd": settings.STRIPE_PRICE_USD,
+            "currency": "usd",
+            "publishable_key": settings.STRIPE_PUBLISHABLE_KEY,
+            "payment_method_types": ["card", "link"],
         }
         result["how_to_pay"] = build_how_to_pay(include_l402=False)
 

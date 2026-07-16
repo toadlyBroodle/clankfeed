@@ -17,6 +17,7 @@ from app.config import (
     settings,
     payments_enabled,
     tempo_enabled,
+    stripe_enabled,
     MAX_SUBSCRIPTIONS_PER_CONN,
     MAX_FILTERS_PER_REQ,
     MAX_SUBSCRIPTION_ID_LENGTH,
@@ -406,7 +407,7 @@ async def _handle_event(conn: Connection, msg: list, db: AsyncSession):
                     await conn.send(["OK", event_id, False, f"invalid: tag value exceeds {MAX_TAG_VALUE_LENGTH} chars"])
                     return
 
-    if not payments_enabled() and not tempo_enabled():
+    if not payments_enabled() and not tempo_enabled() and not stripe_enabled():
         # No payment methods configured: store directly
         await store_event(db, event)
         await conn.send(["OK", event_id, True, ""])
