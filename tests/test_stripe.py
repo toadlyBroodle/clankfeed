@@ -431,3 +431,54 @@ class TestStripeDiscovery:
         assert "Stripe when configured" not in guidance
         assert "and Stripe" not in guidance
         app.openapi_schema = None
+
+    @pytest.mark.asyncio
+    async def test_openapi_l402_live_omits_stripe_and_tempo_when_disabled(
+        self, client, monkeypatch,
+    ):
+        """7a.9 adversarial: L402-live x-guidance must not hardcode Stripe/Tempo when off.
+
+        Prod runs with payments_enabled() True, so the L402-live branch ships; without
+        guards it advertises Stripe while NIP-11 correctly omits it.
+        """
+        from app.main import app
+
+        app.openapi_schema = None
+        monkeypatch.setattr(config.settings, "AUTH_ROOT_KEY", "real-secret-key-for-testing")
+        monkeypatch.setattr(config.settings, "STRIPE_SECRET_KEY", "")
+        monkeypatch.setattr(config.settings, "STRIPE_PROFILE_ID", "")
+        monkeypatch.setattr(config.settings, "TEMPO_RECIPIENT", "")
+        assert config.payments_enabled() is True
+        assert config.stripe_enabled() is False
+        assert config.tempo_enabled() is False
+
+        resp = await client.get("/openapi.json")
+        assert resp.status_code == 200
+        guidance = resp.json()["info"].get("x-guidance", "")
+        assert "L402 (primary)" in guidance, guidance[:300]
+        assert "and Stripe" not in guidance, guidance[:400]
+        assert "Stripe" not in guidance, guidance[:400]
+        assert "Tempo" not in guidance, guidance[:400]
+        app.openapi_schema = None
+
+    @pytest.mark.asyncio
+    async def test_openapi_l402_live_names_stripe_when_enabled(
+        self, client, monkeypatch,
+    ):
+        """7a.9: when payments + Stripe are on, L402-live Accepts-line names Stripe."""
+        from app.main import app
+
+        app.openapi_schema = None
+        monkeypatch.setattr(config.settings, "AUTH_ROOT_KEY", "real-secret-key-for-testing")
+        monkeypatch.setattr(config.settings, "STRIPE_SECRET_KEY", "sk_test_discovery")
+        monkeypatch.setattr(config.settings, "STRIPE_PROFILE_ID", "profile_discovery")
+        monkeypatch.setattr(config.settings, "TEMPO_RECIPIENT", "")
+        assert config.payments_enabled() is True
+        assert config.stripe_enabled() is True
+
+        resp = await client.get("/openapi.json")
+        guidance = resp.json()["info"].get("x-guidance", "")
+        assert "L402 (primary)" in guidance, guidance[:300]
+        assert "Stripe" in guidance, guidance[:400]
+        assert "Tempo" not in guidance, guidance[:400]
+        app.openapi_schema = None

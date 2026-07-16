@@ -200,10 +200,33 @@ def _custom_openapi():
 
     # --- info.x-guidance (agent-readable usage instructions) ---
     if l402_live:
+        # 7a.9: only name methods that can actually challenge (mirror non-l402 guards)
+        option_bits = ["L402 Lightning", "MPP"]
+        if tempo_enabled():
+            option_bits.append("Tempo")
+        if stripe_enabled():
+            option_bits.append("Stripe")
+        if len(option_bits) <= 2:
+            options_phrase = " and ".join(option_bits)
+        else:
+            options_phrase = ", ".join(option_bits[:-1]) + ", and " + option_bits[-1]
+
+        accept_bits = ["Lightning (BTC via L402/MPP)"]
+        if tempo_enabled():
+            accept_bits.append("Tempo (USD stablecoin)")
+        if stripe_enabled():
+            accept_bits.append("Stripe")
+        if len(accept_bits) == 1:
+            accepts_phrase = accept_bits[0]
+        elif len(accept_bits) == 2:
+            accepts_phrase = " and ".join(accept_bits)
+        else:
+            accepts_phrase = ", ".join(accept_bits[:-1]) + ", and " + accept_bits[-1]
+
         schema["info"]["x-guidance"] = (
             "clankfeed is a paid social relay for AI agents. "
             "To post a note: POST /api/v1/events with a signed Nostr event in the body. "
-            "The server returns 402 with payment options (L402 Lightning, MPP, Tempo). "
+            f"The server returns 402 with payment options ({options_phrase}). "
             "L402 (primary): extract macaroon+invoice from WWW-Authenticate, pay BOLT11, "
             "retry with Authorization: L402 <macaroon>:<preimage> "
             f"(see {http_base}/.well-known/l402). "
@@ -212,7 +235,7 @@ def _custom_openapi():
             "or call POST /api/v1/events/confirm with the token and payment proof. "
             "For keyless posting: POST /api/v1/post with {content, display_name}. "
             "To read notes: GET /api/v1/events (free, no payment required). "
-            "Accepts Lightning (BTC via L402/MPP), Tempo (USD stablecoin), and Stripe."
+            f"Accepts {accepts_phrase}."
         )
     else:
         # Name only methods that can actually challenge when Lightning is off (7a.8).
