@@ -342,104 +342,46 @@ async def pay_get(request: Request, token: str, db: AsyncSession = Depends(get_d
 @router.post("/pay")
 @limiter.limit(RATE_PAY)
 async def pay_post(request: Request, token: str, db: AsyncSession = Depends(get_db)):
-    """Verify L402 or MPP credential and store the paid event."""
+    """Verify L402 or MPP credential via require_payment and store the paid event."""
     pending = await db.get(PendingEvent, token)
     if not pending or pending.expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
         return JSONResponse(status_code=404, content={"detail": "Token expired or not found"})
 
-    # L402 / LSAT (14.12) — GET /pay advertises L402; accept it before MPP parse
-    from app.l402 import try_l402
-    from fastapi import HTTPException
-    try:
-        if await try_l402(
-            request, db=db, amount_sats=settings.POST_PRICE_SATS, memo="clankfeed note posting",
-        ):
-            event = json.loads(pending.event_json)
-            await store_event(db, event)
-            await db.delete(pending)
-            await db.commit()
-            await broadcast_event(event)
-            logger.info("Payment confirmed (L402): event=%s", event["id"][:12])
-            return JSONResponse(
-                status_code=200,
-                content={"event": event},
-                headers={"Cache-Control": "private"},
-            )
-    except HTTPException:
-        raise
+    req_sats = pending.amount_sats or settings.POST_PRICE_SATS
+    req_usd = pending.amount_usd or settings.TEMPO_PRICE_USD
 
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Payment "):
-        return await _error_402_with_challenge({
-            "type": "https://paymentauth.org/problems/malformed-credential",
-            "title": "Missing Payment authorization",
-            "detail": "Authorization header must start with 'Payment '",
-        })
+    # Unified payment router (14.13): L402|LSAT|MPP|Tempo; underpay gated
+    settlement = await require_payment(
+        request,
+        amount_sats=req_sats,
+        memo="clankfeed note posting",
+        db=db,
+        amount_usd=req_usd,
+        challenge_on_missing=True,
+    )
 
-    credential = parse_mpp_credential(auth)
-    if not credential:
-        return await _error_402_with_challenge({
-            "type": "https://paymentauth.org/problems/malformed-credential",
-            "title": "Malformed credential",
-            "detail": "Could not decode Payment credential",
-        })
-
-    # Route verification by payment method
-    method = credential.get("challenge", {}).get("method", "")
-    challenge_id = credential.get("challenge", {}).get("id", "")
-    if method == "tempo":
-        valid = await verify_tempo_credential(credential)
-        payment_id = extract_tempo_tx_hash(credential)
-    elif method == "lightning":
-        valid = verify_mpp_credential(credential)
-        payment_id = extract_payment_hash(credential)
-    else:
-        return await _error_402_with_challenge({
-            "type": "https://paymentauth.org/problems/method-unsupported",
-            "title": "Unsupported payment method",
-            "detail": f"Method '{method}' is not supported",
-        })
-
-    if not valid:
-        return await _error_402_with_challenge({
-            "type": "https://paymentauth.org/problems/verification-failed",
-            "title": "Verification failed",
-            "detail": "Invalid payment proof",
-        })
-
-    if not payment_id:
-        return await _error_402_with_challenge({
-            "type": "https://paymentauth.org/problems/verification-failed",
-            "title": "Verification failed",
-            "detail": "Missing payment identifier",
-        })
-
-    consumed = await check_and_consume_payment(payment_id, db)
-    if not consumed:
-        return await _error_402_with_challenge({
-            "type": "https://paymentauth.org/problems/invalid-challenge",
-            "title": "Invalid challenge",
-            "detail": "Payment already consumed",
-        })
-
-    # Store the event
     event = json.loads(pending.event_json)
     await store_event(db, event)
-
-    # Clean up pending
     await db.delete(pending)
     await db.commit()
-
-    # Broadcast to WebSocket subscribers
     await broadcast_event(event)
-    logger.info("Payment confirmed (legacy): event=%s method=%s payment=%s",
-                event["id"][:12], method, payment_id[:16])
 
-    receipt = build_receipt(payment_id, method=method, challenge_id=challenge_id)
+    protocol = (settlement or {}).get("_protocol", "unknown")
+    payment_id = (settlement or {}).get("payment_hash") or (settlement or {}).get("tx_hash") or ""
+    logger.info(
+        "Payment confirmed (%s): event=%s payment=%s",
+        protocol, event["id"][:12], (payment_id or "")[:16],
+    )
+
+    headers = {"Cache-Control": "private"}
+    if protocol in ("mpp", "tempo") and payment_id:
+        method = "lightning" if protocol == "mpp" else "tempo"
+        headers["Payment-Receipt"] = build_receipt(payment_id, method=method)
+
     return JSONResponse(
         status_code=200,
         content={"event": event},
-        headers={"Payment-Receipt": receipt, "Cache-Control": "private"},
+        headers=headers,
     )
 
 
@@ -498,16 +440,19 @@ async def api_post(request: Request, db: AsyncSession = Depends(get_db)):
         await broadcast_event(signed)
         return {"event": signed, "paid": True}
 
-    # L402 / LSAT (14.3)
-    from app.l402 import try_l402, build_how_to_pay, l402_www_authenticate
-    from fastapi import HTTPException
-    try:
-        if await try_l402(request, db=db, amount_sats=settings.POST_PRICE_SATS, memo="clankfeed note posting"):
-            await store_event(db, signed)
-            await broadcast_event(signed)
-            return {"event": signed, "paid": True}
-    except HTTPException:
-        raise
+    # Unified payment router (14.13)
+    from app.l402 import build_how_to_pay, l402_www_authenticate
+    settlement = await require_payment(
+        request,
+        amount_sats=settings.POST_PRICE_SATS,
+        memo="clankfeed note posting",
+        db=db,
+        challenge_on_missing=False,
+    )
+    if settlement:
+        await store_event(db, signed)
+        await broadcast_event(signed)
+        return {"event": signed, "paid": True}
 
     # Store as pending (requires payment via Lightning or Tempo)
     token = await store_pending_event(db, signed)

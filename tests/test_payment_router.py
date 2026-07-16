@@ -303,3 +303,190 @@ class TestHowToPayPrimary:
         how = build_how_to_pay(include_l402=True)
         assert how.get("primary") == "L402"
         assert list(how.keys())[0] == "primary" or list(how.keys()).index("L402") < list(how.keys()).index("MPP")
+
+
+# ---------------------------------------------------------------------------
+# 14.13: endpoint-level wiring — require_payment on live paid handlers
+# ---------------------------------------------------------------------------
+
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+
+from app.database import Base, engine
+from app.limiter import limiter
+from app.main import app
+from app.nostr import sign_event
+from tests.conftest import kind1_tags
+
+ROUTER_ROOT = "router-endpoint-root-key"
+ROUTER_SK = "e" * 64
+
+
+@pytest.fixture(autouse=True)
+def _reset_limiter_for_router_endpoints():
+    limiter.reset()
+    yield
+    limiter.reset()
+
+
+@pytest_asyncio.fixture
+async def router_paid_client(monkeypatch):
+    """Payments on — AUTH_ROOT_KEY not test-mode."""
+    monkeypatch.setenv("AUTH_ROOT_KEY", ROUTER_ROOT)
+    from app import config
+
+    monkeypatch.setattr(config.settings, "AUTH_ROOT_KEY", ROUTER_ROOT)
+    monkeypatch.setattr(config.settings, "TEMPO_RECIPIENT", "")
+    monkeypatch.setattr(config.settings, "POST_PRICE_SATS", 21)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    ) as c:
+        yield c
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+
+
+def _signed_event(content: str = "router endpoint note") -> dict:
+    return sign_event(ROUTER_SK, {
+        "created_at": 1_700_000_100,
+        "kind": 1,
+        "tags": kind1_tags(ROUTER_SK),
+        "content": content,
+    })
+
+
+def _www_list(resp) -> list[str]:
+    if hasattr(resp.headers, "get_list"):
+        return resp.headers.get_list("www-authenticate")
+    return [v for k, v in resp.headers.multi_items() if k.lower() == "www-authenticate"]
+
+
+class TestRequirePaymentEndpointWiring:
+    """Paid handlers must settle via require_payment (underpay alive on live traffic)."""
+
+    @pytest.mark.asyncio
+    async def test_events_mpp_settle_through_router(self, router_paid_client):
+        """Valid MPP Authorization on POST /api/v1/events stores the event."""
+        event = _signed_event("mpp settle via router")
+        auth = _mpp_auth(MPP_PREIMAGE, amount_sats=21)
+        with patch("app.payment.check_and_consume_payment", new_callable=AsyncMock) as mock_consume, \
+             patch("app.api_v1.check_and_consume_payment", new_callable=AsyncMock) as mock_consume2, \
+             patch("app.lightning.check_and_consume_payment", new_callable=AsyncMock) as mock_consume3:
+            mock_consume.return_value = True
+            mock_consume2.return_value = True
+            mock_consume3.return_value = True
+            resp = await router_paid_client.post(
+                "/api/v1/events",
+                json={"event": event},
+                headers={"Authorization": auth, "Content-Type": "application/json"},
+            )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data.get("paid") is True
+        assert data["event"]["content"] == "mpp settle via router"
+
+    @pytest.mark.asyncio
+    async def test_events_mpp_underpay_rejected_via_router(self, router_paid_client):
+        """Adversarial: MPP credential amount < required sats → 402 (not settle).
+
+        Before 14.13, submit_event used inline MPP without extract_amount_from_credential,
+        so underpay settled. Wiring require_payment makes underpay a live gate.
+        """
+        event = _signed_event("underpay should fail")
+        auth = _mpp_auth(MPP_PREIMAGE, amount_sats=10)  # below POST_PRICE_SATS=21
+        with patch("app.payment.create_invoice", new_callable=AsyncMock) as mock_inv, \
+             patch("app.l402.create_invoice", new_callable=AsyncMock) as mock_l402_inv, \
+             patch("app.api_v1.create_invoice", new_callable=AsyncMock) as mock_api_inv, \
+             patch("app.l402.settings") as mock_settings:
+            _mock_402_invoice_stack(mock_settings)
+            mock_inv.return_value = MOCK_INVOICE
+            mock_l402_inv.return_value = MOCK_INVOICE
+            mock_api_inv.return_value = MOCK_INVOICE
+            resp = await router_paid_client.post(
+                "/api/v1/events",
+                json={"event": event},
+                headers={"Authorization": auth, "Content-Type": "application/json"},
+            )
+        assert resp.status_code == 402, (
+            f"underpay must 402 via require_payment; got {resp.status_code}: {resp.text}"
+        )
+        body = resp.json()
+        detail = body.get("detail", body)
+        detail_str = json.dumps(detail) if not isinstance(detail, str) else detail
+        assert "21" in detail_str or "requires" in detail_str.lower()
+
+    @pytest.mark.asyncio
+    async def test_pay_post_mpp_underpay_rejected_via_router(self, router_paid_client):
+        """Adversarial: underpay MPP on POST /pay must 402 through require_payment."""
+        # Seed pending via legacy /api/post (returns token; /api/v1/post probes without token)
+        with patch("app.payment.create_invoice", new_callable=AsyncMock, return_value=MOCK_INVOICE), \
+             patch("app.l402.create_invoice", new_callable=AsyncMock, return_value=MOCK_INVOICE):
+            seed = await router_paid_client.post(
+                "/api/post", json={"content": "pending for underpay pay"},
+            )
+        assert seed.status_code == 402, seed.text
+        token = seed.json().get("token")
+        assert token, f"expected pending token; got {seed.text}"
+        auth = _mpp_auth(b"pay-underpay-preimage-32bytess!!", amount_sats=5)
+        with patch("app.payment.create_invoice", new_callable=AsyncMock, return_value=MOCK_INVOICE), \
+             patch("app.l402.create_invoice", new_callable=AsyncMock, return_value=MOCK_INVOICE), \
+             patch("app.l402.settings") as mock_settings:
+            _mock_402_invoice_stack(mock_settings)
+            resp = await router_paid_client.post(
+                f"/pay?token={token}",
+                headers={"Authorization": auth},
+            )
+        assert resp.status_code == 402, (
+            f"POST /pay underpay must 402; got {resp.status_code}: {resp.text}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_submit_event_and_pay_post_call_require_payment(self, router_paid_client):
+        """Handlers must invoke require_payment (not try_l402+inline MPP dual-path)."""
+        event = _signed_event("spy require_payment")
+        called: list[str] = []
+
+        async def _spy_require_payment(request, amount_sats, memo, db=None, **kwargs):
+            called.append(memo)
+            auth = request.headers.get("Authorization", "")
+            if not auth:
+                return None  # challenge_on_missing=False → pending/token flow
+            return {"_protocol": "l402"}
+
+        # Patch the module attribute so local `from app.payment import require_payment` binds the spy
+        with patch("app.payment.require_payment", side_effect=_spy_require_payment):
+            resp_events = await router_paid_client.post(
+                "/api/v1/events",
+                json={"event": event},
+                headers={
+                    "Authorization": "L402 spy:00",
+                    "Content-Type": "application/json",
+                },
+            )
+            assert resp_events.status_code == 200, resp_events.text
+
+            with patch("app.payment.create_invoice", new_callable=AsyncMock, return_value=MOCK_INVOICE), \
+                 patch("app.l402.create_invoice", new_callable=AsyncMock, return_value=MOCK_INVOICE):
+                seed = await router_paid_client.post(
+                    "/api/post", json={"content": "seed for pay spy"},
+                )
+            assert seed.status_code == 402, seed.text
+            token = seed.json()["token"]
+            resp_pay = await router_paid_client.post(
+                f"/pay?token={token}",
+                headers={"Authorization": "L402 spy:00"},
+            )
+            assert resp_pay.status_code == 200, resp_pay.text
+
+        assert any("note posting" in m for m in called), (
+            f"require_payment must be called from paid handlers; called={called}"
+        )
+        assert len(called) >= 2, f"expected events + pay_post to call require_payment; called={called}"

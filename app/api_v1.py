@@ -349,34 +349,20 @@ async def submit_event(request: Request, db: AsyncSession = Depends(get_db)):
         await broadcast_event(event)
         return {"paid": True, "event": event, "sats_clank": req_sats}
 
-    # L402 / LSAT (14.3) — primary Lightning gate; no credit-spend bypass
-    from app.l402 import try_l402
-    from fastapi import HTTPException
-    try:
-        if await try_l402(request, db=db, amount_sats=req_sats, memo="clankfeed note posting"):
-            await store_event(db, event, sats_clank=req_sats, value_usd=req_usd)
-            await broadcast_event(event)
-            return {"paid": True, "event": event, "sats_clank": req_sats}
-    except HTTPException:
-        raise
-
-    # Check for inline MPP credential (one-shot payment)
-    auth = request.headers.get("Authorization", "")
-    if auth.startswith("Payment "):
-        token = await store_pending_event(db, event, amount_sats=req_sats, amount_usd=req_usd)
-        pending = await db.get(PendingEvent, token)
-
-        credential = parse_mpp_credential(auth)
-        if not credential:
-            await db.delete(pending)
-            await db.commit()
-            return await _error_402_with_challenge({
-                "type": "https://paymentauth.org/problems/malformed-credential",
-                "title": "Malformed credential",
-                "detail": "Could not decode Payment credential",
-            }, amount_sats=req_sats, amount_usd=req_usd)
-
-        return await _verify_and_store_paid_event(credential, pending, db)
+    # Unified payment router (14.13): L402|LSAT primary + MPP/Tempo; underpay gated
+    from app.payment import require_payment
+    settlement = await require_payment(
+        request,
+        amount_sats=req_sats,
+        memo="clankfeed note posting",
+        db=db,
+        amount_usd=req_usd,
+        challenge_on_missing=False,
+    )
+    if settlement:
+        await store_event(db, event, sats_clank=req_sats, value_usd=req_usd)
+        await broadcast_event(event)
+        return {"paid": True, "event": event, "sats_clank": req_sats}
 
     # No payment provided: store as pending, return payment options
     token = await store_pending_event(db, event, amount_sats=req_sats, amount_usd=req_usd)
@@ -654,16 +640,20 @@ async def relay_post(request: Request, db: AsyncSession = Depends(get_db)):
         await broadcast_event(signed)
         return {"paid": True, "event": signed, "sats_clank": req_sats}
 
-    # L402 / LSAT (14.3) — no credit-spend bypass
-    from app.l402 import try_l402
-    from fastapi import HTTPException
-    try:
-        if await try_l402(request, db=db, amount_sats=req_sats, memo="clankfeed note posting"):
-            await store_event(db, signed, sats_clank=req_sats, value_usd=req_usd)
-            await broadcast_event(signed)
-            return {"paid": True, "event": signed, "sats_clank": req_sats}
-    except HTTPException:
-        raise
+    # Unified payment router (14.13)
+    from app.payment import require_payment
+    settlement = await require_payment(
+        request,
+        amount_sats=req_sats,
+        memo="clankfeed note posting",
+        db=db,
+        amount_usd=req_usd,
+        challenge_on_missing=False,
+    )
+    if settlement:
+        await store_event(db, signed, sats_clank=req_sats, value_usd=req_usd)
+        await broadcast_event(signed)
+        return {"paid": True, "event": signed, "sats_clank": req_sats}
 
     # Store as pending
     token = await store_pending_event(db, signed, amount_sats=req_sats, amount_usd=req_usd)
@@ -856,35 +846,41 @@ async def vote_event(request: Request, event_id: str, db: AsyncSession = Depends
                     event_id[:12], direction, req_sats, row.sats_clank)
         return {"voted": True, "direction": direction, "amount_sats": req_sats, "new_sats_clank": row.sats_clank, "new_sats_ext": row.sats_ext}
 
-    # L402 / LSAT (14.3) — no credit-spend bypass
-    from app.l402 import try_l402
-    from fastapi import HTTPException
-    try:
-        if await try_l402(request, db=db, amount_sats=req_sats, memo=f"clankfeed vote on {event_id[:12]}"):
-            from app.models import Vote
-            vote = Vote(
-                id=secrets.token_hex(32),
-                event_id=event_id,
-                pubkey="l402",
-                direction=direction,
-                amount_sats=req_sats,
-                amount_usd=req_usd,
-                payment_id="l402",
-            )
-            db.add(vote)
-            _apply_vote_delta(row, direction, req_sats)
-            await db.commit()
-            logger.info("Vote recorded (l402): event=%s dir=%+d amount=%d sats new_value=%d",
-                        event_id[:12], direction, req_sats, row.sats_clank)
-            return {
-                "voted": True,
-                "direction": direction,
-                "amount_sats": req_sats,
-                "new_sats_clank": row.sats_clank,
-                "new_sats_ext": row.sats_ext,
-            }
-    except HTTPException:
-        raise
+    # Unified payment router (14.13)
+    from app.payment import require_payment
+    settlement = await require_payment(
+        request,
+        amount_sats=req_sats,
+        memo=f"clankfeed vote on {event_id[:12]}",
+        db=db,
+        amount_usd=req_usd,
+        challenge_on_missing=False,
+    )
+    if settlement:
+        from app.models import Vote
+        protocol = settlement.get("_protocol", "l402")
+        payment_id = settlement.get("payment_hash") or settlement.get("tx_hash") or protocol
+        vote = Vote(
+            id=secrets.token_hex(32),
+            event_id=event_id,
+            pubkey=protocol,
+            direction=direction,
+            amount_sats=req_sats,
+            amount_usd=req_usd,
+            payment_id=str(payment_id)[:64],
+        )
+        db.add(vote)
+        _apply_vote_delta(row, direction, req_sats)
+        await db.commit()
+        logger.info("Vote recorded (%s): event=%s dir=%+d amount=%d sats new_value=%d",
+                    protocol, event_id[:12], direction, req_sats, row.sats_clank)
+        return {
+            "voted": True,
+            "direction": direction,
+            "amount_sats": req_sats,
+            "new_sats_clank": row.sats_clank,
+            "new_sats_ext": row.sats_ext,
+        }
 
     # Store vote intent as pending event (reuse PendingEvent table)
     token = await store_pending_event(
@@ -1352,16 +1348,19 @@ async def account_update_profile(request: Request, db: AsyncSession = Depends(ge
         await broadcast_event(signed)
         return {"updated": True, "event": signed, "metadata": metadata}
 
-    # L402 / LSAT (14.3) — no credit-spend bypass
-    from app.l402 import try_l402
-    from fastapi import HTTPException
-    try:
-        if await try_l402(request, db=db, amount_sats=req_sats, memo="clankfeed profile update"):
-            await store_event(db, signed, sats_clank=req_sats)
-            await broadcast_event(signed)
-            return {"updated": True, "event": signed, "metadata": metadata}
-    except HTTPException:
-        raise
+    # Unified payment router (14.13)
+    from app.payment import require_payment
+    settlement = await require_payment(
+        request,
+        amount_sats=req_sats,
+        memo="clankfeed profile update",
+        db=db,
+        challenge_on_missing=False,
+    )
+    if settlement:
+        await store_event(db, signed, sats_clank=req_sats)
+        await broadcast_event(signed)
+        return {"updated": True, "event": signed, "metadata": metadata}
 
     # Requires payment
     token = await store_pending_event(db, signed, amount_sats=req_sats)
