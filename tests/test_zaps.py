@@ -242,16 +242,35 @@ async def test_sort_ext_segregated_from_clank(client):
 
 
 @pytest.mark.asyncio
-async def test_vote_credits_both_rankings(client):
+async def test_upvote_rejected_nip57_only(client):
+    """14.7: direction=1 tip invoice removed; use NIP-57 zap."""
     note = _make_note("voted note")
     await _store_note(note)
 
     resp = await client.post(f"/api/v1/events/{note['id']}/vote",
                              json={"direction": 1, "amount_sats": 50})
+    assert resp.status_code == 410
+    clank, ext = await _get_sats(note["id"])
+    assert (clank, ext) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_downvote_credits_both_rankings(client):
+    """Downvote still adjusts sats_clank and sats_ext (anti-signal)."""
+    note = _make_note("downvoted note")
+    await _store_note(note)
+    async with async_session() as db:
+        row = await db.get(NostrEvent, note["id"])
+        row.sats_clank = 100
+        row.sats_ext = 100
+        await db.commit()
+
+    resp = await client.post(f"/api/v1/events/{note['id']}/vote",
+                             json={"direction": -1, "amount_sats": 50})
     assert resp.status_code == 200
     data = resp.json()
     assert data["new_sats_clank"] == 50
-    assert data["new_sats_ext"] == 50  # fee-inclusive amount joins the fair ranking
+    assert data["new_sats_ext"] == 50
 
     clank, ext = await _get_sats(note["id"])
     assert (clank, ext) == (50, 50)

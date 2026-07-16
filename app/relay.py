@@ -407,8 +407,13 @@ async def _handle_event(conn: Connection, msg: list, db: AsyncSession):
 
 
 async def _handle_zap_receipt(conn: Connection, event: dict, db: AsyncSession):
-    """Store a verified NIP-57 zap receipt without payment and credit the
-    zapped note's sats_ext with the full zap amount."""
+    """Store a verified NIP-57 zap receipt without payment and credit rankings.
+
+    Author-leg (p = note author) → sats_ext.
+    Fee-leg (p = relay) → sats_clank and sats_ext.
+    """
+    from app.zaps import is_relay_fee_leg
+
     event_id = event["id"]
 
     if len(event["content"]) > MAX_CONTENT_LENGTH:
@@ -439,11 +444,14 @@ async def _handle_zap_receipt(conn: Connection, event: dict, db: AsyncSession):
         await conn.send(["OK", event_id, False, "invalid: zapped event not found on this relay"])
         return
 
-    if info["recipient_pubkey"] != target.pubkey:
+    recipient = info["recipient_pubkey"]
+    fee_leg = is_relay_fee_leg(recipient)
+    author_leg = recipient == target.pubkey
+    if not fee_leg and not author_leg:
         await conn.send(["OK", event_id, False, "invalid: zap request p tag does not match target author"])
         return
 
-    signer_err = await verify_zap_receipt_signer(event, target.pubkey, db)
+    signer_err = await verify_zap_receipt_signer(event, recipient, db)
     if signer_err:
         await conn.send(["OK", event_id, False, f"invalid: {signer_err}"])
         return
@@ -456,25 +464,31 @@ async def _handle_zap_receipt(conn: Connection, event: dict, db: AsyncSession):
 async def apply_zap_receipt(db: AsyncSession, event: dict, info: dict, target: NostrEvent):
     """Credit a verified zap receipt to its target note and store the receipt.
 
-    sats_ext is the fair combined ranking: external zaps at face value,
-    alongside clankfeed votes (whose amount includes the relay fee).
-    sats_clank (money paid to clankfeed) is never touched by zaps.
+    Author-leg → sats_ext only (fair combined ranking).
+    Fee-leg (p = relay) → sats_clank and sats_ext (relay tip share).
     """
-    target.sats_ext = (target.sats_ext or 0) + info["amount_sats"]
+    from app.zaps import is_relay_fee_leg
+
+    amount = info["amount_sats"]
+    target.sats_ext = (target.sats_ext or 0) + amount
+    if is_relay_fee_leg(info["recipient_pubkey"]):
+        target.sats_clank = (target.sats_clank or 0) + amount
     db.add(Vote(
         id=secrets.token_hex(32),
         event_id=target.id,
         pubkey=info["sender_pubkey"],
         direction=1,
-        amount_sats=info["amount_sats"],
+        amount_sats=amount,
         amount_usd="0",
         payment_id=f"zap:{event['id']}",
     ))
     await store_event(db, event)  # commits the vote + value credit too
     logger.info(
-        "Zap receipt: id=%s target=%s sender=%s amount=%d sats new_sats_ext=%d",
+        "Zap receipt: id=%s target=%s sender=%s amount=%d sats fee_leg=%s "
+        "new_sats_clank=%d new_sats_ext=%d",
         event["id"][:12], target.id[:12], info["sender_pubkey"][:12],
-        info["amount_sats"], target.sats_ext,
+        amount, is_relay_fee_leg(info["recipient_pubkey"]),
+        target.sats_clank or 0, target.sats_ext,
     )
 
 

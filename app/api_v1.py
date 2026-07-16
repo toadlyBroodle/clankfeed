@@ -804,10 +804,10 @@ async def get_replies(
 @router.post("/events/{event_id}/vote")
 @limiter.limit(RATE_INVOICE)
 async def vote_event(request: Request, event_id: str, db: AsyncSession = Depends(get_db)):
-    """Vote on a note. Requires payment.
+    """Downvote a note (anti-signal). Requires payment.
 
-    Body: {"direction": 1, "amount_sats": 21} or {"direction": -1, "amount_usd": "0.01"}
-    direction: 1 (upvote) or -1 (downvote)
+    Body: {"direction": -1, "amount_sats": 21} or {"direction": -1, "amount_usd": "0.01"}
+    direction: -1 only (upvote tips removed in 14.7 — use NIP-57 zap)
     amount: must be >= minimum (POST_PRICE_SATS / TEMPO_PRICE_USD)
     """
     bad = _invalid_event_id(event_id)
@@ -826,6 +826,15 @@ async def vote_event(request: Request, event_id: str, db: AsyncSession = Depends
     direction = body.get("direction", 1)
     if direction not in (1, -1):
         return JSONResponse(status_code=400, content={"detail": "direction must be 1 or -1"})
+    # 14.7: tips are NIP-57 zaps only — no custodial upvote invoice-to-relay
+    if direction == 1:
+        return JSONResponse(
+            status_code=410,
+            content={
+                "detail": "Upvote tips removed; use NIP-57 zap (90/10 author+relay). "
+                          "Downvote remains direction=-1.",
+            },
+        )
 
     req_sats = body.get("amount_sats", settings.POST_PRICE_SATS)
     req_usd = body.get("amount_usd", settings.TEMPO_PRICE_USD)
@@ -1013,6 +1022,14 @@ async def confirm_vote(request: Request, event_id: str, db: AsyncSession = Depen
     # Parse vote data from pending
     vote_data = json.loads(pending.event_json)
     direction = vote_data.get("direction", 1)
+    # 14.7: refuse settling a custodial upvote tip even if pending was created earlier
+    if direction == 1:
+        return JSONResponse(
+            status_code=410,
+            content={
+                "detail": "Upvote tips removed; use NIP-57 zap (90/10 author+relay).",
+            },
+        )
 
     # Convert USD to sats at spot for Tempo payments
     if method == "tempo":

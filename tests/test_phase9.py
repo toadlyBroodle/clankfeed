@@ -213,17 +213,15 @@ class TestReplies:
 class TestVoting:
     @pytest.mark.asyncio
     async def test_upvote(self, client):
-        """Upvote increases note value."""
+        """14.7: upvote tip path removed — use NIP-57 zap."""
         resp = await client.post("/api/v1/post", json={"content": "vote me"})
         event_id = resp.json()["event"]["id"]
-        initial_value = resp.json()["sats_clank"]
 
         resp = await client.post(f"/api/v1/events/{event_id}/vote", json={
             "direction": 1, "amount_sats": 50,
         })
-        assert resp.status_code == 200
-        assert resp.json()["voted"] is True
-        assert resp.json()["new_sats_clank"] == initial_value + 50
+        assert resp.status_code == 410
+        assert "nip-57" in str(resp.json().get("detail", "")).lower() or "zap" in str(resp.json().get("detail", "")).lower()
 
     @pytest.mark.asyncio
     async def test_downvote(self, client):
@@ -248,21 +246,21 @@ class TestVoting:
 
     @pytest.mark.asyncio
     async def test_vote_nonexistent_event(self, client):
-        resp = await client.post(f"/api/v1/events/{'0' * 64}/vote", json={"direction": 1})
+        resp = await client.post(f"/api/v1/events/{'0' * 64}/vote", json={"direction": -1})
         assert resp.status_code == 404
 
     @pytest.mark.asyncio
     async def test_multiple_votes_accumulate(self, client):
-        """Multiple votes accumulate on the note value."""
-        resp = await client.post("/api/v1/post", json={"content": "popular"})
+        """Multiple downvotes accumulate on the note value (14.7: no upvotes)."""
+        resp = await client.post("/api/v1/post", json={"content": "popular", "amount_sats": 200})
         eid = resp.json()["event"]["id"]
 
-        await client.post(f"/api/v1/events/{eid}/vote", json={"direction": 1, "amount_sats": 50})
-        await client.post(f"/api/v1/events/{eid}/vote", json={"direction": 1, "amount_sats": 100})
+        await client.post(f"/api/v1/events/{eid}/vote", json={"direction": -1, "amount_sats": 50})
+        await client.post(f"/api/v1/events/{eid}/vote", json={"direction": -1, "amount_sats": 25})
         resp = await client.post(f"/api/v1/events/{eid}/vote", json={"direction": -1, "amount_sats": 25})
 
-        # 21 (initial) + 50 + 100 - 25 = 146
-        assert resp.json()["new_sats_clank"] == 146
+        # 200 - 50 - 25 - 25 = 100
+        assert resp.json()["new_sats_clank"] == 100
 
     @pytest.mark.asyncio
     async def test_downvote_floors_at_zero(self, client):

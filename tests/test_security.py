@@ -963,7 +963,7 @@ class TestEventIdPathL3:
     async def test_l3_vote_rejects_bad_id(self, client):
         resp = await client.post(
             "/api/v1/events/nothex/vote",
-            json={"direction": 1, "amount_sats": 21},
+            json={"direction": -1, "amount_sats": 21},
             headers={"X-Requested-With": "XMLHttpRequest"},
         )
         assert resp.status_code == 400

@@ -5,6 +5,9 @@ kind-9735 zap receipts. For each verified receipt, the zapped kind-1 note is
 fetched (same connection, separate subscription) and stored with sats_ext
 credited at face value — the same fair ranking clankfeed votes feed into.
 Only zapped notes are stored, never the firehose, so storage stays small.
+
+EXT-1a: when the author has no local kind:0 lud16, fetch+store their profile
+from EXTERNAL_RELAYS before LNURL signer verification (else fail-closed).
 """
 
 import asyncio
@@ -18,13 +21,19 @@ from app.database import async_session
 from app.models import NostrEvent
 from app.nostr import validate_event
 from app.relay import apply_zap_receipt, store_event
-from app.zaps import verify_zap_receipt, verify_zap_receipt_signer
+from app.zaps import (
+    get_author_lud16,
+    is_relay_fee_leg,
+    verify_zap_receipt,
+    verify_zap_receipt_signer,
+)
 
 logger = logging.getLogger("clankfeed.ingest")
 
 BACKFILL_LIMIT = 200  # zap receipts requested on (re)connect
 MAX_PENDING_TARGETS = 500  # receipts parked while their note is fetched
 RECONNECT_MAX = 300  # seconds
+KIND0_FETCH_TIMEOUT = 8  # seconds per relay attempt
 
 
 def _acceptable_note(event: dict) -> bool:
@@ -35,11 +44,85 @@ def _acceptable_note(event: dict) -> bool:
     )
 
 
+async def fetch_author_kind0(pubkey: str) -> dict | None:
+    """Fetch the author's latest kind:0 from EXTERNAL_RELAYS (EXT-1a).
+
+    Returns a validated kind:0 event dict, or None if none found / all fail.
+    """
+    if not isinstance(pubkey, str) or len(pubkey) != 64:
+        return None
+    urls = [u.strip() for u in settings.EXTERNAL_RELAYS.split(",") if u.strip()]
+    for url in urls:
+        try:
+            async with websockets.connect(url, max_size=65536, open_timeout=10) as ws:
+                sub = f"k0-{pubkey[:16]}"
+                await ws.send(json.dumps([
+                    "REQ", sub, {"kinds": [0], "authors": [pubkey], "limit": 1},
+                ]))
+                deadline = asyncio.get_running_loop().time() + KIND0_FETCH_TIMEOUT
+                best: dict | None = None
+                while asyncio.get_running_loop().time() < deadline:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        break
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+                    except asyncio.TimeoutError:
+                        break
+                    try:
+                        msg = json.loads(raw)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    if not isinstance(msg, list) or len(msg) < 2:
+                        continue
+                    if msg[0] == "EOSE" and msg[1] == sub:
+                        break
+                    if msg[0] != "EVENT" or len(msg) < 3 or msg[1] != sub:
+                        continue
+                    event = msg[2]
+                    if not isinstance(event, dict):
+                        continue
+                    valid, _ = validate_event(event)
+                    if (
+                        valid
+                        and event.get("kind") == 0
+                        and event.get("pubkey") == pubkey
+                    ):
+                        if best is None or event.get("created_at", 0) >= best.get("created_at", 0):
+                            best = event
+                await ws.send(json.dumps(["CLOSE", sub]))
+                if best:
+                    return best
+        except Exception as e:
+            logger.debug("kind:0 fetch from %s failed: %s", url, e)
+            continue
+    return None
+
+
+async def _ensure_author_lud16(db, author_pubkey: str) -> str | None:
+    """Return lud16 from local kind:0, fetching+storing from EXTERNAL_RELAYS if missing."""
+    lud16 = await get_author_lud16(db, author_pubkey)
+    if lud16:
+        return lud16
+    profile = await fetch_author_kind0(author_pubkey)
+    if not profile:
+        return None
+    await store_event(db, profile, sats_clank=0, origin="external")
+    return await get_author_lud16(db, author_pubkey)
+
+
 async def _signer_ok(db, event: dict, info: dict, target: NostrEvent) -> bool:
-    """True if zap-request p matches target author and LNURL nostrPubkey matches."""
-    if info.get("recipient_pubkey") != target.pubkey:
+    """True if zap-request p is author or relay fee-leg and LNURL nostrPubkey matches."""
+    recipient = info.get("recipient_pubkey", "")
+    fee_leg = is_relay_fee_leg(recipient)
+    author_leg = recipient == target.pubkey
+    if not fee_leg and not author_leg:
         return False
-    err = await verify_zap_receipt_signer(event, target.pubkey, db)
+    # EXT-1a: author-leg needs kind:0 lud16 — fetch if missing locally
+    if author_leg and not fee_leg:
+        if not await _ensure_author_lud16(db, target.pubkey):
+            return False
+    err = await verify_zap_receipt_signer(event, recipient, db)
     return not err
 
 

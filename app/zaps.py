@@ -1,14 +1,13 @@
 """NIP-57 zap receipts + zap fee-split tags (Appendix G).
 
-Zap receipts (kind 9735) are accepted without payment. A verified receipt
-credits the zapped note's sats_ext with the full zap amount — the fair
-combined ranking shared with clankfeed votes. sats_clank (money paid to
-clankfeed) is untouched by zaps.
+Zap receipts (kind 9735) are accepted without payment.
+Author-leg (zap-request p = note author) credits sats_ext.
+Fee-leg (p = relay pubkey) credits sats_clank and sats_ext.
 
 Verification: receipt signature (upstream via validate_event), embedded
 kind-9734 zap request id + signature, bolt11 amount == zap request amount
 tag, valid target event id, and (async) receipt pubkey == the recipient's
-LNURL-pay `nostrPubkey` (fetched from their lud16 metadata and cached).
+LNURL-pay `nostrPubkey` (author kind:0 lud16, or RELAY_LUD16 for fee-leg).
 
 Phase 13 also builds/validates NIP-57 `zap` tags on kind:1 (author weight +
 relay fee weight) so clients can split tips without custodial remittance.
@@ -541,17 +540,33 @@ async def fetch_lnurl_nostr_pubkey(lud16: str) -> str | None:
     return pubkey
 
 
+def is_relay_fee_leg(recipient_pubkey: str) -> bool:
+    """True when zap-request p is the relay pubkey (NIP-57 fee leg)."""
+    relay_pk = relay_pubkey_hex()
+    if not relay_pk or not isinstance(recipient_pubkey, str):
+        return False
+    return recipient_pubkey.lower() == relay_pk.lower()
+
+
 async def verify_zap_receipt_signer(
     event: dict, recipient_pubkey: str, db: AsyncSession
 ) -> str:
-    """NIP-57 Appendix F: receipt.pubkey must equal author's LNURL nostrPubkey.
+    """NIP-57 Appendix F: receipt.pubkey must equal recipient LNURL nostrPubkey.
+
+    Author-leg: lud16 from stored kind:0 for the note author.
+    Fee-leg (p = relay): lud16 from RELAY_LUD16 config.
 
     Returns an error string on failure, or "" on success. Fail-closed: missing
     lud16 or unreachable LNURL metadata rejects the receipt.
     """
-    lud16 = await get_author_lud16(db, recipient_pubkey)
-    if not lud16:
-        return "author has no lud16 metadata"
+    if is_relay_fee_leg(recipient_pubkey):
+        lud16 = (settings.RELAY_LUD16 or "").strip()
+        if not lud16 or "@" not in lud16:
+            return "relay has no lud16 configured"
+    else:
+        lud16 = await get_author_lud16(db, recipient_pubkey)
+        if not lud16:
+            return "author has no lud16 metadata"
 
     expected = await fetch_lnurl_nostr_pubkey(lud16)
     if not expected:
