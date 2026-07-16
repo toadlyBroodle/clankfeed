@@ -33,6 +33,7 @@ def _reset_rate_limits():
 async def tempo_client(monkeypatch):
     """Client with Tempo enabled, Lightning disabled (test-mode + TEMPO_RECIPIENT set)."""
     monkeypatch.setenv("AUTH_ROOT_KEY", "test-mode")
+    monkeypatch.setenv("ENABLE_TEMPO", "1")
     monkeypatch.setenv("TEMPO_RECIPIENT", "0xRecipientAddress")
     monkeypatch.setenv("TEMPO_RPC_URL", "https://rpc.test.tempo.xyz")
     monkeypatch.setenv("TEMPO_CURRENCY", "0xTokenAddress")
@@ -67,6 +68,7 @@ async def tempo_client(monkeypatch):
 async def full_client(monkeypatch):
     """Client with both Lightning and Tempo enabled."""
     monkeypatch.setenv("AUTH_ROOT_KEY", "real-secret-key-for-testing")
+    monkeypatch.setenv("ENABLE_TEMPO", "1")
     monkeypatch.setenv("TEMPO_RECIPIENT", "0xRecipientAddress")
     monkeypatch.setenv("TEMPO_CURRENCY", "0xTokenAddress")
     monkeypatch.setenv("TEMPO_PRICE_USD", "0.01")

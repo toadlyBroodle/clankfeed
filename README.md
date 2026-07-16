@@ -115,7 +115,7 @@ The **client wallet** pays both LNURLs directly. Clankfeed never forwards tip sa
 | Lightning (access fee) | BTC (sats) | **L402** (primary); MPP co-challenge |
 | Tempo | USD (pathUSD stablecoin) | On-chain ERC-20 verification (MPP Tempo) |
 
-Stripe is not live. There is **no** prepaid credit balance and **no** account deposit flow.
+Stripe and Tempo are **parked** (`ENABLE_STRIPE` / `ENABLE_TEMPO` opt-in; off by default). Live path: L402 + MPP Lightning. There is **no** prepaid credit balance and **no** account deposit flow.
 
 ## Additional endpoints
 
@@ -181,8 +181,10 @@ Copy `.env.example` to `.env` (or set environment variables):
 | `RELAY_PRIVATE_KEY` | Yes | 64-char hex secp256k1 private key for relay-signed events |
 | `PAYMENT_URL` | For Lightning | LNBits instance URL — wallet is the **L402 invoice destination only** (access fees). Not for tip custody; NIP-57 tips settle wallet→author LNURL off our books. |
 | `PAYMENT_KEY` | For Lightning | LNBits API key for that same L402 invoice-destination wallet |
+| `ENABLE_TEMPO` | No | Opt-in `1`/`true` to unpark Tempo (also needs `TEMPO_RECIPIENT`) |
 | `TEMPO_RECIPIENT` | For Tempo | Tempo blockchain address to receive payments |
-| `STRIPE_SECRET_KEY` | For Stripe SPT | Stripe secret key; empty disables Stripe. Requires machine payments + `STRIPE_PROFILE_ID`. |
+| `ENABLE_STRIPE` | No | Opt-in `1`/`true` to unpark Stripe SPT (also needs secret + profile) |
+| `STRIPE_SECRET_KEY` | For Stripe SPT | Stripe secret key; parked unless `ENABLE_STRIPE=1`. Requires machine payments + `STRIPE_PROFILE_ID`. |
 | `STRIPE_PUBLISHABLE_KEY` | For Stripe UI | `pk_…` for Elements / web client (optional until 7a.5). |
 | `STRIPE_PROFILE_ID` | For Stripe SPT | Business Network `profile_…` id (`networkId` in MPP challenges). |
 | `STRIPE_PRICE_USD` | No | Stripe SPT price in USD (default: `0.50`; card SPT floor). |

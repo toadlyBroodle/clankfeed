@@ -47,6 +47,7 @@ def _make_event(content="test", kind=1):
 async def sec_client(monkeypatch):
     """Client with Tempo enabled for testing payment input validation."""
     from app import config
+    monkeypatch.setenv("ENABLE_TEMPO", "1")
     monkeypatch.setattr(config.settings, "TEMPO_RECIPIENT", "0xRecipient")
     monkeypatch.setattr(config.settings, "TEMPO_CURRENCY", "0xToken")
     monkeypatch.setattr(config.settings, "TEMPO_PRICE_USD", "0.01")

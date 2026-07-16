@@ -82,9 +82,19 @@ class TestStripeEnabled:
         monkeypatch.setattr(config.settings, "STRIPE_PROFILE_ID", "")
         assert stripe_enabled() is False
 
+    def test_parked_without_enable_flag(self, monkeypatch):
+        """Keys alone must not enable Stripe (ENABLE_STRIPE opt-in)."""
+        from app.config import stripe_enabled
+
+        monkeypatch.delenv("ENABLE_STRIPE", raising=False)
+        monkeypatch.setattr(config.settings, "STRIPE_SECRET_KEY", "sk_test_x")
+        monkeypatch.setattr(config.settings, "STRIPE_PROFILE_ID", "profile_test_x")
+        assert stripe_enabled() is False
+
     def test_enabled_with_secret_and_profile(self, monkeypatch):
         from app.config import stripe_enabled
 
+        monkeypatch.setenv("ENABLE_STRIPE", "1")
         monkeypatch.setattr(config.settings, "STRIPE_SECRET_KEY", "sk_test_x")
         monkeypatch.setattr(config.settings, "STRIPE_PROFILE_ID", "profile_test_x")
         assert stripe_enabled() is True
@@ -361,6 +371,7 @@ class TestStripeDiscovery:
 
     @pytest.mark.asyncio
     async def test_nip11_includes_stripe_when_enabled(self, client, monkeypatch):
+        monkeypatch.setenv("ENABLE_STRIPE", "1")
         monkeypatch.setattr(config.settings, "STRIPE_SECRET_KEY", "sk_test_discovery")
         monkeypatch.setattr(config.settings, "STRIPE_PROFILE_ID", "profile_discovery")
         monkeypatch.setattr(config.settings, "STRIPE_PRICE_USD", "0.50")
@@ -392,6 +403,7 @@ class TestStripeDiscovery:
         from app.main import app
 
         app.openapi_schema = None
+        monkeypatch.setenv("ENABLE_STRIPE", "1")
         monkeypatch.setattr(config.settings, "STRIPE_SECRET_KEY", "sk_test_discovery")
         monkeypatch.setattr(config.settings, "STRIPE_PROFILE_ID", "profile_discovery")
         # test-mode → payments_enabled() False (non-l402 OpenAPI path)
@@ -470,6 +482,7 @@ class TestStripeDiscovery:
         from app.main import app
 
         app.openapi_schema = None
+        monkeypatch.setenv("ENABLE_STRIPE", "1")
         monkeypatch.setattr(config.settings, "AUTH_ROOT_KEY", "real-secret-key-for-testing")
         monkeypatch.setattr(config.settings, "STRIPE_SECRET_KEY", "sk_test_discovery")
         monkeypatch.setattr(config.settings, "STRIPE_PROFILE_ID", "profile_discovery")
@@ -648,6 +661,7 @@ class TestCreateStripeSptEndpoint:
 
     @pytest.mark.asyncio
     async def test_create_spt_returns_spt(self, client, monkeypatch):
+        monkeypatch.setenv("ENABLE_STRIPE", "1")
         monkeypatch.setattr(config.settings, "STRIPE_SECRET_KEY", "sk_test_x")
         monkeypatch.setattr(config.settings, "STRIPE_PROFILE_ID", "profile_test_abc")
         monkeypatch.setattr(config.settings, "STRIPE_PRICE_USD", "0.50")
@@ -676,6 +690,7 @@ class TestCreateStripeSptEndpoint:
     @pytest.mark.asyncio
     async def test_create_spt_rejects_client_amount(self, client, monkeypatch):
         """Adversarial: client-supplied amount/max_amount must not override server price."""
+        monkeypatch.setenv("ENABLE_STRIPE", "1")
         monkeypatch.setattr(config.settings, "STRIPE_SECRET_KEY", "sk_test_x")
         monkeypatch.setattr(config.settings, "STRIPE_PROFILE_ID", "profile_test_abc")
         monkeypatch.setattr(config.settings, "STRIPE_PRICE_USD", "0.50")
@@ -717,6 +732,7 @@ class TestCreateStripeSptEndpoint:
 
     @pytest.mark.asyncio
     async def test_create_spt_requires_payment_method(self, client, monkeypatch):
+        monkeypatch.setenv("ENABLE_STRIPE", "1")
         monkeypatch.setattr(config.settings, "STRIPE_SECRET_KEY", "sk_test_x")
         monkeypatch.setattr(config.settings, "STRIPE_PROFILE_ID", "profile_test_abc")
         monkeypatch.setattr(config.settings, "AUTH_ROOT_KEY", "test-mode")

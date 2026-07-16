@@ -74,6 +74,7 @@ def _mock_tempo_verify(paid=True):
 async def agent_client(monkeypatch):
     """Client with Tempo enabled, no Lightning (test-mode)."""
     from app import config
+    monkeypatch.setenv("ENABLE_TEMPO", "1")
     monkeypatch.setattr(config.settings, "TEMPO_RECIPIENT", "0xTestRecipient")
     monkeypatch.setattr(config.settings, "TEMPO_CURRENCY", "0xTestToken")
     monkeypatch.setattr(config.settings, "TEMPO_PRICE_USD", "0.01")
@@ -99,6 +100,7 @@ async def agent_client(monkeypatch):
 async def full_agent_client(monkeypatch):
     """Client with both Lightning and Tempo enabled."""
     from app import config
+    monkeypatch.setenv("ENABLE_TEMPO", "1")
     monkeypatch.setattr(config.settings, "AUTH_ROOT_KEY", "real-key")
     monkeypatch.setattr(config.settings, "TEMPO_RECIPIENT", "0xTestRecipient")
     monkeypatch.setattr(config.settings, "TEMPO_CURRENCY", "0xTestToken")

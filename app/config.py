@@ -28,7 +28,7 @@ class Settings:
     )
 
 
-    # Tempo stablecoin settings
+    # Tempo stablecoin settings (parked — see tempo_enabled / ENABLE_TEMPO)
     TEMPO_RECIPIENT: str = os.getenv("TEMPO_RECIPIENT", "")
     TEMPO_RPC_URL: str = os.getenv("TEMPO_RPC_URL", "https://rpc.moderato.tempo.xyz")
     TEMPO_CURRENCY: str = os.getenv(
@@ -37,7 +37,7 @@ class Settings:
     TEMPO_PRICE_USD: str = os.getenv("TEMPO_PRICE_USD", "0.01")
     TEMPO_TESTNET: bool = os.getenv("TEMPO_TESTNET", "true").lower() == "true"
 
-    # Stripe SPT (MPP method=stripe). Card SPT minimum is $0.50.
+    # Stripe SPT (parked — see stripe_enabled / ENABLE_STRIPE). Card SPT min $0.50.
     STRIPE_SECRET_KEY: str = os.getenv("STRIPE_SECRET_KEY", "")
     STRIPE_PUBLISHABLE_KEY: str = os.getenv("STRIPE_PUBLISHABLE_KEY", "")
     STRIPE_PROFILE_ID: str = os.getenv("STRIPE_PROFILE_ID", "")  # Business Network profile_
@@ -52,13 +52,21 @@ class Settings:
 settings = Settings()
 
 
+def _env_opt_in(name: str) -> bool:
+    return os.getenv(name, "").lower() in ("1", "true", "yes")
+
+
 def tempo_enabled() -> bool:
-    """Return True if Tempo payments are configured."""
+    """Tempo onramp parked (L402 + MPP Lightning only). Opt-in: ENABLE_TEMPO=1 + recipient."""
+    if not _env_opt_in("ENABLE_TEMPO"):
+        return False
     return bool(settings.TEMPO_RECIPIENT)
 
 
 def stripe_enabled() -> bool:
-    """Return True if Stripe SPT (MPP method=stripe) is configured."""
+    """Stripe SPT parked (L402 + MPP Lightning only). Opt-in: ENABLE_STRIPE=1 + keys."""
+    if not _env_opt_in("ENABLE_STRIPE"):
+        return False
     return bool(settings.STRIPE_SECRET_KEY) and bool(settings.STRIPE_PROFILE_ID)
 
 
