@@ -1,4 +1,12 @@
-"""HTTP payment endpoints: MPP challenge/verify, payment status polling, web client posting."""
+"""HTTP payment endpoints + unified multi-protocol payment gate (Phase 14.4).
+
+Unified router (satring payment.py pattern):
+  - Authorization: L402|LSAT ... → L402 path (primary)
+  - Authorization: Payment ...   → MPP Lightning or Tempo (co-challenge)
+  - No auth                      → 402 with L402 + MPP (+ Tempo) challenges
+
+Legacy HTTP routes: GET/POST /pay, GET /pay/status, POST /api/post, confirm.
+"""
 
 import hmac as _hmac
 import json
@@ -7,7 +15,7 @@ import re
 import time
 from datetime import datetime, timezone, timedelta
 
-from fastapi import APIRouter, Request, Depends
+from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,7 +28,14 @@ from app.config import (
 from app.database import get_db
 from app.lightning import create_invoice, check_payment_status, check_and_consume_payment
 from app.models import PendingEvent, NostrEvent
-from app.mpp import build_mpp_challenge, parse_mpp_credential, verify_mpp_credential, extract_payment_hash, build_receipt
+from app.mpp import (
+    build_mpp_challenge,
+    parse_mpp_credential,
+    verify_mpp_credential,
+    extract_payment_hash,
+    extract_amount_from_credential,
+    build_receipt,
+)
 from app.nostr import sign_event
 from app.zaps import append_zap_split_tags, pubkey_from_privkey
 from app.relay import store_event, broadcast_event, store_pending_event
@@ -33,16 +48,26 @@ logger = logging.getLogger("clankfeed.payment")
 router = APIRouter()
 
 
-async def _error_402_with_challenge(
+# ---------------------------------------------------------------------------
+# Unified payment router (Phase 14.4 — satring require_payment pattern)
+# ---------------------------------------------------------------------------
+
+
+async def payment_required_challenge(
     error_body: dict,
     amount_sats: int = 0,
+    amount_usd: str = "",
     description: str = "Pay to post a note on clankfeed relay",
 ) -> "RawResponse":
-    """Build a 402 error response with L402 + MPP WWW-Authenticate challenges."""
+    """Flat 402 JSON with L402 (primary) + MPP (+ Tempo) WWW-Authenticate challenges.
+
+    Prefer this for agent-facing endpoints that expect how_to_pay at the top level.
+    """
     from starlette.responses import Response as RawResponse
     from app.l402 import build_how_to_pay, l402_www_authenticate
 
     sats = amount_sats or settings.POST_PRICE_SATS
+    usd = amount_usd or settings.TEMPO_PRICE_USD
     include_l402 = False
     body = dict(error_body)
     www_headers: list[str] = []
@@ -64,10 +89,10 @@ async def _error_402_with_challenge(
                 )
             )
         except Exception as e:
-            logger.warning("Could not generate Lightning challenge for error 402: %s", e)
+            logger.warning("Could not generate Lightning challenge for 402: %s", e)
 
     if tempo_enabled():
-        www_headers.append(build_tempo_challenge(settings.TEMPO_PRICE_USD, description))
+        www_headers.append(build_tempo_challenge(usd, description))
 
     body["how_to_pay"] = build_how_to_pay(include_l402=include_l402)
     response = RawResponse(
@@ -79,6 +104,169 @@ async def _error_402_with_challenge(
     for h in www_headers:
         response.headers.append("WWW-Authenticate", h)
     return response
+
+
+async def _raise_unified_402(
+    amount_sats: int,
+    memo: str,
+    amount_usd: str = "",
+    detail: str = "Payment Required",
+) -> None:
+    """Raise HTTPException(402) with L402 primary + MPP co-challenge (satring style)."""
+    from app.l402 import build_how_to_pay, l402_www_authenticate
+
+    sats = amount_sats or settings.POST_PRICE_SATS
+    usd = amount_usd or settings.TEMPO_PRICE_USD
+    www_parts: list[str] = []
+    include_l402 = False
+
+    if payments_enabled():
+        invoice_data = await create_invoice(sats, memo)
+        www_parts.append(
+            l402_www_authenticate(
+                invoice_data["payment_hash"],
+                invoice_data["payment_request"],
+            )
+        )
+        include_l402 = True
+        www_parts.append(
+            build_mpp_challenge(
+                sats,
+                invoice_data["payment_hash"],
+                invoice_data["payment_request"],
+                memo,
+            )
+        )
+
+    if tempo_enabled():
+        www_parts.append(build_tempo_challenge(usd, memo))
+
+    if not www_parts:
+        raise HTTPException(status_code=402, detail=detail)
+
+    how = build_how_to_pay(include_l402=include_l402)
+    raise HTTPException(
+        status_code=402,
+        detail={
+            "detail": detail,
+            "price": {"sats": sats, "usd": usd},
+            "how_to_pay": how,
+        },
+        headers={
+            "WWW-Authenticate": ", ".join(www_parts),
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+async def require_payment(
+    request: Request,
+    amount_sats: int,
+    memo: str,
+    db: AsyncSession | None = None,
+    *,
+    amount_usd: str | None = None,
+    challenge_on_missing: bool = True,
+) -> dict | None:
+    """Unified payment gate: L402 (primary) + MPP Lightning + Tempo.
+
+    Returns a settlement dict on success:
+      {"_protocol": "l402"} |
+      {"_protocol": "mpp", "payment_hash": "..."} |
+      {"_protocol": "tempo", "tx_hash": "..."}
+
+    Returns None when payments are disabled (test mode) or when there is no
+    Authorization header and challenge_on_missing is False (caller handles
+    pending-token / flat 402 flow).
+
+    Raises HTTPException(402) with L402+MPP(+Tempo) challenges when unpaid
+    (challenge_on_missing=True) or when credentials are invalid.
+    """
+    from app.l402 import require_l402
+
+    if not payments_enabled() and not tempo_enabled():
+        return None
+
+    auth = request.headers.get("Authorization", "")
+    has_l402 = auth.startswith("L402 ") or auth.startswith("LSAT ")
+    has_mpp = auth.startswith("Payment ")
+    usd = amount_usd if amount_usd is not None else settings.TEMPO_PRICE_USD
+
+    # L402 / LSAT (primary Lightning path)
+    if has_l402:
+        if not payments_enabled():
+            await _raise_unified_402(amount_sats, memo, usd, "Lightning/L402 not configured")
+        await require_l402(request=request, db=db, amount_sats=amount_sats, memo=memo)
+        return {"_protocol": "l402"}
+
+    # MPP Payment auth (Lightning or Tempo)
+    if has_mpp:
+        credential = parse_mpp_credential(auth)
+        if not credential:
+            await _raise_unified_402(
+                amount_sats, memo, usd, "Could not decode Payment credential",
+            )
+
+        method = credential.get("challenge", {}).get("method", "")
+        if method == "tempo":
+            if not tempo_enabled():
+                await _raise_unified_402(amount_sats, memo, usd, "Tempo payments not configured")
+            valid = await verify_tempo_credential(credential)
+            if not valid:
+                await _raise_unified_402(amount_sats, memo, usd, "Invalid Tempo payment proof")
+            tx_hash = extract_tempo_tx_hash(credential)
+            if not tx_hash:
+                await _raise_unified_402(amount_sats, memo, usd, "Missing Tempo tx hash")
+            if db is not None:
+                consumed = await check_and_consume_payment(tx_hash, db)
+                if not consumed:
+                    await _raise_unified_402(
+                        amount_sats, memo, usd, "Payment already consumed",
+                    )
+            return {"_protocol": "tempo", "tx_hash": tx_hash, "payment_hash": tx_hash}
+
+        if method == "lightning" or method == "":
+            if not payments_enabled():
+                await _raise_unified_402(amount_sats, memo, usd, "Lightning/MPP not configured")
+            if not verify_mpp_credential(credential):
+                await _raise_unified_402(amount_sats, memo, usd, "Invalid payment proof")
+            challenge_amount = extract_amount_from_credential(credential)
+            if challenge_amount < amount_sats:
+                await _raise_unified_402(
+                    amount_sats,
+                    memo,
+                    usd,
+                    f"This resource requires {amount_sats} sats; credential amount is {challenge_amount}.",
+                )
+            payment_hash = extract_payment_hash(credential) or ""
+            if db is not None and payment_hash:
+                consumed = await check_and_consume_payment(payment_hash, db)
+                if not consumed:
+                    await _raise_unified_402(
+                        amount_sats, memo, usd, "Payment already consumed",
+                    )
+            return {"_protocol": "mpp", "payment_hash": payment_hash}
+
+        await _raise_unified_402(
+            amount_sats, memo, usd, f"Method '{method}' is not supported",
+        )
+
+    if not challenge_on_missing:
+        return None
+
+    await _raise_unified_402(amount_sats, memo, usd)
+    return None  # pragma: no cover
+
+
+async def _error_402_with_challenge(
+    error_body: dict,
+    amount_sats: int = 0,
+    description: str = "Pay to post a note on clankfeed relay",
+) -> "RawResponse":
+    """Build a 402 error response with L402 + MPP WWW-Authenticate challenges."""
+    return await payment_required_challenge(
+        error_body, amount_sats=amount_sats, description=description,
+    )
 
 
 @router.get("/pay")

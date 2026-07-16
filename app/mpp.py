@@ -225,6 +225,17 @@ def extract_payment_hash(credential: dict) -> str | None:
         return None
 
 
+def extract_amount_from_credential(credential: dict) -> int:
+    """Extract the sats amount bound into an MPP Lightning challenge request."""
+    try:
+        request_b64 = credential.get("challenge", {}).get("request", "")
+        request_json = json.loads(_b64url_decode(request_b64))
+        return int(request_json.get("amount", 0))
+    except Exception as e:
+        logger.warning("Failed to extract MPP amount: %s", e)
+        return 0
+
+
 # ---------------------------------------------------------------------------
 # Build Payment-Receipt header
 # ---------------------------------------------------------------------------

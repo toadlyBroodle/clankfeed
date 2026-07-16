@@ -137,7 +137,9 @@ def build_how_to_pay(*, include_l402: bool = False) -> dict:
         },
     }
     if include_l402:
+        # L402 is primary; MPP remains an alternate co-challenge (Phase 14.4).
         out = {
+            "primary": "L402",
             "L402": {
                 "steps": [
                     "1. Extract macaroon and invoice from WWW-Authenticate header",
