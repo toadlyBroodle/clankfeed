@@ -87,6 +87,15 @@ def _www_values(headers: dict) -> str:
     return headers.get("WWW-Authenticate", "") or headers.get("www-authenticate", "")
 
 
+def _exc_www_parts(exc: HTTPException) -> list[str]:
+    """WWW-Authenticate challenge list from a raised unified 402 (14.14)."""
+    parts = getattr(exc, "www_authenticate", None)
+    if isinstance(parts, list) and parts:
+        return parts
+    joined = _www_values(exc.headers or {})
+    return [joined] if joined else []
+
+
 def _mock_402_invoice_stack(mock_settings):
     mock_settings.AUTH_ROOT_KEY = "router-challenge-root"
     mock_settings.POST_PRICE_SATS = 21
@@ -215,9 +224,17 @@ class TestRequirePaymentRouting:
                 )
 
             assert exc_info.value.status_code == 402
-            www = _www_values(exc_info.value.headers or {})
-            assert "L402" in www and "macaroon=" in www and "invoice=" in www
-            assert "Payment " in www  # MPP co-challenge
+            www_parts = _exc_www_parts(exc_info.value)
+            assert len(www_parts) >= 2, (
+                f"14.14: L402 and Payment must be separate challenges, not comma-joined; "
+                f"got {www_parts!r}"
+            )
+            assert any(h.strip().startswith("L402 ") for h in www_parts), www_parts
+            assert any("Payment " in h for h in www_parts), www_parts
+            # Adversarial: a single joined header must not masquerade as two parts
+            assert not any(
+                h.strip().startswith("L402 ") and "Payment " in h for h in www_parts
+            ), f"comma-joined WWW-Authenticate still present: {www_parts!r}"
             detail = exc_info.value.detail
             assert isinstance(detail, dict)
             how = detail.get("how_to_pay") or {}
@@ -247,8 +264,8 @@ class TestRequirePaymentRouting:
                     memo="bad mpp",
                 )
             assert exc_info.value.status_code == 402
-            www = _www_values(exc_info.value.headers or {})
-            assert "L402" in www
+            www_parts = _exc_www_parts(exc_info.value)
+            assert any("L402" in h for h in www_parts), www_parts
 
 
 # ---------------------------------------------------------------------------
@@ -392,6 +409,11 @@ class TestRequirePaymentEndpointWiring:
         data = resp.json()
         assert data.get("paid") is True
         assert data["event"]["content"] == "mpp settle via router"
+        # 14.15: MPP settle must emit Payment-Receipt (mirror pay_post / pre-14.13)
+        receipt = resp.headers.get("payment-receipt") or resp.headers.get("Payment-Receipt")
+        assert receipt, (
+            f"14.15: expected Payment-Receipt on MPP settle; headers={dict(resp.headers)}"
+        )
 
     @pytest.mark.asyncio
     async def test_events_mpp_underpay_rejected_via_router(self, router_paid_client):
@@ -422,6 +444,16 @@ class TestRequirePaymentEndpointWiring:
         detail = body.get("detail", body)
         detail_str = json.dumps(detail) if not isinstance(detail, str) else detail
         assert "21" in detail_str or "requires" in detail_str.lower()
+        # 14.14: underpay 402 must emit distinct L402 + Payment WWW-Authenticate headers
+        www = _www_list(resp)
+        assert len(www) >= 2, (
+            f"14.14: get_list(www-authenticate) must yield separate challenges; got {www!r}"
+        )
+        assert any(h.strip().startswith("L402 ") for h in www), www
+        assert any(h.strip().startswith("Payment ") or "Payment " in h for h in www), www
+        assert not any(
+            h.strip().startswith("L402 ") and "Payment " in h for h in www
+        ), f"comma-joined WWW-Authenticate still present: {www!r}"
 
     @pytest.mark.asyncio
     async def test_pay_post_mpp_underpay_rejected_via_router(self, router_paid_client):
@@ -447,6 +479,15 @@ class TestRequirePaymentEndpointWiring:
         assert resp.status_code == 402, (
             f"POST /pay underpay must 402; got {resp.status_code}: {resp.text}"
         )
+        www = _www_list(resp)
+        assert len(www) >= 2, (
+            f"14.14: POST /pay underpay must emit separate WWW-Authenticate; got {www!r}"
+        )
+        assert any(h.strip().startswith("L402 ") for h in www), www
+        assert any("Payment " in h for h in www), www
+        assert not any(
+            h.strip().startswith("L402 ") and "Payment " in h for h in www
+        ), f"comma-joined WWW-Authenticate still present: {www!r}"
 
     @pytest.mark.asyncio
     async def test_submit_event_and_pay_post_call_require_payment(self, router_paid_client):

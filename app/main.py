@@ -398,11 +398,21 @@ async def _http_exception_handler(request: Request, exc: HTTPException):
     """Sanitize HTTPException details (esp. 5xx) before returning to clients."""
     detail = client_safe_detail(exc.status_code, exc.detail)
     headers = dict(exc.headers) if exc.headers else None
-    return JSONResponse(
+    # 14.14: unified 402s carry distinct WWW-Authenticate challenges on
+    # exc.www_authenticate (L402 params contain commas — never join).
+    www_parts = getattr(exc, "www_authenticate", None)
+    if www_parts:
+        headers = {k: v for k, v in (headers or {}).items()
+                   if k.lower() != "www-authenticate"}
+    response = JSONResponse(
         status_code=exc.status_code,
         content={"detail": detail},
-        headers=headers,
+        headers=headers or None,
     )
+    if www_parts:
+        for h in www_parts:
+            response.headers.append("WWW-Authenticate", h)
+    return response
 
 
 async def _unhandled_exception_handler(request: Request, exc: Exception):

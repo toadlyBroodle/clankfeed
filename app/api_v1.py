@@ -362,6 +362,23 @@ async def submit_event(request: Request, db: AsyncSession = Depends(get_db)):
     if settlement:
         await store_event(db, event, sats_clank=req_sats, value_usd=req_usd)
         await broadcast_event(event)
+        protocol = settlement.get("_protocol", "")
+        payment_id = (
+            settlement.get("payment_hash")
+            or settlement.get("tx_hash")
+            or ""
+        )
+        # 14.15: MPP/Tempo settle must emit Payment-Receipt (mirror pay_post)
+        if protocol in ("mpp", "tempo") and payment_id:
+            method = "lightning" if protocol == "mpp" else "tempo"
+            return JSONResponse(
+                status_code=200,
+                content={"paid": True, "event": event, "sats_clank": req_sats},
+                headers={
+                    "Payment-Receipt": build_receipt(payment_id, method=method),
+                    "Cache-Control": "private",
+                },
+            )
         return {"paid": True, "event": event, "sats_clank": req_sats}
 
     # No payment provided: store as pending, return payment options

@@ -145,18 +145,21 @@ async def _raise_unified_402(
         raise HTTPException(status_code=402, detail=detail)
 
     how = build_how_to_pay(include_l402=include_l402)
-    raise HTTPException(
+    # Emit distinct WWW-Authenticate challenges (not comma-joined): L402 params
+    # contain commas, so a single joined header breaks scheme-naïve parsers and
+    # diverges from payment_required_challenge / GET /pay. The exception handler
+    # appends each part as its own header (see app/main.py).
+    exc = HTTPException(
         status_code=402,
         detail={
             "detail": detail,
             "price": {"sats": sats, "usd": usd},
             "how_to_pay": how,
         },
-        headers={
-            "WWW-Authenticate": ", ".join(www_parts),
-            "Cache-Control": "no-store",
-        },
+        headers={"Cache-Control": "no-store"},
     )
+    exc.www_authenticate = list(www_parts)
+    raise exc
 
 
 async def require_payment(
