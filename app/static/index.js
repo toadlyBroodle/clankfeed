@@ -474,6 +474,8 @@ async function submitVote(eventId) {
 
     if (resp.status === 402 || data.status === 'payment_required') {
       const challenge = parseL402Challenge(resp, data);
+      // Preserve co-challenges: L402 settle overwrite must not drop stripe/tempo
+      const pay402 = data;
       if (challenge) {
         status.textContent = 'Pay L402 to downvote...';
         try {
@@ -491,10 +493,20 @@ async function submitVote(eventId) {
           status.textContent = payErr.message || 'Payment failed';
           status.style.color = 'var(--error)';
         }
+        // Fall through to Tempo/Stripe/QR widget if L402 wallet path failed
+      }
+      const hasPay = pay402.bolt11 || pay402.tempo || pay402.stripe
+        || (pay402.lightning && pay402.lightning.bolt11)
+        || ((pay402.methods || []).length > 0);
+      if (hasPay) {
+        status.textContent = '';
+        showVotePayment(eventId, direction, pay402);
         return;
       }
-      status.textContent = '';
-      showVotePayment(eventId, direction, data);
+      if (!challenge) {
+        status.textContent = (typeof data.detail === 'string' ? data.detail : null) || 'Vote failed';
+        status.style.color = 'var(--error)';
+      }
       return;
     }
 

@@ -534,6 +534,85 @@ class TestStripeWebClientWidget:
         tab_line = [ln for ln in src.splitlines() if 'id="pw-tab-stripe"' in ln][0]
         assert "hidden" in tab_line
 
+    def _submit_vote_fn(self) -> str:
+        index = (STATIC / "index.js").read_text()
+        assert "async function submitVote" in index
+        rest = index.split("async function submitVote", 1)[1]
+        # submitVote is immediately followed by splitZapAmounts
+        for marker in (
+            "\nfunction splitZapAmounts",
+            "\nasync function submitZap",
+            "\nfunction voteSuccess",
+        ):
+            if marker in rest:
+                return rest.split(marker, 1)[0]
+        return rest
+
+    def test_submit_vote_falls_through_to_show_vote_payment_after_l402_fail(self):
+        """7a.10: L402 fail must not early-return before Stripe/Tempo co-challenge UI.
+
+        Post path falls through to showPaymentWidget after L402 fail; downvote must
+        mirror that so a 402 advertising stripe still shows the Card/SPT tab.
+        """
+        fn = self._submit_vote_fn()
+        assert "payL402AndRetry" in fn
+        assert "showVotePayment" in fn
+
+        # After the L402 try/catch, must reach showVotePayment (fallthrough),
+        # not `return` immediately after the catch block.
+        # Locate catch of payL402 path, then ensure showVotePayment appears later
+        # in the same 402 handler without an intervening bare `return;` that
+        # exits submitVote before the widget.
+        catch_idx = fn.find("catch (payErr)")
+        assert catch_idx != -1, "expected L402 payErr catch in submitVote"
+        after_catch = fn[catch_idx:]
+        # Closing brace of catch, then what follows
+        # Must either: (a) call showVotePayment after catch, or (b) explicitly
+        # fall through (comment + hasPay / showVotePayment) — never `return;`
+        # as the next statement after the catch block closes.
+        show_after = after_catch.find("showVotePayment")
+        assert show_after != -1, (
+            "submitVote must call showVotePayment after L402 fail/catch "
+            "(mirror post fallthrough); early return blocks Stripe Card downvote"
+        )
+        between = after_catch[:show_after]
+        # A bare `return;` that exits before showVotePayment is the 7a.10 bug
+        # (allow `return` only inside nested success paths before catch).
+        # Strip nested blocks inside catch; look at statements between catch
+        # close and showVotePayment.
+        # Heuristic: after `catch (payErr) { ... }`, if the next non-ws token
+        # is `return;` before showVotePayment → fail.
+        import re
+        # Remove the catch block body so we only see what follows it
+        m = re.search(r"catch\s*\(payErr\)\s*\{", after_catch)
+        assert m
+        i = m.end()
+        depth = 1
+        while i < len(after_catch) and depth:
+            if after_catch[i] == "{":
+                depth += 1
+            elif after_catch[i] == "}":
+                depth -= 1
+            i += 1
+        after_catch_block = after_catch[i:show_after]
+        assert "return;" not in after_catch_block, (
+            "submitVote must not `return` after L402 catch before showVotePayment; "
+            f"found early return in: {after_catch_block!r}"
+        )
+
+    def test_submit_vote_preserves_402_co_challenges_for_fallthrough(self):
+        """Settle response overwrites `data`; fallthrough must still see stripe/tempo."""
+        fn = self._submit_vote_fn()
+        # Must check stripe / tempo / methods (or a preserved pay402 alias) for hasPay
+        assert "data.stripe" in fn or "pay402.stripe" in fn or "payData.stripe" in fn
+        assert "showVotePayment" in fn
+
+    def test_adversarial_submit_vote_still_returns_on_l402_success(self):
+        """Invariant: successful L402 downvote must still short-circuit via voteSuccess."""
+        fn = self._submit_vote_fn()
+        assert "voteSuccess" in fn
+        assert "data.voted" in fn
+
 
 class TestStripeChallengeEchoInBody:
     """Browser fetch collapses multi WWW-Authenticate; JSON must echo stripe challenge."""
