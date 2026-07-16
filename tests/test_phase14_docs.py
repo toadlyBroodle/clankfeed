@@ -22,6 +22,10 @@ def _api_md() -> str:
     return (ROOT / "docs" / "API.md").read_text()
 
 
+def _claude_md() -> str:
+    return (ROOT / "CLAUDE.md").read_text()
+
+
 def _lower(s: str) -> str:
     return s.lower()
 
@@ -228,3 +232,85 @@ class TestNoAuthorPayoutFromServerBalance:
         async with async_session() as db:
             rows = (await db.execute(select(Account))).scalars().all()
         assert rows == []
+
+
+# ---------------------------------------------------------------------------
+# 14.19 CLAUDE.md — Architecture / Key Files parity with non-custodial model
+# ---------------------------------------------------------------------------
+
+
+class TestClaudeMdNonCustodialArchitecture:
+    """Agents reading CLAUDE.md must not implement against dead custodial APIs."""
+
+    def test_claude_md_exists(self):
+        assert (ROOT / "CLAUDE.md").is_file()
+
+    def test_claude_md_documents_l402_primary(self):
+        text = _claude_md()
+        assert "L402" in text
+        assert "require_payment" in text or "WWW-Authenticate: L402" in text
+
+    def test_claude_md_documents_nip57_tips(self):
+        text = _lower(_claude_md())
+        assert "nip-57" in text or "nip 57" in text
+        assert "zap" in text
+        assert "90" in _claude_md() and "10" in _claude_md()
+
+    def test_claude_md_nip98_is_identity_only(self):
+        text = _claude_md()
+        lower = _lower(text)
+        assert "nip-98" in lower or "nip98" in lower
+        assert "auto-creates accounts" not in lower
+        assert "identity-only" in lower or "identity only" in lower or "never unlocks" in lower
+
+    def test_claude_md_notes_account_routes_410(self):
+        text = _claude_md()
+        assert "/account" in text
+        assert "410" in text
+
+    def test_claude_md_has_no_live_account_system_section(self):
+        text = _claude_md()
+        assert "**Account system:**" not in text
+        assert "POST /api/v1/account/create" not in text
+        assert "deposit credits" not in _lower(text)
+        assert "skip per-request payment" not in _lower(text)
+
+    def test_claude_md_rest_surface_does_not_manage_accounts(self):
+        text = _claude_md()
+        assert "manage accounts" not in _lower(text)
+
+    def test_claude_md_key_files_drop_custodial_account_guidance(self):
+        """Key Files must not advertise live credit CRUD / encrypted key custody."""
+        text = _claude_md()
+        # Locate Key Files section if present
+        idx = text.find("## Key Files")
+        chunk = text[idx:] if idx >= 0 else text
+        lower = _lower(chunk)
+        assert "credit management" not in lower
+        assert "auto-creates accounts by pubkey" not in lower
+        assert "field-level encryption for stored private keys" not in lower
+        assert "nostr keypair generation" not in lower
+
+    def test_claude_md_payment_flow_is_not_mpp_only(self):
+        text = _claude_md()
+        # Must not describe the sole agent flow as MPP credential submit
+        assert "Client submits MPP credential with payment proof" not in text
+        assert "L402" in text
+
+
+# ---------------------------------------------------------------------------
+# 14.20 Phase 13 open redirects must be closed once 14.7/14.8 shipped
+# ---------------------------------------------------------------------------
+
+
+class TestPhase13RedirectsClosed:
+    def test_phase13_checklist_redirects_are_checked(self):
+        spec = (ROOT / "docs" / "SPEC.md").read_text()
+        # Bundled redirect lines must not remain open `- [ ]`
+        assert "- [ ] ~~13.9–13.13~~" not in spec
+        assert "- [x] ~~13.9–13.13~~" in spec
+
+    def test_phase13_review_followup_redirect_is_checked(self):
+        spec = (ROOT / "docs" / "SPEC.md").read_text()
+        assert "- [ ] ~~13.13~~ → **14.8**" not in spec
+        assert "- [x] ~~13.13~~ → **14.8**" in spec
