@@ -8,6 +8,13 @@ import pytest
 from app.l402 import mint_macaroon, verify_l402, require_l402
 
 
+def _detail_text(detail) -> str:
+    """Normalize HTTPException.detail (str or structured 402 dict) to a message string."""
+    if isinstance(detail, dict):
+        return str(detail.get("detail", detail))
+    return str(detail)
+
+
 # --- mint / verify round-trip ---
 
 class TestMintAndVerify:
@@ -176,7 +183,7 @@ class TestRequireL402:
             with pytest.raises(HTTPException) as exc_info:
                 await require_l402(request=request)
             assert exc_info.value.status_code == 402
-            assert "Invalid L402 credentials" in exc_info.value.detail
+            assert "Invalid L402 credentials" in _detail_text(exc_info.value.detail)
             assert "WWW-Authenticate" in exc_info.value.headers
 
     @pytest.mark.asyncio
@@ -272,7 +279,7 @@ class TestL402AmountCheck:
                 await require_l402(request=request, amount_sats=1000)
 
             assert exc_info.value.status_code == 402
-            assert "amount mismatch" in exc_info.value.detail.lower()
+            assert "amount mismatch" in _detail_text(exc_info.value.detail).lower()
             assert "WWW-Authenticate" in exc_info.value.headers
 
     @pytest.mark.asyncio
@@ -382,7 +389,7 @@ class TestL402Replay:
                 await require_l402(request=request, db=fake_db, amount_sats=21)
 
             assert exc_info.value.status_code == 402
-            assert "already consumed" in exc_info.value.detail.lower()
+            assert "already consumed" in _detail_text(exc_info.value.detail).lower()
             assert "WWW-Authenticate" in exc_info.value.headers
             mock_consume.assert_awaited_once()
 

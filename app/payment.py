@@ -40,10 +40,13 @@ async def _error_402_with_challenge(
 ) -> "RawResponse":
     """Build a 402 error response with fresh WWW-Authenticate challenge headers (Core 1.7)."""
     from starlette.responses import Response as RawResponse
+    from app.l402 import build_how_to_pay
 
     sats = amount_sats or settings.POST_PRICE_SATS
+    body = dict(error_body)
+    body.setdefault("how_to_pay", build_how_to_pay())
     response = RawResponse(
-        content=json.dumps(error_body),
+        content=json.dumps(body),
         status_code=402,
         media_type="application/json",
     )
@@ -97,6 +100,8 @@ async def pay_get(request: Request, token: str, db: AsyncSession = Depends(get_d
         "token": token,
         "methods": ["lightning"],
     }
+    from app.l402 import build_how_to_pay
+    body["how_to_pay"] = build_how_to_pay()
 
     # Multiple WWW-Authenticate headers via raw Response
     from starlette.responses import Response as RawResponse

@@ -112,6 +112,88 @@ def _extract_payment_hash(macaroon_b64: str) -> str | None:
     return None
 
 
+def http_base_url() -> str:
+    """HTTP(S) base derived from BASE_URL (ws→http, wss→https)."""
+    return settings.BASE_URL.replace("wss://", "https://").replace("ws://", "http://").rstrip("/")
+
+
+def build_how_to_pay() -> dict:
+    """Agent-facing how_to_pay block for 402 bodies (satring parity)."""
+    base = http_base_url()
+    return {
+        "L402": {
+            "steps": [
+                "1. Extract macaroon and invoice from WWW-Authenticate header",
+                "2. Pay the BOLT11 Lightning invoice",
+                "3. Retry with header: Authorization: L402 <macaroon>:<preimage>",
+            ],
+            "docs": f"{base}/.well-known/l402",
+        },
+        "MPP": {
+            "steps": [
+                "1. Extract Payment challenge from WWW-Authenticate header",
+                "2. Pay the BOLT11 invoice in the challenge request field",
+                "3. Build credential with paymentHash and preimage",
+                "4. Retry with header: Authorization: Payment <base64url-credential>",
+            ],
+            "docs": f"{base}/openapi.json",
+        },
+    }
+
+
+def l402_402_detail(message: str, amount_sats: int | None = None) -> dict:
+    """Structured 402 detail with how_to_pay.L402 for agent discovery."""
+    price = amount_sats if amount_sats is not None else settings.POST_PRICE_SATS
+    return {
+        "detail": message,
+        "price": {"sats": price},
+        "how_to_pay": build_how_to_pay(),
+    }
+
+
+def well_known_l402_document() -> dict:
+    """Body for GET /.well-known/l402 discovery."""
+    base = http_base_url()
+    return {
+        "protocol": "L402",
+        "description": (
+            "Lightning-native HTTP 402 payments. Pay invoice, get preimage, "
+            "authenticate with macaroon."
+        ),
+        "auth_scheme": "L402",
+        "auth_header_format": "Authorization: L402 <macaroon>:<preimage>",
+        "endpoints": {
+            "events": f"{base}/api/v1/events",
+            "post": f"{base}/api/v1/post",
+            "vote": f"{base}/api/v1/events/{{event_id}}/vote",
+        },
+        "pricing_sats": {
+            "post": settings.POST_PRICE_SATS,
+            "events": settings.POST_PRICE_SATS,
+            "vote": settings.POST_PRICE_SATS,
+        },
+        "example": {
+            "description": "Post a note with L402 payment (Python)",
+            "code": (
+                "import httpx\n"
+                "# 1. Hit endpoint to get 402 challenge\n"
+                f"r = httpx.post('{base}/api/v1/post', json={{'content': 'hello'}})\n"
+                "www_auth = r.headers['WWW-Authenticate']\n"
+                "macaroon = www_auth.split('macaroon=\"')[1].split('\"')[0]\n"
+                "invoice = www_auth.split('invoice=\"')[1].split('\"')[0]\n"
+                "# 2. Pay invoice via your Lightning wallet, get preimage\n"
+                "preimage = pay_invoice(invoice)  # your wallet SDK\n"
+                "# 3. Retry with L402 auth\n"
+                f"r = httpx.post('{base}/api/v1/post',\n"
+                "    json={{'content': 'hello'}},\n"
+                "    headers={{'Authorization': f'L402 {{macaroon}}:{{preimage}}'}}\n"
+                ")\n"
+            ),
+        },
+        "docs": f"{base}/.well-known/l402",
+    }
+
+
 async def require_l402(
     request: Request = None,
     db=None,
@@ -150,7 +232,10 @@ async def require_l402(
                     fresh_mac = mint_macaroon(invoice_data["payment_hash"])
                     raise HTTPException(
                         status_code=402,
-                        detail=f"L402 amount mismatch. This resource requires {price} sats.",
+                        detail=l402_402_detail(
+                            f"L402 amount mismatch. This resource requires {price} sats.",
+                            amount_sats=price,
+                        ),
                         headers={
                             "WWW-Authenticate": (
                                 f'L402 macaroon="{fresh_mac}", '
@@ -168,7 +253,10 @@ async def require_l402(
                     fresh_mac = mint_macaroon(invoice_data["payment_hash"])
                     raise HTTPException(
                         status_code=402,
-                        detail="L402 payment already consumed. Please pay a new invoice.",
+                        detail=l402_402_detail(
+                            "L402 payment already consumed. Please pay a new invoice.",
+                            amount_sats=price,
+                        ),
                         headers={
                             "WWW-Authenticate": (
                                 f'L402 macaroon="{fresh_mac}", '
@@ -185,7 +273,10 @@ async def require_l402(
         fresh_mac = mint_macaroon(invoice_data["payment_hash"])
         raise HTTPException(
             status_code=402,
-            detail="Invalid L402 credentials. Ensure the macaroon and preimage are from the same invoice.",
+            detail=l402_402_detail(
+                "Invalid L402 credentials. Ensure the macaroon and preimage are from the same invoice.",
+                amount_sats=price,
+            ),
             headers={
                 "WWW-Authenticate": (
                     f'L402 macaroon="{fresh_mac}", '
@@ -202,7 +293,7 @@ async def require_l402(
 
     raise HTTPException(
         status_code=402,
-        detail="Payment Required",
+        detail=l402_402_detail("Payment Required", amount_sats=price),
         headers={
             "WWW-Authenticate": (
                 f'L402 macaroon="{macaroon_b64}", '

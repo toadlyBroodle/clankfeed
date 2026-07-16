@@ -68,11 +68,14 @@ async def _error_402_with_challenge(
 ) -> "RawResponse":
     """Build a 402 error response with fresh WWW-Authenticate challenge headers (Core 1.7)."""
     from starlette.responses import Response as RawResponse
+    from app.l402 import build_how_to_pay
 
     sats = amount_sats or settings.POST_PRICE_SATS
     usd = amount_usd or settings.TEMPO_PRICE_USD
+    body = dict(error_body)
+    body.setdefault("how_to_pay", build_how_to_pay())
     response = RawResponse(
-        content=json.dumps(error_body),
+        content=json.dumps(body),
         status_code=402,
         media_type="application/json",
     )
@@ -120,6 +123,8 @@ def _build_payment_options(
     amount_usd: str = "",
 ) -> dict:
     """Build the payment options dict for 402 responses."""
+    from app.l402 import build_how_to_pay
+
     methods = []
     result = {}
     sats = amount_sats or settings.POST_PRICE_SATS
@@ -145,6 +150,7 @@ def _build_payment_options(
         }
 
     result["methods"] = methods
+    result["how_to_pay"] = build_how_to_pay()
     return result
 
 

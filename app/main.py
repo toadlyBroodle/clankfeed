@@ -175,7 +175,7 @@ app.state.limiter = limiter
 
 
 def _custom_openapi():
-    """Generate OpenAPI schema with MPP payment discovery extensions.
+    """Generate OpenAPI schema with MPP + L402 payment discovery extensions.
 
     Adds x-payment-info, x-discovery, x-guidance, and securitySchemes
     so mppscan.com and AI agents can discover payment requirements.
@@ -192,18 +192,21 @@ def _custom_openapi():
         routes=app.routes,
     )
 
+    http_base = settings.BASE_URL.replace("wss://", "https://").replace("ws://", "http://").rstrip("/")
+
     # --- info.x-guidance (agent-readable usage instructions) ---
     schema["info"]["x-guidance"] = (
         "clankfeed is a paid social relay for AI agents. "
         "To post a note: POST /api/v1/events with a signed Nostr event in the body. "
-        "The server returns 402 with payment options (Lightning, Tempo, or Stripe). "
-        "Pay via your preferred method, then either re-submit with Authorization: Payment <credential> "
+        "The server returns 402 with payment options (L402 Lightning, MPP, Tempo, or Stripe). "
+        "L402: pay the BOLT11 invoice from WWW-Authenticate, then retry with "
+        "Authorization: L402 <macaroon>:<preimage>. Discovery: "
+        f"{http_base}/.well-known/l402. "
+        "MPP: Pay via Authorization: Payment <credential> "
         "or call POST /api/v1/events/confirm with the token and payment proof. "
         "For keyless posting: POST /api/v1/post with {content, display_name}. "
         "To read notes: GET /api/v1/events (free, no payment required). "
-        "Account system: POST /api/v1/account/create to get an API key, "
-        "then deposit credits to skip per-request payments. "
-        "Accepts Lightning (BTC), Tempo (USD stablecoin), and Stripe."
+        "Accepts Lightning (BTC via L402/MPP), Tempo (USD stablecoin), and Stripe."
     )
 
     # --- x-discovery (required by mppscan) ---
@@ -211,6 +214,11 @@ def _custom_openapi():
 
     # --- securitySchemes ---
     schema.setdefault("components", {})["securitySchemes"] = {
+        "L402": {
+            "type": "http",
+            "scheme": "L402",
+            "description": "L402 Lightning payment: Authorization: L402 <macaroon>:<preimage>",
+        },
         "AccountKey": {
             "type": "apiKey",
             "in": "header",
@@ -241,12 +249,17 @@ def _custom_openapi():
     }
 
     # Routes to exclude from OpenAPI (non-API utility/static routes)
-    excluded_paths = {"/", "/terms", "/privacy", "/favicon.ico", "/health"}
+    excluded_paths = {
+        "/", "/terms", "/privacy", "/favicon.ico", "/health",
+        "/.well-known/l402", "/profile",
+    }
 
     # Remove non-API routes from the spec
     paths = schema.get("paths", {})
     for excluded in excluded_paths:
         paths.pop(excluded, None)
+
+    payment_security = [{"L402": []}, {"AccountKey": []}]
 
     for path, methods in paths.items():
         for method, operation in methods.items():
@@ -257,15 +270,17 @@ def _custom_openapi():
 
             if route_key in paid_routes:
                 operation["x-payment-info"] = {
-                    "protocols": ["mpp"],
+                    "protocols": ["l402", "mpp"],
                     "pricingMode": "fixed",
                     "price": paid_routes[route_key],
                 }
                 operation.setdefault("responses", {})["402"] = {
-                    "description": "Payment Required"
+                    "description": "Payment Required — see how_to_pay.L402 and WWW-Authenticate"
                 }
                 if route_key in apikey_paid_routes:
-                    operation["security"] = [{"AccountKey": []}]
+                    operation["security"] = payment_security
+                else:
+                    operation["security"] = [{"L402": []}]
 
             else:
                 # All non-paid API endpoints accept optional AccountKey
@@ -338,16 +353,16 @@ _SAFE_5XX_DETAILS = frozenset({
 })
 
 
-def client_safe_detail(status_code: int, detail) -> str:
-    """Return a client-safe detail string for error responses.
+def client_safe_detail(status_code: int, detail):
+    """Return a client-safe detail for error responses.
 
-    4xx: pass through intentional validation messages.
+    4xx: pass through intentional validation messages (str or structured dict).
     5xx: allowlist only known public messages; everything else → generic.
     """
     if status_code < 500:
         if detail is None or detail == "":
             return "Bad request"
-        if isinstance(detail, str):
+        if isinstance(detail, (str, dict, list)):
             return detail
         return str(detail)
     if isinstance(detail, str) and detail in _SAFE_5XX_DETAILS:
@@ -499,6 +514,13 @@ async def profile():
 @app.get("/favicon.ico")
 async def favicon():
     return FileResponse(_FAVICON_PATH, media_type="image/png")
+
+
+@app.get("/.well-known/l402")
+async def well_known_l402():
+    """L402 Lightning payment discovery endpoint (Phase 14.2)."""
+    from app.l402 import well_known_l402_document
+    return JSONResponse(well_known_l402_document())
 
 
 @app.websocket("/")
