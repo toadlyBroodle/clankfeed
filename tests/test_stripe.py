@@ -348,3 +348,86 @@ class TestStripePaymentOptions:
             assert opts["stripe"]["network_id"] == "profile_test_abc"
             assert opts["stripe"]["amount_usd"] == "0.50"
             assert opts["stripe"]["publishable_key"] == "pk_test_x"
+
+
+# ---------------------------------------------------------------------------
+# 7a.8: NIP-11 + OpenAPI advertise stripe when stripe_enabled()
+# ---------------------------------------------------------------------------
+
+
+class TestStripeDiscovery:
+    """Agents must see stripe in NIP-11 / OpenAPI when Stripe SPT is configured."""
+
+    @pytest.mark.asyncio
+    async def test_nip11_includes_stripe_when_enabled(self, client, monkeypatch):
+        monkeypatch.setattr(config.settings, "STRIPE_SECRET_KEY", "sk_test_discovery")
+        monkeypatch.setattr(config.settings, "STRIPE_PROFILE_ID", "profile_discovery")
+        monkeypatch.setattr(config.settings, "STRIPE_PRICE_USD", "0.50")
+        monkeypatch.setattr(config.settings, "PAYMENT_URL", "")  # no lightning in NIP-11
+
+        resp = await client.get("/", headers={"Accept": "application/nostr+json"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "stripe" in data["payments"]["methods"], data["payments"]
+        assert data["payments"]["stripe"]["network_id"] == "profile_discovery"
+        assert data["payments"]["stripe"]["amount_usd"] == "0.50"
+
+    @pytest.mark.asyncio
+    async def test_nip11_omits_stripe_when_disabled(self, client, monkeypatch):
+        """Adversarial: empty Stripe config must not advertise stripe."""
+        monkeypatch.setattr(config.settings, "STRIPE_SECRET_KEY", "")
+        monkeypatch.setattr(config.settings, "STRIPE_PROFILE_ID", "")
+
+        resp = await client.get("/", headers={"Accept": "application/nostr+json"})
+        data = resp.json()
+        assert "stripe" not in data["payments"]["methods"]
+        assert "stripe" not in data["payments"]
+
+    @pytest.mark.asyncio
+    async def test_openapi_non_l402_guidance_names_stripe_when_enabled(
+        self, client, monkeypatch,
+    ):
+        """When Lightning is off, x-guidance / 402 text must name Stripe if configured."""
+        from app.main import app
+
+        app.openapi_schema = None
+        monkeypatch.setattr(config.settings, "STRIPE_SECRET_KEY", "sk_test_discovery")
+        monkeypatch.setattr(config.settings, "STRIPE_PROFILE_ID", "profile_discovery")
+        # test-mode → payments_enabled() False (non-l402 OpenAPI path)
+        assert config.payments_enabled() is False
+
+        resp = await client.get("/openapi.json")
+        assert resp.status_code == 200
+        schema = resp.json()
+        guidance = schema["info"].get("x-guidance", "")
+        assert "Stripe" in guidance or "stripe" in guidance.lower(), guidance[:300]
+
+        events_402 = (
+            schema["paths"]["/api/v1/events"]["post"]
+            .get("responses", {})
+            .get("402", {})
+            .get("description", "")
+        )
+        assert "Stripe" in events_402 or "stripe" in events_402.lower(), events_402
+        app.openapi_schema = None
+
+    @pytest.mark.asyncio
+    async def test_openapi_non_l402_omits_stripe_when_disabled(
+        self, client, monkeypatch,
+    ):
+        """Adversarial: without Stripe keys, non-l402 guidance must not claim Stripe live."""
+        from app.main import app
+
+        app.openapi_schema = None
+        monkeypatch.setattr(config.settings, "STRIPE_SECRET_KEY", "")
+        monkeypatch.setattr(config.settings, "STRIPE_PROFILE_ID", "")
+        monkeypatch.setattr(config.settings, "TEMPO_RECIPIENT", "")
+
+        resp = await client.get("/openapi.json")
+        guidance = resp.json()["info"].get("x-guidance", "")
+        # Forward-looking mention in L402-live branch is N/A; non-l402 must not claim Stripe live.
+        assert "currently Tempo when configured" in guidance or "Lightning/L402 is not active" in guidance
+        # Must not imply Stripe is a live option when disabled
+        assert "Stripe when configured" not in guidance
+        assert "and Stripe" not in guidance
+        app.openapi_schema = None

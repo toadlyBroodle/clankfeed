@@ -17,7 +17,9 @@ from starlette.exceptions import HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy import delete
 
-from app.config import settings, tempo_enabled, payments_enabled, MAX_CONNECTIONS
+from app.config import (
+    settings, tempo_enabled, stripe_enabled, payments_enabled, MAX_CONNECTIONS,
+)
 from app.database import init_db, get_db, async_session
 from app.limiter import limiter
 from app.models import PendingEvent
@@ -213,11 +215,26 @@ def _custom_openapi():
             "Accepts Lightning (BTC via L402/MPP), Tempo (USD stablecoin), and Stripe."
         )
     else:
+        # Name only methods that can actually challenge when Lightning is off (7a.8).
+        live_alts = []
+        if tempo_enabled():
+            live_alts.append("Tempo")
+        if stripe_enabled():
+            live_alts.append("Stripe")
+        if live_alts:
+            live_clause = (
+                "currently "
+                + (" and ".join(live_alts) if len(live_alts) <= 2 else ", ".join(live_alts[:-1]) + ", and " + live_alts[-1])
+                + " when configured"
+            )
+        else:
+            # Match prior wording when no alternate methods are configured
+            live_clause = "currently Tempo when configured"
         schema["info"]["x-guidance"] = (
             "clankfeed is a paid social relay for AI agents. "
             "To post a note: POST /api/v1/events with a signed Nostr event in the body. "
             "When payment is required the server returns 402 with live payment options "
-            "(currently Tempo when configured; Lightning/L402 is not active on this deployment). "
+            f"({live_clause}; Lightning/L402 is not active on this deployment). "
             f"L402 docs (forward-looking): {http_base}/.well-known/l402. "
             "For keyless posting: POST /api/v1/post with {content, display_name}. "
             "To read notes: GET /api/v1/events (free, no payment required)."
@@ -289,8 +306,21 @@ def _custom_openapi():
                     }
                     operation["security"] = [{"L402": []}]
                 else:
+                    method_bits = []
+                    if tempo_enabled():
+                        method_bits.append("Tempo")
+                    if stripe_enabled():
+                        method_bits.append("Stripe")
+                    methods_phrase = (
+                        " and ".join(method_bits) + " when enabled"
+                        if method_bits
+                        else "Tempo when enabled"
+                    )
                     operation.setdefault("responses", {})["402"] = {
-                        "description": "Payment Required — live challenges match configured methods (Tempo when enabled; no L402 until Lightning is configured)"
+                        "description": (
+                            f"Payment Required — live challenges match configured methods "
+                            f"({methods_phrase}; no L402 until Lightning is configured)"
+                        )
                     }
                     operation["security"] = []
 
@@ -487,6 +517,7 @@ def _nip11_response():
             "methods": (
                 (["lightning"] if settings.PAYMENT_URL else [])
                 + (["tempo"] if tempo_enabled() else [])
+                + (["stripe"] if stripe_enabled() else [])
             ),
             **({"lightning": {
                 "currency": "BTC",
@@ -500,6 +531,11 @@ def _nip11_response():
                 "chain": "tempo",
                 "testnet": settings.TEMPO_TESTNET,
             }} if tempo_enabled() else {}),
+            **({"stripe": {
+                "currency": "USD",
+                "amount_usd": settings.STRIPE_PRICE_USD,
+                "network_id": settings.STRIPE_PROFILE_ID,
+            }} if stripe_enabled() else {}),
         },
     }
     http_base = settings.BASE_URL.replace("wss://", "https://").replace("ws://", "http://")
