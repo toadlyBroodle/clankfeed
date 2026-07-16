@@ -416,6 +416,85 @@ async def get_author_lud16(db: AsyncSession, pubkey: str) -> str | None:
     return extract_lud16_from_kind0_content(row.content)
 
 
+async def fetch_lnurl_pay_invoice(
+    lud16: str,
+    amount_msat: int,
+    zap_request: dict | None = None,
+) -> tuple[str | None, str]:
+    """Resolve an LNURL-pay BOLT11 for lud16 (SSRF-safe). Returns (bolt11|None, err).
+
+    Used by the web client zap helper so browsers need not fetch third-party
+    LNURL hosts (CSP connect-src is self-only). Server never holds tip funds —
+    it only fetches the invoice the client's wallet will pay.
+    """
+    if not isinstance(lud16, str) or "@" not in lud16:
+        return None, "invalid lud16 lightning address"
+    if not isinstance(amount_msat, int) or amount_msat < 1000:
+        return None, "amount_msat must be an integer >= 1000"
+
+    url = lud16_to_lnurlp_url(lud16)
+    if not url:
+        return None, "invalid lud16 lightning address"
+
+    host = url.split("://", 1)[-1].split("/", 1)[0]
+    pinned_ip = await resolve_safe_lnurl_ip(host)
+    if not pinned_ip:
+        return None, "lud16 host blocked"
+
+    try:
+        status, data = await lnurl_http_get(url, pinned_ip)
+    except Exception as e:
+        logger.warning("LNURL metadata fetch failed for %s: %s", lud16, e)
+        return None, "lnurl metadata fetch failed"
+
+    if status != 200 or not isinstance(data, dict):
+        return None, "lnurl metadata unavailable"
+
+    callback = data.get("callback")
+    if not isinstance(callback, str) or not callback.startswith("https://"):
+        return None, "lnurl missing https callback"
+
+    min_send = int(data.get("minSendable") or 0)
+    max_send = int(data.get("maxSendable") or 0)
+    if min_send and amount_msat < min_send:
+        return None, f"amount below minSendable ({min_send})"
+    if max_send and amount_msat > max_send:
+        return None, f"amount above maxSendable ({max_send})"
+
+    from urllib.parse import urlencode, urlparse, urlunparse, parse_qs
+
+    cb = urlparse(callback)
+    cb_host = cb.hostname
+    if not cb_host:
+        return None, "lnurl callback host missing"
+    # Re-check callback host (may differ from metadata host)
+    cb_pinned = await resolve_safe_lnurl_ip(cb_host)
+    if not cb_pinned:
+        return None, "lnurl callback host blocked"
+
+    q = parse_qs(cb.query, keep_blank_values=True)
+    q["amount"] = [str(amount_msat)]
+    if zap_request is not None:
+        if data.get("allowsNostr") is not True:
+            return None, "lnurl does not allow nostr zaps"
+        q["nostr"] = [json.dumps(zap_request, separators=(",", ":"))]
+    new_query = urlencode({k: v[0] for k, v in q.items()})
+    invoice_url = urlunparse((cb.scheme, cb.netloc, cb.path, cb.params, new_query, cb.fragment))
+
+    try:
+        status2, inv = await lnurl_http_get(invoice_url, cb_pinned)
+    except Exception as e:
+        logger.warning("LNURL invoice fetch failed for %s: %s", lud16, e)
+        return None, "lnurl invoice fetch failed"
+
+    if status2 != 200 or not isinstance(inv, dict):
+        return None, "lnurl invoice unavailable"
+    pr = inv.get("pr")
+    if not isinstance(pr, str) or not pr.lower().startswith("ln"):
+        return None, "lnurl response missing bolt11"
+    return pr, ""
+
+
 async def fetch_lnurl_nostr_pubkey(lud16: str) -> str | None:
     """Fetch LNURL-pay metadata for lud16; return nostrPubkey if allowsNostr.
 

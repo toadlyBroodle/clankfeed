@@ -88,6 +88,21 @@ async def payment_required_challenge(
                     invoice_data["payment_request"], description,
                 )
             )
+            from app.l402 import mint_macaroon
+
+            body["l402"] = {
+                "macaroon": mint_macaroon(invoice_data["payment_hash"]),
+                "invoice": invoice_data["payment_request"],
+            }
+            body["lightning"] = {
+                "bolt11": invoice_data["payment_request"],
+                "payment_hash": invoice_data["payment_hash"],
+                "amount_sats": sats,
+            }
+            methods = list(body.get("methods") or [])
+            if "lightning" not in methods:
+                methods.append("lightning")
+            body["methods"] = methods
         except Exception as e:
             logger.warning("Could not generate Lightning challenge for 402: %s", e)
 

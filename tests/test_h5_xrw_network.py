@@ -151,7 +151,7 @@ async def test_h5_post_and_vote_pos_send_xrw(live_server):
         await page.wait_for_selector(f"#note-{note_id}", timeout=15_000)
         captured.clear()
 
-        await page.click(f'#note-{note_id} button[title="Upvote"]')
+        await page.click(f'#note-{note_id} button[title="Downvote"]')
         await page.wait_for_selector(f"#vote-submit-{note_id}", timeout=5_000)
         await page.click(f"#vote-submit-{note_id}")
 
@@ -167,7 +167,7 @@ async def test_h5_post_and_vote_pos_send_xrw(live_server):
         ]
         assert vote_hdrs, f"expected POST vote; saw: {[u for _, u, _ in captured]}"
         assert _xrw(vote_hdrs[-1]) == "XMLHttpRequest", (
-            f"authFetch vote missing XRW; headers={vote_hdrs[-1]}"
+            f"apiFetch vote missing XRW; headers={vote_hdrs[-1]}"
         )
 
         await browser.close()
@@ -207,7 +207,7 @@ async def test_h5_confirm_path_sends_xrw_via_route_mock(live_server):
                     content_type="application/json",
                     body=(
                         '{"status":"payment_required","token":"%s","event_id":"%s",'
-                        '"direction":1,"methods":["lightning"],'
+                        '"direction":-1,"methods":["lightning"],'
                         '"bolt11":"lnbc1h5xrwtestinvoice","payment_hash":"%s",'
                         '"lightning":{"bolt11":"lnbc1h5xrwtestinvoice",'
                         '"payment_hash":"%s","amount_sats":21,"expires_in":600}}'
@@ -221,7 +221,7 @@ async def test_h5_confirm_path_sends_xrw_via_route_mock(live_server):
                     content_type="application/json",
                     body=(
                         '{"voted":true,"new_sats_clank":42,"new_sats_ext":0,'
-                        '"direction":1,"amount_sats":21}'
+                        '"direction":-1,"amount_sats":21}'
                     ),
                 )
                 return
@@ -246,7 +246,7 @@ async def test_h5_confirm_path_sends_xrw_via_route_mock(live_server):
             }"""
         )
 
-        await page.click(f'#note-{note_id} button[title="Upvote"]')
+        await page.click(f'#note-{note_id} button[title="Downvote"]')
         await page.wait_for_selector(f"#vote-submit-{note_id}", timeout=5_000)
         await page.click(f"#vote-submit-{note_id}")
 

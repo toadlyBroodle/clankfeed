@@ -11,6 +11,7 @@ let metadataCache = {};  // pubkey -> {name, about, picture}
 let currentSort = 'newest';
 let currentFeed = 'clankfeed';  // 'clankfeed' | 'external'
 let relayPubkey = '';  // set from NIP-11, used to label relay-signed notes as 'anon'
+let relayLud16 = '';  // NIP-57 fee-leg lud16 from NIP-11 (14.6)
 
 // ---- WebSocket Relay Client ----
 function connect() {
@@ -151,7 +152,7 @@ function renderNoteCard(n, isReply) {
   return `<div class="${cardClass} p-3 rounded" id="note-${n.id}" data-parent="${esc(parentId)}">
     <div class="flex gap-2">
       <div class="flex flex-col items-center gap-0 vote-col">
-        <button class="vote-btn" data-action="upvote" data-id="${esc(n.id)}" title="Upvote">&#9650;</button>
+        <button class="vote-btn" data-action="zap" data-id="${esc(n.id)}" title="Zap (NIP-57 90/10)">&#9889;</button>
         <span class="vote-value" id="value-${n.id}" class="c-accent" title="clankfeed sats">${valueSats}</span>
         <span class="vote-ext" id="ext-${n.id}" title="external zaps (sats_ext)">&#9889;${extSats}</span>
         <button class="vote-btn" data-action="downvote" data-id="${esc(n.id)}" title="Downvote">&#9660;</button>
@@ -173,7 +174,7 @@ function renderNoteCard(n, isReply) {
     </div>
     <div class="vote-prompt" id="vote-prompt-${n.id}">
       <input type="number" id="vote-amount-${n.id}" class="p-1 rounded text-xs w-deposit" min="21" value="21" placeholder="sats">
-      <button class="px-2 py-1 rounded text-xs ml-1" id="vote-submit-${n.id}" data-action="submit-vote" data-id="${esc(n.id)}">Pay & Vote</button>
+      <button class="px-2 py-1 rounded text-xs ml-1" id="vote-submit-${n.id}" data-action="submit-vote" data-id="${esc(n.id)}">Pay</button>
       <button class="px-2 py-1 rounded text-xs ml-1 bg-alt" data-action="cancel-vote" data-id="${esc(n.id)}">Cancel</button>
       <span class="text-xs ml-2" id="vote-status-${n.id}" class="c-dim"></span>
     </div>
@@ -200,11 +201,11 @@ function handleFeedAction(e) {
   if (!el) return;
   const action = el.getAttribute('data-action');
   const id = el.getAttribute('data-id') || '';
-  if (action === 'upvote') startVote(id, 1);
+  if (action === 'zap') startZap(id);
   else if (action === 'downvote') startVote(id, -1);
   else if (action === 'reply') startReply(id, el.getAttribute('data-name') || '');
   else if (action === 'toggle-replies') toggleReplies(id);
-  else if (action === 'submit-vote') submitVote(id);
+  else if (action === 'submit-vote') submitPendingAction(id);
   else if (action === 'cancel-vote') cancelVote(id);
   else if (action === 'scroll') scrollToNote(id);
 }
@@ -237,7 +238,7 @@ function relativeTime(ts) {
 
 
 
-// ---- Post Form + Payment ----
+// ---- Post Form + Payment (L402 primary) ----
 document.getElementById('post-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const content = document.getElementById('post-content').value.trim();
@@ -256,47 +257,89 @@ document.getElementById('post-form').addEventListener('submit', async (e) => {
     const replyTo = document.getElementById('post-form').dataset.replyTo;
     if (replyTo) body.reply_to = replyTo;
 
-    const resp = await authFetch('/api/v1/post', {
+    const postOpts = {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
-    });
-    const data = await resp.json();
+    };
+    // Use apiFetch (no NIP-98) so L402 Authorization is free for the settle retry
+    let resp = await apiFetch('/api/v1/post', postOpts);
+    let data = await resp.json().catch(() => ({}));
 
-    if (data.paid) {
-      // Posted directly (test mode or credits used)
+    if (resp.ok && data.paid) {
       document.getElementById('post-content').value = '';
       clearReplyState();
       btn.disabled = false;
       btn.textContent = 'Post Note';
-      // balance updated on profile page
       return;
     }
 
-    if (data.bolt11 || data.tempo) {
-      data._title = 'Pay to post your note:';
-      showPaymentWidget(data, async (token, paymentId, method) => {
-        const body = { token, method };
-        if (method === 'tempo') body.tx_hash = paymentId;
-        else body.payment_hash = paymentId;
-        const cr = await apiFetch('/api/post/confirm', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify(body),
-        });
-        const cd = await cr.json();
-        if (cd.paid) {
-          document.getElementById('post-content').value = '';
-          clearReplyState();
+    if (resp.status === 402 || data.status === 'payment_required') {
+      const challenge = parseL402Challenge(resp, data);
+      if (challenge) {
+        data._title = 'Pay to post (L402):';
+        showPaymentWidget(data, null, () => {
           btn.disabled = false;
           btn.textContent = 'Post Note';
-          hidePaymentWidget();
+        }, document.getElementById('post-form'));
+        const lnStatus = document.getElementById('pw-ln-status');
+        try {
+          resp = await payL402AndRetry('/api/v1/post', postOpts, challenge, lnStatus);
+          data = await resp.json().catch(() => ({}));
+          if (resp.ok && data.paid) {
+            document.getElementById('post-content').value = '';
+            clearReplyState();
+            hidePaymentWidget();
+            btn.disabled = false;
+            btn.textContent = 'Post Note';
+            return;
+          }
+          if (lnStatus) {
+            lnStatus.textContent = (typeof data.detail === 'string' ? data.detail : null)
+              || 'L402 settle failed — try Tempo tab if available';
+            lnStatus.style.color = 'var(--error)';
+          }
+        } catch (payErr) {
+          if (lnStatus) {
+            lnStatus.textContent = payErr.message || 'Payment failed';
+            lnStatus.style.color = 'var(--error)';
+          }
         }
-      }, () => {
-        btn.disabled = false;
-        btn.textContent = 'Post Note';
-      }, document.getElementById('post-form'));
+        // Fall through to Tempo/MPP widget if L402 wallet path failed
+      }
+
+      // Tempo / QR fallback (also used when 402 has no L402 challenge)
+      const hasPay = data.bolt11 || data.tempo || (data.lightning && data.lightning.bolt11)
+        || ((data.methods || []).length > 0);
+      if (hasPay) {
+        data._title = data._title || 'Pay to post your note:';
+        showPaymentWidget(data, async (token, paymentId, method) => {
+          const conf = { token, method };
+          if (method === 'tempo') conf.tx_hash = paymentId;
+          else conf.payment_hash = paymentId;
+          const cr = await apiFetch('/api/post/confirm', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(conf),
+          });
+          const cd = await cr.json();
+          if (cd.paid) {
+            document.getElementById('post-content').value = '';
+            clearReplyState();
+            btn.disabled = false;
+            btn.textContent = 'Post Note';
+            hidePaymentWidget();
+          }
+        }, () => {
+          btn.disabled = false;
+          btn.textContent = 'Post Note';
+        }, document.getElementById('post-form'));
+        return;
+      }
     }
+
+    btn.disabled = false;
+    btn.textContent = 'Post Note';
   } catch (err) {
     console.error('Post error:', err);
     btn.disabled = false;
@@ -305,13 +348,28 @@ document.getElementById('post-form').addEventListener('submit', async (e) => {
 });
 
 
-// ---- Voting ----
-let pendingVoteDir = {};  // event_id -> direction
+// ---- Voting / Zap ----
+let pendingVoteDir = {};  // event_id -> direction (-1 downvote) or 'zap'
 let voteDebounce = {};  // event_id -> timeout ID
 let votePending = {};  // event_id -> accumulated clicks {direction, count}
 
+function startZap(eventId) {
+  pendingVoteDir[eventId] = 'zap';
+  votePending[eventId] = { direction: 'zap', count: 1 };
+  const prompt = document.getElementById(`vote-prompt-${eventId}`);
+  prompt.classList.add('active');
+  const amountInput = document.getElementById(`vote-amount-${eventId}`);
+  if (amountInput) amountInput.value = 21;
+  const status = document.getElementById(`vote-status-${eventId}`);
+  status.textContent = 'Zap (NIP-57 90/10)';
+  status.style.color = 'var(--dim)';
+  const submitBtn = document.getElementById(`vote-submit-${eventId}`);
+  if (submitBtn) submitBtn.textContent = 'Zap';
+}
+
 function startVote(eventId, direction) {
-  // Accumulate rapid clicks into combined amount
+  // Downvote only (anti-signal via L402). Tips use startZap.
+  if (direction !== -1) return;
   if (!votePending[eventId]) {
     votePending[eventId] = { direction, count: 0 };
   }
@@ -321,7 +379,6 @@ function startVote(eventId, direction) {
     votePending[eventId] = { direction, count: 1 };
   }
 
-  // Show prompt with amount input; user clicks "Pay & Vote" when ready
   pendingVoteDir[eventId] = direction;
   const prompt = document.getElementById(`vote-prompt-${eventId}`);
   prompt.classList.add('active');
@@ -330,8 +387,10 @@ function startVote(eventId, direction) {
 
   const status = document.getElementById(`vote-status-${eventId}`);
   const clicks = votePending[eventId].count;
-  status.textContent = (direction === 1 ? 'Upvote' : 'Downvote') + (clicks > 1 ? ` (${clicks}x)` : '');
+  status.textContent = 'Downvote' + (clicks > 1 ? ` (${clicks}x)` : '');
   status.style.color = 'var(--dim)';
+  const submitBtn = document.getElementById(`vote-submit-${eventId}`);
+  if (submitBtn) submitBtn.textContent = 'Pay & Downvote';
 }
 
 function cancelVote(eventId) {
@@ -344,8 +403,19 @@ function cancelVote(eventId) {
   hidePaymentWidget();
 }
 
+function submitPendingAction(eventId) {
+  if (pendingVoteDir[eventId] === 'zap') return submitZap(eventId);
+  return submitVote(eventId);
+}
+
 async function submitVote(eventId) {
-  const direction = pendingVoteDir[eventId] || 1;
+  const direction = pendingVoteDir[eventId] || -1;
+  if (direction !== -1) {
+    const status = document.getElementById(`vote-status-${eventId}`);
+    status.textContent = 'Tips use Zap (NIP-57)';
+    status.style.color = 'var(--error)';
+    return;
+  }
   const amountInput = document.getElementById(`vote-amount-${eventId}`);
   const amount = parseInt(amountInput.value) || 21;
   const status = document.getElementById(`vote-status-${eventId}`);
@@ -354,25 +424,186 @@ async function submitVote(eventId) {
   status.style.color = 'var(--dim)';
 
   try {
-    const resp = await authFetch(`/api/v1/events/${eventId}/vote`, {
+    const voteBody = { direction, amount_sats: amount };
+    const voteOpts = {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ direction, amount_sats: amount }),
-    });
-    const data = await resp.json();
+      body: JSON.stringify(voteBody),
+    };
+    let resp = await apiFetch(`/api/v1/events/${eventId}/vote`, voteOpts);
+    let data = await resp.json().catch(() => ({}));
 
     if (data.voted) {
       voteSuccess(eventId, direction, amount, data.new_sats_clank, data.new_sats_ext);
-    } else if (data.status === 'payment_required') {
-      // Show payment widget for the vote
+      return;
+    }
+
+    if (resp.status === 402 || data.status === 'payment_required') {
+      const challenge = parseL402Challenge(resp, data);
+      if (challenge) {
+        status.textContent = 'Pay L402 to downvote...';
+        try {
+          resp = await payL402AndRetry(
+            `/api/v1/events/${eventId}/vote`, voteOpts, challenge, status,
+          );
+          data = await resp.json().catch(() => ({}));
+          if (data.voted) {
+            voteSuccess(eventId, direction, amount, data.new_sats_clank, data.new_sats_ext);
+            return;
+          }
+          status.textContent = data.detail || 'L402 downvote failed';
+          status.style.color = 'var(--error)';
+        } catch (payErr) {
+          status.textContent = payErr.message || 'Payment failed';
+          status.style.color = 'var(--error)';
+        }
+        return;
+      }
       status.textContent = '';
       showVotePayment(eventId, direction, data);
-    } else {
-      status.textContent = data.detail || 'Vote failed';
-      status.style.color = 'var(--error)';
+      return;
     }
+
+    status.textContent = data.detail || 'Vote failed';
+    status.style.color = 'var(--error)';
   } catch (err) {
     status.textContent = 'Error';
+    status.style.color = 'var(--error)';
+  }
+}
+
+/** Split total sats across NIP-57 zap tags by weight. */
+function splitZapAmounts(totalSats, zapTags) {
+  const weights = zapTags.map(t => parseInt(t[3], 10) || 0);
+  const sum = weights.reduce((a, b) => a + b, 0) || 1;
+  let allocated = 0;
+  const parts = zapTags.map((t, i) => {
+    const isLast = i === zapTags.length - 1;
+    const sats = isLast
+      ? Math.max(1, totalSats - allocated)
+      : Math.max(1, Math.floor((totalSats * weights[i]) / sum));
+    if (!isLast) allocated += sats;
+    return { pubkey: t[1], relay: t[2], weight: weights[i], sats };
+  });
+  return parts;
+}
+
+async function resolveLud16ForPubkey(pubkey) {
+  if (relayPubkey && pubkey === relayPubkey && relayLud16) return relayLud16;
+  const meta = metadataCache[pubkey];
+  if (meta && typeof meta.lud16 === 'string' && meta.lud16.includes('@')) {
+    return meta.lud16.trim();
+  }
+  // Fetch kind:0 from API
+  try {
+    const resp = await apiFetch(`/api/v1/events?kinds=0&authors=${pubkey}&limit=1`);
+    const data = await resp.json();
+    const ev = (data.events || [])[0];
+    if (ev && ev.content) {
+      const parsed = JSON.parse(ev.content);
+      if (parsed.lud16) {
+        metadataCache[pubkey] = parsed;
+        return String(parsed.lud16).trim();
+      }
+    }
+  } catch (e) {}
+  return null;
+}
+
+async function submitZap(eventId) {
+  const amountInput = document.getElementById(`vote-amount-${eventId}`);
+  const amount = parseInt(amountInput.value) || 21;
+  const status = document.getElementById(`vote-status-${eventId}`);
+
+  if (!isLoggedIn()) {
+    status.textContent = 'Set identity on /profile to zap';
+    status.style.color = 'var(--error)';
+    return;
+  }
+
+  const note = notes.find(n => n.id === eventId);
+  if (!note) {
+    status.textContent = 'Note not found';
+    status.style.color = 'var(--error)';
+    return;
+  }
+
+  const zapTags = (note.tags || []).filter(t => Array.isArray(t) && t[0] === 'zap' && t.length >= 4);
+  if (zapTags.length < 2) {
+    status.textContent = 'Note missing zap fee tags';
+    status.style.color = 'var(--error)';
+    return;
+  }
+
+  status.textContent = 'Building zap split...';
+  status.style.color = 'var(--dim)';
+
+  try {
+    const parts = splitZapAmounts(amount, zapTags);
+    for (const part of parts) {
+      const lud16 = await resolveLud16ForPubkey(part.pubkey);
+      if (!lud16) {
+        status.textContent = part.pubkey === relayPubkey
+          ? 'Relay lud16 not configured'
+          : 'Author has no lud16 (kind:0)';
+        status.style.color = 'var(--error)';
+        return;
+      }
+      part.lud16 = lud16;
+    }
+
+    // Pay each leg: kind:9734 → LNURL invoice → WebLN
+    for (const part of parts) {
+      status.textContent = `Zapping ${part.sats} sats → ${part.lud16}...`;
+      const amountMsat = part.sats * 1000;
+      const zapRequest = {
+        kind: 9734,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['p', part.pubkey],
+          ['e', eventId],
+          ['amount', String(amountMsat)],
+          ['relays', location.origin.replace(/^http/, 'ws')],
+        ],
+        content: '',
+      };
+      const signed = await signNostrEvent(zapRequest);
+      if (!signed) {
+        status.textContent = 'Could not sign zap request';
+        status.style.color = 'var(--error)';
+        return;
+      }
+
+      const invResp = await apiFetch('/api/v1/zap/invoice', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          lud16: part.lud16,
+          amount_msat: amountMsat,
+          zap_request: signed,
+        }),
+      });
+      const invData = await invResp.json().catch(() => ({}));
+      if (!invResp.ok || !invData.bolt11) {
+        status.textContent = invData.detail || 'Zap invoice failed';
+        status.style.color = 'var(--error)';
+        return;
+      }
+
+      await payBolt11ForPreimage(invData.bolt11, status);
+    }
+
+    status.textContent = `Zapped ${amount} sats (90/10 split)`;
+    status.style.color = 'var(--accent)';
+    const extEl = document.getElementById(`ext-${eventId}`);
+    if (extEl) {
+      const cur = parseInt(String(extEl.textContent).replace(/\D/g, ''), 10) || 0;
+      extEl.textContent = '\u26A1' + (cur + amount);
+    }
+    if (note) note.sats_ext = (note.sats_ext || 0) + amount;
+    setTimeout(() => cancelVote(eventId), 2500);
+  } catch (err) {
+    status.textContent = err.message || 'Zap failed';
     status.style.color = 'var(--error)';
   }
 }
@@ -396,13 +627,12 @@ function voteSuccess(eventId, direction, amount, newValue, newSatsExt) {
   status.style.color = 'var(--accent)';
   const vpay = document.getElementById(`vote-pay-${eventId}`);
   if (vpay) vpay.remove();
-  // balance updated on profile page
   setTimeout(() => cancelVote(eventId), 2000);
 }
 
 function showVotePayment(eventId, direction, data) {
   const amount = (data.lightning && data.lightning.amount_sats) || (data.amount_sats) || 21;
-  data._title = `Pay to ${direction === 1 ? 'upvote' : 'downvote'} (${amount} sats):`;
+  data._title = `Pay to downvote (${amount} sats):`;
   showPaymentWidget(data, async (token, paymentId, method) => {
     const body = { token, method };
     if (method === 'tempo') body.tx_hash = paymentId;
@@ -624,5 +854,6 @@ fetch('/', { headers: { 'Accept': 'application/nostr+json' }})
       renderNotes();  // re-render with 'anon' labels
       updateHeaderLink();  // update with user's display name if available
     }
+    if (info.lud16) relayLud16 = info.lud16;
   })
   .catch(e => console.error('NIP-11 fetch failed:', e));

@@ -509,6 +509,9 @@ def _nip11_response():
         doc["pubkey"] = _relay_pubkey
     if settings.RELAY_CONTACT:
         doc["contact"] = settings.RELAY_CONTACT
+    # NIP-57 fee leg: expose relay lightning address when configured (14.6 web zap UX)
+    if settings.RELAY_LUD16:
+        doc["lud16"] = settings.RELAY_LUD16
     return JSONResponse(
         content=doc,
         headers={

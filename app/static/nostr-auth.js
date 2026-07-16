@@ -119,16 +119,84 @@ function apiFetch(url, options = {}) {
 // onPaid is called after payment is confirmed by the server.
 let _payPollTimer = null;
 
+/** Parse L402 macaroon+invoice from a 402 Response (+ optional JSON body). */
+function parseL402Challenge(resp, body) {
+  if (body && body.l402 && body.l402.macaroon && body.l402.invoice) {
+    return { macaroon: body.l402.macaroon, invoice: body.l402.invoice };
+  }
+  const www = (resp && resp.headers && resp.headers.get('www-authenticate')) || '';
+  // Match L402 challenge even when other schemes share the header value
+  const m = www.match(/L402\s+macaroon="([^"]+)"\s*,\s*invoice="([^"]+)"/i);
+  if (m) return { macaroon: m[1], invoice: m[2] };
+  return null;
+}
+
+/** Pay BOLT11 via WebLN / Bitcoin Connect; return hex preimage (no 0x). */
+async function payBolt11ForPreimage(bolt11, statusEl) {
+  const setStatus = (msg, color) => {
+    if (!statusEl) return;
+    statusEl.textContent = msg;
+    if (color) statusEl.style.color = color;
+  };
+
+  // Ensure WebLN provider (Bitcoin Connect sets window.webln onConnected)
+  if (window.webln) {
+    try {
+      if (typeof window.webln.enable === 'function' && !window.webln.enabled) {
+        await window.webln.enable();
+      }
+      setStatus('Paying via connected wallet...', 'var(--dim)');
+      const result = await window.webln.sendPayment(bolt11);
+      const preimage = (result && (result.preimage || result.paymentPreimage)) || '';
+      if (preimage) {
+        setStatus('Payment sent!', 'var(--accent)');
+        return String(preimage).replace(/^0x/i, '');
+      }
+    } catch (e) {
+      setStatus('Wallet payment failed; try Bitcoin Connect modal...', 'var(--error)');
+    }
+  }
+
+  if (typeof window.__bcLaunchPaymentModal === 'function') {
+    setStatus('Opening Bitcoin Connect...', 'var(--dim)');
+    const result = await window.__bcLaunchPaymentModal({ invoice: bolt11 });
+    const preimage = (result && (result.preimage || result.paymentPreimage)) || '';
+    if (preimage) {
+      setStatus('Payment sent!', 'var(--accent)');
+      return String(preimage).replace(/^0x/i, '');
+    }
+  }
+
+  throw new Error('Connect a Lightning wallet (Bitcoin Connect / WebLN) to pay');
+}
+
+/**
+ * Pay an L402 challenge invoice, then retry the request with
+ * Authorization: L402 <macaroon>:<preimage>.
+ */
+async function payL402AndRetry(url, fetchOptions, challenge, statusEl) {
+  if (!challenge || !challenge.macaroon || !challenge.invoice) {
+    throw new Error('Missing L402 challenge');
+  }
+  const preimage = await payBolt11ForPreimage(challenge.invoice, statusEl);
+  const headers = Object.assign(
+    { 'X-Requested-With': 'XMLHttpRequest' },
+    fetchOptions.headers || {},
+    { Authorization: 'L402 ' + challenge.macaroon + ':' + preimage },
+  );
+  return fetch(url, Object.assign({}, fetchOptions, { headers }));
+}
+
 async function payInvoice(bolt11, payHash, statusEl, onPaid, qrCanvas, bolt11Display) {
-  // Try Bitcoin Connect wallet first
-  if (window.__bcConnected && window.webln && bolt11) {
+  // Try Bitcoin Connect / WebLN first (capture preimage when available)
+  if ((window.__bcConnected || window.webln) && bolt11) {
     statusEl.textContent = 'Paying via connected wallet...';
     statusEl.style.color = 'var(--dim)';
     try {
-      await window.webln.sendPayment(bolt11);
+      const preimage = await payBolt11ForPreimage(bolt11, statusEl);
       statusEl.textContent = 'Payment sent! Confirming...';
       statusEl.style.color = 'var(--accent)';
-      await onPaid();
+      await onPaid(preimage);
       return;
     } catch (e) {
       statusEl.textContent = 'Wallet payment failed, use QR below';
@@ -136,7 +204,7 @@ async function payInvoice(bolt11, payHash, statusEl, onPaid, qrCanvas, bolt11Dis
     }
   }
 
-  // Fallback: show QR + poll for payment
+  // Fallback: show QR + poll for payment (no preimage — MPP/token confirm only)
   if (bolt11 && qrCanvas) {
     new QRious({ element: qrCanvas, value: bolt11.toUpperCase(), size: 160, foreground: '#4ade80', background: '#000', level: 'L' });
   }
@@ -169,7 +237,7 @@ async function payInvoice(bolt11, payHash, statusEl, onPaid, qrCanvas, bolt11Dis
           clearInterval(_payPollTimer);
           statusEl.textContent = 'Payment received! Confirming...';
           statusEl.style.color = 'var(--accent)';
-          await onPaid();
+          await onPaid(null);
         }
       } catch (e) {}
     }, 3000);

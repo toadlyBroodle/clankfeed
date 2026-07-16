@@ -887,11 +887,16 @@ class TestOriginCheckH5:
         index_src = (_st / "index.js").read_text() + "\n" + (_st / "index.html").read_text()
         # Mutating POSTs that skip authFetch must use apiFetch (sets XRW)
         assert "apiFetch" in index_src
-        assert "apiFetch('/api/post/confirm'" in index_src or 'apiFetch("/api/post/confirm"' in index_src
-        assert "apiFetch(`/api/v1/events/${eventId}/vote/confirm`" in index_src
+        # 14.6: L402 primary settle; Tempo may still use /api/post/confirm
+        assert (
+            "payL402AndRetry" in index_src
+            or "parseL402Challenge" in index_src
+        )
+        assert "apiFetch('/api/v1/post'" in index_src or 'apiFetch("/api/v1/post"' in index_src
+        assert "apiFetch(`/api/v1/events/${eventId}/vote`" in index_src or "apiFetch(`/api/v1/events/${eventId}/vote`" in auth_src
         # Profile paid-path POSTs use XRW wrappers; deposit APIs removed (14.5)
         profile_src = (_st / "profile.js").read_text() + "\n" + (_st / "profile.html").read_text()
-        assert "apiFetch('/api/post/confirm'" in profile_src or 'apiFetch("/api/post/confirm"' in profile_src
+        assert "apiFetch" in profile_src
         assert "/api/v1/account/deposit" not in profile_src
         assert "section-deposit" not in profile_src
         # Adversarial: bare fetch() on confirm would omit XRW

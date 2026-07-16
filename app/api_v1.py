@@ -204,6 +204,14 @@ def _build_payment_options(
 
     result["methods"] = methods
     result["how_to_pay"] = build_how_to_pay(include_l402=include_l402)
+    # 14.6: expose macaroon+invoice in JSON for web clients (header multi-value is flaky)
+    if include_l402 and payments_enabled() and bolt11 and payment_hash:
+        from app.l402 import mint_macaroon
+
+        result["l402"] = {
+            "macaroon": mint_macaroon(payment_hash),
+            "invoice": bolt11,
+        }
     return result
 
 
@@ -1128,3 +1136,40 @@ async def account_export_key(request: Request):
 async def account_update_profile(request: Request):
     del request
     return JSONResponse(status_code=410, content=_ACCOUNTS_GONE)
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/zap/invoice  (LNURL invoice helper for web NIP-57 zaps — 14.6)
+# ---------------------------------------------------------------------------
+
+@router.post("/zap/invoice")
+@limiter.limit(RATE_INVOICE)
+async def zap_invoice(request: Request):
+    """Fetch an LNURL-pay BOLT11 for a lud16 (CSP-safe proxy; no custody).
+
+    Body: {"lud16": "user@domain", "amount_msat": 21000, "zap_request": {...optional kind:9734...}}
+    """
+    from app.zaps import fetch_lnurl_pay_invoice
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"detail": "Invalid JSON body"})
+
+    lud16 = body.get("lud16", "")
+    amount_msat = body.get("amount_msat")
+    zap_request = body.get("zap_request")
+
+    if not isinstance(lud16, str) or "@" not in lud16:
+        return JSONResponse(status_code=400, content={"detail": "lud16 lightning address required"})
+    if not isinstance(amount_msat, int):
+        return JSONResponse(status_code=400, content={"detail": "amount_msat must be an integer"})
+    if zap_request is not None and not isinstance(zap_request, dict):
+        return JSONResponse(status_code=400, content={"detail": "zap_request must be an object"})
+
+    bolt11, err = await fetch_lnurl_pay_invoice(lud16, amount_msat, zap_request)
+    if err:
+        # SSRF / blocked host → 403; other client errors → 400; upstream → 502
+        status = 403 if "blocked" in err else (502 if "fetch failed" in err or "unavailable" in err else 400)
+        return JSONResponse(status_code=status, content={"detail": err})
+    return {"bolt11": bolt11, "lud16": lud16, "amount_msat": amount_msat}

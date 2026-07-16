@@ -4,7 +4,7 @@ TestCspM4 in test_security.py is ASGI/source-only. These drive a real browser un
 the live CSP header and assert:
 - 6.13: zero CSP script-src console violations on / + /profile; data-action click fires
 - 6.14: organic post→402→showPaymentWidget (Lightning/Tempo tabs + cancel) under CSP
-- 6.15: upvote/downvote/cancel-vote/toggle-replies + multi-note cardinality under CSP
+- 6.15: zap/downvote/cancel-vote/toggle-replies + multi-note cardinality under CSP
 - 6.16: profile deposit→402→showPaymentWidget under live CSP
 - 6.17: empty-feed zero-row (#empty-feed visible, zero .note-card) under live CSP
 """
@@ -113,7 +113,7 @@ def live_server(tmp_path):
 async def test_m4_csp_zero_script_src_violations_and_data_action(live_server):
     """6.13+6.15: / + /profile clean under CSP; all note-card data-actions fire.
 
-    6.15: seed ≥2 notes (one with a child), exercise upvote/downvote/cancel-vote/
+    6.15: seed ≥2 notes (one with a child), exercise zap/downvote/cancel-vote/
     toggle-replies + reply, assert multi-note cardinality and zero new script-src
     violations after each action.
     """
@@ -168,7 +168,7 @@ async def test_m4_csp_zero_script_src_violations_and_data_action(live_server):
 
         # Both top-level notes must expose the full data-action set
         for nid in (note_a, note_b):
-            for action in ("upvote", "downvote", "reply", "toggle-replies"):
+            for action in ("zap", "downvote", "reply", "toggle-replies"):
                 assert (
                     await page.locator(
                         f'#note-{nid} button[data-action="{action}"]'
@@ -176,15 +176,15 @@ async def test_m4_csp_zero_script_src_violations_and_data_action(live_server):
                     == 1
                 ), f"missing data-action={action} on note {nid[:8]}"
 
-        # --- upvote → vote-prompt.active + status ---
-        await page.click(f'#note-{note_a} button[data-action="upvote"]')
+        # --- zap → vote-prompt.active + status ---
+        await page.click(f'#note-{note_a} button[data-action="zap"]')
         await page.wait_for_selector(
             f"#vote-prompt-{note_a}.active", timeout=5_000
         )
         status = await page.locator(f"#vote-status-{note_a}").text_content()
-        assert status is not None and "Upvote" in status
+        assert status is not None and "Zap" in status
         assert not _new_csp_since(clean_index), (
-            f"CSP after upvote: {_new_csp_since(clean_index)}"
+            f"CSP after zap: {_new_csp_since(clean_index)}"
         )
 
         # --- cancel-vote → prompt inactive ---

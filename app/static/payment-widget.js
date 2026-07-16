@@ -134,12 +134,24 @@ function showPaymentWidget(data, onConfirm, onCancel, anchorEl) {
     setTimeout(() => btn.textContent = '[copy]', 1500);
   };
 
-  // Lightning: use shared payInvoice (BC wallet first, QR + poll fallback)
+  // Lightning: auto-pay via BC when onConfirm provided; else QR display only (L402 caller settles)
   const lnStatus = document.getElementById('pw-ln-status');
   if (methods.includes('lightning') && _pw_currentBolt11) {
-    payInvoice(_pw_currentBolt11, payHash, lnStatus, async () => {
-      if (onConfirm) await onConfirm(data.token, payHash, 'lightning');
-    }, document.getElementById('pw-qr'), document.getElementById('pw-bolt11'));
+    if (onConfirm) {
+      payInvoice(_pw_currentBolt11, payHash, lnStatus, async (preimage) => {
+        if (onConfirm) await onConfirm(data.token, payHash, 'lightning', preimage);
+      }, document.getElementById('pw-qr'), document.getElementById('pw-bolt11'));
+    } else {
+      // Show QR for visibility while caller runs payL402AndRetry
+      const qr = document.getElementById('pw-qr');
+      const boltEl = document.getElementById('pw-bolt11');
+      if (qr) {
+        new QRious({ element: qr, value: _pw_currentBolt11.toUpperCase(), size: 160, foreground: '#4ade80', background: '#000', level: 'L' });
+      }
+      if (boltEl) boltEl.textContent = _pw_currentBolt11.slice(0, 40) + '...';
+      lnStatus.textContent = 'Pay via wallet (L402)...';
+      lnStatus.style.color = 'var(--dim)';
+    }
   } else {
     lnStatus.textContent = '';
   }
