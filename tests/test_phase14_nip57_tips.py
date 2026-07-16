@@ -256,7 +256,7 @@ async def test_downvote_still_accepted(client):
 
 @pytest.mark.asyncio
 async def test_confirm_upvote_rejected(client):
-    """Paid confirm path must also refuse direction=1 tip invoices."""
+    """14.18: direction=1 confirm → 410 before status/consume; pending deleted."""
     import secrets
     from datetime import datetime, timedelta, timezone
 
@@ -283,16 +283,25 @@ async def test_confirm_upvote_rejected(client):
         ))
         await db.commit()
 
-    with patch("app.api_v1.check_payment_status", new_callable=AsyncMock, return_value=True), \
-         patch("app.api_v1.check_and_consume_payment", new_callable=AsyncMock, return_value=True):
+    mock_status = AsyncMock(return_value=True)
+    mock_consume = AsyncMock(return_value=True)
+    with patch("app.api_v1.check_payment_status", mock_status), \
+         patch("app.api_v1.check_and_consume_payment", mock_consume):
         resp = await client.post(
             f"/api/v1/events/{eid}/vote/confirm",
             json={"token": token, "method": "lightning", "payment_hash": payment_hash},
         )
 
-    assert resp.status_code in (400, 410)
+    assert resp.status_code == 410
+    detail = (resp.json().get("detail") or "").lower()
+    assert "nip-57" in detail or "zap" in detail or "upvote" in detail
+    # Must not burn a paid Lightning hash on a legacy upvote PendingEvent
+    mock_status.assert_not_called()
+    mock_consume.assert_not_called()
     clank, _ = await _get_sats(eid)
     assert clank == 21  # initial post only — no +50 upvote tip
+    async with async_session() as db:
+        assert await db.get(PendingEvent, token) is None
 
 
 # ---------------------------------------------------------------------------

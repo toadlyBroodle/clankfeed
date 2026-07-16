@@ -988,6 +988,22 @@ async def confirm_vote(request: Request, event_id: str, db: AsyncSession = Depen
     if not pending or pending.expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
         return JSONResponse(status_code=404, content={"detail": "Token expired or not found"})
 
+    # 14.18: refuse legacy upvote PendingEvent before status/consume (don't burn payment)
+    try:
+        vote_data = json.loads(pending.event_json)
+    except (json.JSONDecodeError, TypeError):
+        return JSONResponse(status_code=400, content={"detail": "Invalid pending vote data"})
+    direction = vote_data.get("direction", 1)
+    if direction == 1:
+        await db.delete(pending)
+        await db.commit()
+        return JSONResponse(
+            status_code=410,
+            content={
+                "detail": "Upvote tips removed; use NIP-57 zap (90/10 author+relay).",
+            },
+        )
+
     # Verify payment (same logic as event confirm)
     if method == "tempo":
         tx_hash = body.get("tx_hash", "")
@@ -1018,18 +1034,6 @@ async def confirm_vote(request: Request, event_id: str, db: AsyncSession = Depen
             "title": "Invalid challenge",
             "detail": "Payment already consumed",
         })
-
-    # Parse vote data from pending
-    vote_data = json.loads(pending.event_json)
-    direction = vote_data.get("direction", 1)
-    # 14.7: refuse settling a custodial upvote tip even if pending was created earlier
-    if direction == 1:
-        return JSONResponse(
-            status_code=410,
-            content={
-                "detail": "Upvote tips removed; use NIP-57 zap (90/10 author+relay).",
-            },
-        )
 
     # Convert USD to sats at spot for Tempo payments
     if method == "tempo":
