@@ -76,14 +76,14 @@ class TestWellKnownL402:
 
 
 # ---------------------------------------------------------------------------
-# OpenAPI L402 security scheme (forward-looking) + honest paid-route ads
+# OpenAPI L402: scheme is always present; route ads only when payments_enabled
 # ---------------------------------------------------------------------------
 
 
 class TestOpenApiL402Scheme:
     @pytest.mark.asyncio
     async def test_openapi_includes_l402_security_scheme(self, client):
-        """securitySchemes.L402 is advertised for paid routes."""
+        """securitySchemes.L402 stays forward-looking even when payments are off."""
         resp = await client.get("/openapi.json")
         assert resp.status_code == 200
         schema = resp.json()
@@ -95,27 +95,50 @@ class TestOpenApiL402Scheme:
         assert "macaroon" in l402["description"].lower() or "preimage" in l402["description"].lower()
 
     @pytest.mark.asyncio
-    async def test_openapi_paid_routes_require_l402(self, client):
-        """14.3: paid routes declare L402 as required security."""
+    async def test_openapi_no_l402_route_ads_when_payments_disabled(self, client):
+        """14.3a: default client is AUTH_ROOT_KEY=test-mode → no L402 security/protocols."""
+        from app.config import payments_enabled
+
+        assert payments_enabled() is False
         resp = await client.get("/openapi.json")
+        assert resp.status_code == 200
         schema = resp.json()
         events_post = schema["paths"]["/api/v1/events"]["post"]
         security = events_post.get("security", [])
-        assert any("L402" in entry for entry in security), (
-            f"POST /api/v1/events must require L402 after 14.3; got {security}"
+        assert not any("L402" in entry for entry in security), (
+            f"payments off must not declare L402 security; got {security}"
+        )
+        protocols = events_post.get("x-payment-info", {}).get("protocols", [])
+        assert "l402" not in protocols, (
+            f"payments off must not advertise l402 protocol; got {protocols}"
         )
         assert "402" in events_post.get("responses", {})
 
     @pytest.mark.asyncio
-    async def test_openapi_paid_routes_protocols_include_l402(self, client):
-        """14.3: x-payment-info.protocols includes l402 (+ mpp alternate)."""
-        resp = await client.get("/openapi.json")
+    async def test_openapi_paid_routes_require_l402_when_payments_enabled(self, paid_client):
+        """14.3a: when payments_enabled(), paid routes declare L402 security + protocols."""
+        resp = await paid_client.get("/openapi.json")
         schema = resp.json()
         events_post = schema["paths"]["/api/v1/events"]["post"]
+        security = events_post.get("security", [])
+        assert any("L402" in entry for entry in security), (
+            f"POST /api/v1/events must require L402 when payments on; got {security}"
+        )
+        assert "402" in events_post.get("responses", {})
         protocols = events_post.get("x-payment-info", {}).get("protocols", [])
         assert "mpp" in protocols
         assert "l402" in protocols, (
-            f"protocols must advertise l402 after 14.3; got {protocols}"
+            f"protocols must advertise l402 when payments on; got {protocols}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_openapi_guidance_honest_when_payments_disabled(self, client):
+        """14.3a adversarial: x-guidance must not claim live L402 when payments are off."""
+        resp = await client.get("/openapi.json")
+        guidance = resp.json()["info"].get("x-guidance", "")
+        # Forward-looking well-known is fine; claiming L402 as the live primary is not.
+        assert "L402 (primary)" not in guidance, (
+            f"x-guidance must not claim L402 primary while payments_enabled() is False; got: {guidance[:200]}"
         )
 
 

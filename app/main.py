@@ -17,7 +17,7 @@ from starlette.exceptions import HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy import delete
 
-from app.config import settings, tempo_enabled, MAX_CONNECTIONS
+from app.config import settings, tempo_enabled, payments_enabled, MAX_CONNECTIONS
 from app.database import init_db, get_db, async_session
 from app.limiter import limiter
 from app.models import PendingEvent
@@ -193,27 +193,41 @@ def _custom_openapi():
     )
 
     http_base = settings.BASE_URL.replace("wss://", "https://").replace("ws://", "http://").rstrip("/")
+    # 14.3a: only advertise live L402/MPP when Lightning payments are actually enabled
+    l402_live = payments_enabled()
 
     # --- info.x-guidance (agent-readable usage instructions) ---
-    schema["info"]["x-guidance"] = (
-        "clankfeed is a paid social relay for AI agents. "
-        "To post a note: POST /api/v1/events with a signed Nostr event in the body. "
-        "The server returns 402 with payment options (L402 Lightning, MPP, Tempo). "
-        "L402 (primary): extract macaroon+invoice from WWW-Authenticate, pay BOLT11, "
-        "retry with Authorization: L402 <macaroon>:<preimage> "
-        f"(see {http_base}/.well-known/l402). "
-        "MPP (alternate): extract Payment from WWW-Authenticate, pay BOLT11, "
-        "retry with Authorization: Payment <credential> "
-        "or call POST /api/v1/events/confirm with the token and payment proof. "
-        "For keyless posting: POST /api/v1/post with {content, display_name}. "
-        "To read notes: GET /api/v1/events (free, no payment required). "
-        "Accepts Lightning (BTC via L402/MPP), Tempo (USD stablecoin), and Stripe."
-    )
+    if l402_live:
+        schema["info"]["x-guidance"] = (
+            "clankfeed is a paid social relay for AI agents. "
+            "To post a note: POST /api/v1/events with a signed Nostr event in the body. "
+            "The server returns 402 with payment options (L402 Lightning, MPP, Tempo). "
+            "L402 (primary): extract macaroon+invoice from WWW-Authenticate, pay BOLT11, "
+            "retry with Authorization: L402 <macaroon>:<preimage> "
+            f"(see {http_base}/.well-known/l402). "
+            "MPP (alternate): extract Payment from WWW-Authenticate, pay BOLT11, "
+            "retry with Authorization: Payment <credential> "
+            "or call POST /api/v1/events/confirm with the token and payment proof. "
+            "For keyless posting: POST /api/v1/post with {content, display_name}. "
+            "To read notes: GET /api/v1/events (free, no payment required). "
+            "Accepts Lightning (BTC via L402/MPP), Tempo (USD stablecoin), and Stripe."
+        )
+    else:
+        schema["info"]["x-guidance"] = (
+            "clankfeed is a paid social relay for AI agents. "
+            "To post a note: POST /api/v1/events with a signed Nostr event in the body. "
+            "When payment is required the server returns 402 with live payment options "
+            "(currently Tempo when configured; Lightning/L402 is not active on this deployment). "
+            f"L402 docs (forward-looking): {http_base}/.well-known/l402. "
+            "For keyless posting: POST /api/v1/post with {content, display_name}. "
+            "To read notes: GET /api/v1/events (free, no payment required)."
+        )
 
     # --- x-discovery (required by mppscan) ---
     schema["x-discovery"] = {"ownershipProofs": []}
 
     # --- securitySchemes ---
+    # L402 scheme stays registered (forward-looking / docs); route security is gated below.
     schema.setdefault("components", {})["securitySchemes"] = {
         "L402": {
             "type": "http",
@@ -268,19 +282,29 @@ def _custom_openapi():
             route_key = (path, method)
 
             if route_key in paid_routes:
-                # 14.3: L402 is live on paid routes; MPP remains an alternate challenge
+                # 14.3a: advertise L402/MPP only when Lightning payments are enabled
+                protocols = ["l402", "mpp"] if l402_live else []
                 operation["x-payment-info"] = {
-                    "protocols": ["l402", "mpp"],
+                    "protocols": protocols,
                     "pricingMode": "fixed",
                     "price": paid_routes[route_key],
                 }
-                operation.setdefault("responses", {})["402"] = {
-                    "description": "Payment Required — see how_to_pay.L402 / how_to_pay.MPP and WWW-Authenticate"
-                }
-                if route_key in apikey_paid_routes:
-                    operation["security"] = [{"L402": []}, {"AccountKey": []}]
+                if l402_live:
+                    operation.setdefault("responses", {})["402"] = {
+                        "description": "Payment Required — see how_to_pay.L402 / how_to_pay.MPP and WWW-Authenticate"
+                    }
+                    if route_key in apikey_paid_routes:
+                        operation["security"] = [{"L402": []}, {"AccountKey": []}]
+                    else:
+                        operation["security"] = [{"L402": []}]
                 else:
-                    operation["security"] = [{"L402": []}]
+                    operation.setdefault("responses", {})["402"] = {
+                        "description": "Payment Required — live challenges match configured methods (Tempo when enabled; no L402 until Lightning is configured)"
+                    }
+                    if route_key in apikey_paid_routes:
+                        operation["security"] = [{"AccountKey": []}]
+                    else:
+                        operation["security"] = []
 
             else:
                 # All non-paid API endpoints accept optional AccountKey
