@@ -1,6 +1,9 @@
 """UI-3: dual feeds — origin marker + API filter for clankfeed vs external."""
 
+import asyncio
+import json
 import time
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -19,6 +22,15 @@ def _make_note(content="note", sk=AUTHOR_SK):
         "kind": 1,
         "tags": [],
         "content": content,
+    })
+
+
+def _make_kind0(sk=AUTHOR_SK, name="Agent", lud16="a@example.com"):
+    return sign_event(sk, {
+        "created_at": int(time.time()),
+        "kind": 0,
+        "tags": [],
+        "content": json.dumps({"name": name, "lud16": lud16}),
     })
 
 
@@ -173,3 +185,72 @@ async def test_store_event_default_origin_clankfeed(client):
     async with async_session() as db:
         row = await db.get(NostrEvent, note["id"])
         assert row.origin == "clankfeed"
+
+
+# ---------------------------------------------------------------------------
+# EXT-1a.1 — store_event idempotent on duplicate id (ingest race)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_store_event_duplicate_pk_commit_idempotent(client):
+    """If commit hits UNIQUE on event id, store_event must not raise (EXT-1a.1).
+
+    Simulates the TOCTOU after the early db.get miss: another writer already
+    inserted the same primary key. Kind:1 skips replaceable delete so the
+    second insert always collides on PK.
+    """
+    note = _make_note("dup-pk")
+    async with async_session() as db:
+        await store_event(db, note, sats_clank=0, origin="external")
+
+    async with async_session() as db:
+        with patch.object(db, "get", new_callable=AsyncMock, return_value=None):
+            await store_event(db, note, sats_clank=0, origin="external")
+
+    async with async_session() as db:
+        row = await db.get(NostrEvent, note["id"])
+        assert row is not None
+        assert row.origin == "external"
+
+
+@pytest.mark.asyncio
+async def test_store_event_concurrent_same_kind0_idempotent(client, tmp_path, monkeypatch):
+    """Concurrent store_event of the same kind:0 must not raise IntegrityError.
+
+    Prod: two EXTERNAL_RELAYS ingest paths fetch+store the same author kind:0;
+    the loser used to UNIQUE-fail and reconnect the ingest loop.
+
+    Uses a file-backed SQLite DB so concurrent sessions share one store
+    (in-memory aiosqlite without StaticPool isolates per connection).
+    """
+    import app.database as database
+    import app.relay as relay_mod
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine, AsyncSession
+
+    db_path = tmp_path / "ext1a1_race.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}", echo=False)
+    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    monkeypatch.setattr(database, "async_session", session_factory)
+    monkeypatch.setattr(relay_mod, "async_session", session_factory, raising=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(NostrEvent.metadata.create_all)
+
+    profile = _make_kind0(name="RaceAgent", lud16="race@example.com")
+
+    async def _store():
+        async with session_factory() as db:
+            await store_event(db, profile, sats_clank=0, origin="external")
+
+    results = await asyncio.gather(*[_store() for _ in range(16)], return_exceptions=True)
+    errors = [r for r in results if isinstance(r, BaseException)]
+    assert errors == [], f"store_event raised under concurrency: {errors!r}"
+
+    async with session_factory() as db:
+        row = await db.get(NostrEvent, profile["id"])
+        assert row is not None
+        assert row.kind == 0
+        assert json.loads(row.content)["lud16"] == "race@example.com"
+
+    await engine.dispose()

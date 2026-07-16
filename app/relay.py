@@ -10,6 +10,7 @@ from datetime import datetime, timezone, timedelta
 
 from fastapi import WebSocket
 from sqlalchemy import select, and_, or_, func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import (
@@ -248,6 +249,8 @@ async def store_event(
         )
         old = (await db.execute(stmt)).scalar_one_or_none()
         if old:
+            if old.id == event["id"]:
+                return  # same event already stored (TOCTOU after early get miss)
             if old.created_at > event["created_at"]:
                 return  # existing is newer, skip
             if old.created_at == event["created_at"] and old.id < event["id"]:
@@ -267,7 +270,18 @@ async def store_event(
         origin=origin,
     )
     db.add(row)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Concurrent ingest (e.g. two EXTERNAL_RELAYS fetching the same kind:0)
+        # can race past the early db.get check; UNIQUE on id is the only constraint,
+        # so treat as idempotent success. Do not re-query here — under concurrent
+        # replaceable delete/insert the row may briefly be invisible mid-race.
+        await db.rollback()
+        logger.info(
+            "Event store race: id=%s already present (idempotent)", event["id"][:12]
+        )
+        return
     logger.info("Event stored: id=%s kind=%d pubkey=%s value=%d sats",
                 event["id"][:12], event["kind"], event["pubkey"][:12], sats_clank)
 
