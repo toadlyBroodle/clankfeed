@@ -28,13 +28,8 @@ function setAuthState(mode, pubkey, nsec) {
 }
 
 async function establishSession() {
-  if (!isLoggedIn()) return false;
-  try {
-    const resp = await authFetch('/api/v1/auth/login', { method: 'POST' });
-    return resp.ok;
-  } catch (e) {
-    return false;
-  }
+  // Phase 14.5: server session login removed; NIP-98 is per-request only.
+  return isLoggedIn();
 }
 
 async function clearAuthState() {

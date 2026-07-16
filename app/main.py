@@ -234,39 +234,33 @@ def _custom_openapi():
             "scheme": "L402",
             "description": "L402 Lightning payment: Authorization: L402 <macaroon>:<preimage>",
         },
-        "AccountKey": {
-            "type": "apiKey",
-            "in": "header",
-            "name": "X-Account-Key",
-            "description": "Account API key for authenticated operations and credit spending",
-        },
     }
 
     # --- Classify routes for x-payment-info and security ---
     post_price_usd = settings.TEMPO_PRICE_USD  # e.g. "0.01"
 
-    # Paid endpoints: require MPP payment (or account credits)
+    # Paid endpoints: require L402/MPP payment (no account credits)
     paid_routes = {
         ("/api/v1/events", "post"): post_price_usd,
         ("/api/v1/post", "post"): post_price_usd,
         ("/api/v1/events/{event_id}/vote", "post"): post_price_usd,
-        ("/api/v1/account/deposit", "post"): post_price_usd,
-        ("/api/v1/account/profile", "post"): post_price_usd,
         ("/pay", "get"): post_price_usd,
         ("/pay", "post"): post_price_usd,
         ("/api/post", "post"): post_price_usd,
-    }
-
-    # API-key + paid endpoints (already in paid_routes, also need security)
-    apikey_paid_routes = {
-        ("/api/v1/account/deposit", "post"),
-        ("/api/v1/account/profile", "post"),
     }
 
     # Routes to exclude from OpenAPI (non-API utility/static routes)
     excluded_paths = {
         "/", "/terms", "/privacy", "/favicon.ico", "/health",
         "/.well-known/l402", "/profile",
+        # Custodial account APIs removed (14.5) — hide from discovery
+        "/api/v1/account/create",
+        "/api/v1/account/balance",
+        "/api/v1/account/deposit",
+        "/api/v1/account/deposit/confirm",
+        "/api/v1/account/key",
+        "/api/v1/account/profile",
+        "/api/v1/auth/login",
     }
 
     # Remove non-API routes from the spec
@@ -293,22 +287,16 @@ def _custom_openapi():
                     operation.setdefault("responses", {})["402"] = {
                         "description": "Payment Required — see how_to_pay.L402 / how_to_pay.MPP and WWW-Authenticate"
                     }
-                    if route_key in apikey_paid_routes:
-                        operation["security"] = [{"L402": []}, {"AccountKey": []}]
-                    else:
-                        operation["security"] = [{"L402": []}]
+                    operation["security"] = [{"L402": []}]
                 else:
                     operation.setdefault("responses", {})["402"] = {
                         "description": "Payment Required — live challenges match configured methods (Tempo when enabled; no L402 until Lightning is configured)"
                     }
-                    if route_key in apikey_paid_routes:
-                        operation["security"] = [{"AccountKey": []}]
-                    else:
-                        operation["security"] = []
+                    operation["security"] = []
 
             else:
-                # All non-paid API endpoints accept optional AccountKey
-                operation["security"] = [{"AccountKey": []}]
+                # Public / free endpoints — no AccountKey (removed Phase 14.5)
+                operation["security"] = []
 
     # Add requestBody schemas for paid endpoints so agents know the input format
     events_post = paths.get("/api/v1/events", {}).get("post", {})

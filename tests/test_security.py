@@ -584,17 +584,15 @@ class TestRateLimiting:
 # ---------------------------------------------------------------------------
 
 class TestSessionCookieH2:
-    """H2: no nsec/API-key in localStorage; NIP-98 login mints httpOnly session."""
+    """H2: no nsec/API-key in localStorage; session login removed (14.5)."""
 
     def test_h2_no_auth_secrets_persisted_to_localstorage(self):
         """Client must not write nsec or API keys into localStorage."""
         src = (_STATIC / "nostr-auth.js").read_text()
-        # Forbidden persistence of signing secrets / legacy API keys
         assert "localStorage.setItem('cf_nsec'" not in src
         assert 'localStorage.setItem("cf_nsec"' not in src
         assert "localStorage.setItem('clankfeed_api_key'" not in src
         assert 'localStorage.setItem("clankfeed_api_key"' not in src
-        # setAuthState must keep nsec in memory only (assign userNsec, no setItem for it)
         assert "function setAuthState" in src
         body = src.split("function setAuthState", 1)[1].split("\nfunction ", 1)[0]
         assert "userNsec" in body
@@ -602,71 +600,53 @@ class TestSessionCookieH2:
         assert 'localStorage.setItem("cf_nsec"' not in body
 
     def test_h2_auth_fetch_sends_credentials(self):
-        """authFetch must include cookies so the httpOnly session is sent."""
+        """authFetch keeps credentials include for legacy cookie clear on logout."""
         src = (_STATIC / "nostr-auth.js").read_text()
         assert "credentials" in src
         assert "'include'" in src or '"include"' in src
 
     @pytest.mark.asyncio
-    async def test_h2_login_sets_httponly_session_cookie(self, client):
-        """POST /api/v1/auth/login with NIP-98 sets httpOnly cf_session cookie."""
+    async def test_h2_login_removed(self, client):
+        """POST /api/v1/auth/login is gone (410); no cf_session minted."""
         headers = _nip98("http://test/api/v1/auth/login", "POST")
         resp = await client.post("/api/v1/auth/login", headers=headers)
-        assert resp.status_code == 200
-        assert resp.json()["pubkey"]  # hex pubkey
-        # httpx stores cookies; Set-Cookie must be HttpOnly
+        assert resp.status_code == 410
         set_cookie = resp.headers.get("set-cookie", "")
-        assert "cf_session=" in set_cookie.lower() or "cf_session" in client.cookies
-        assert "httponly" in set_cookie.lower()
-        assert "cf_session" in client.cookies
+        assert "cf_session=" not in set_cookie.lower()
 
     @pytest.mark.asyncio
-    async def test_h2_session_cookie_authenticates_without_nip98(self, client):
-        """After login, balance endpoint accepts cookie alone (no Authorization)."""
-        headers = _nip98("http://test/api/v1/auth/login", "POST")
-        login = await client.post("/api/v1/auth/login", headers=headers)
-        assert login.status_code == 200
-        pubkey = login.json()["pubkey"]
+    async def test_h2_session_cookie_does_not_authenticate(self, client):
+        """Legacy cf_session alone must not authenticate /auth/me."""
+        from app.session_auth import mint_session_token
+        from app.zaps import pubkey_from_privkey
 
-        resp = await client.get("/api/v1/account/balance")  # cookie from client jar
-        assert resp.status_code == 200
-        body = resp.json()
-        assert "balance_sats" in body
-        # Session identity is the login pubkey (account.pubkey), not server nostr_pubkey
-        me = await client.get("/api/v1/auth/me")
-        assert me.status_code == 200
-        assert me.json()["pubkey"] == pubkey
-        assert me.json()["auth_method"] == "session"
+        token = mint_session_token(pubkey_from_privkey("b" * 64))
+        client.cookies.set("cf_session", token)
+        resp = await client.get("/api/v1/auth/me")
+        assert resp.status_code == 401
+
     @pytest.mark.asyncio
-    async def test_h2_logout_clears_session(self, client):
-        """POST /api/v1/auth/logout clears cookie; subsequent authed call is 401."""
-        headers = _nip98("http://test/api/v1/auth/login", "POST")
-        await client.post("/api/v1/auth/login", headers=headers)
+    async def test_h2_logout_still_clears_cookie(self, client):
+        """POST /api/v1/auth/logout still clears legacy cookies."""
+        from app.session_auth import mint_session_token
+        from app.zaps import pubkey_from_privkey
+
+        client.cookies.set("cf_session", mint_session_token(pubkey_from_privkey("b" * 64)))
         logout = await client.post("/api/v1/auth/logout")
         assert logout.status_code == 200
         set_cookie = logout.headers.get("set-cookie", "")
-        # Cleared cookie: Max-Age=0 or empty value
-        assert "cf_session" in set_cookie.lower() or "cf_session" not in client.cookies or client.cookies.get("cf_session") in ("", None)
-
-        resp = await client.get("/api/v1/account/balance")
-        assert resp.status_code == 401
+        assert "cf_session" in set_cookie.lower()
 
     @pytest.mark.asyncio
-    async def test_h2_tampered_session_cookie_rejected(self, client):
-        """Adversarial: forged/tampered cf_session must not authenticate."""
-        client.cookies.set("cf_session", "deadbeef.9999999999.forgedsignature")
-        resp = await client.get("/api/v1/account/balance")
-        assert resp.status_code == 401
+    async def test_h2_me_requires_nip98(self, client):
+        """GET /api/v1/auth/me returns pubkey only with valid NIP-98."""
+        from app.zaps import pubkey_from_privkey
 
-    @pytest.mark.asyncio
-    async def test_h2_me_returns_session_pubkey(self, client):
-        """GET /api/v1/auth/me returns pubkey when session cookie is valid."""
-        headers = _nip98("http://test/api/v1/auth/login", "POST")
-        login = await client.post("/api/v1/auth/login", headers=headers)
-        pubkey = login.json()["pubkey"]
-        me = await client.get("/api/v1/auth/me")
+        headers = _nip98("http://test/api/v1/auth/me", "GET")
+        me = await client.get("/api/v1/auth/me", headers=headers)
         assert me.status_code == 200
-        assert me.json()["pubkey"] == pubkey
+        assert me.json()["pubkey"] == pubkey_from_privkey("b" * 64)
+        assert me.json()["auth_method"] == "nip98"
 
 
 # ---------------------------------------------------------------------------
@@ -674,67 +654,67 @@ class TestSessionCookieH2:
 # ---------------------------------------------------------------------------
 
 class TestSessionSecureH2a:
-    """H2a: cf_session Secure follows request HTTPS, not only BASE_URL wss://."""
+    """H2a: set_session_cookie Secure follows request HTTPS (logout still uses it)."""
 
     @pytest.mark.asyncio
     async def test_h2a_secure_when_x_forwarded_proto_https(self, client, monkeypatch):
-        """Prod-like: BASE_URL is ws://localhost but nginx sends X-Forwarded-Proto: https."""
         from app import config
+        from app.session_auth import set_session_cookie
+        from starlette.responses import Response
+        from unittest.mock import MagicMock
+        from fastapi import Request
 
         monkeypatch.setattr(config.settings, "BASE_URL", "ws://localhost:8089")
-        headers = _nip98("http://test/api/v1/auth/login", "POST")
-        headers["X-Forwarded-Proto"] = "https"
-        resp = await client.post("/api/v1/auth/login", headers=headers)
-        assert resp.status_code == 200
-        set_cookie = resp.headers.get("set-cookie", "")
+        req = MagicMock(spec=Request)
+        req.url.scheme = "http"
+        req.headers = {"x-forwarded-proto": "https"}
+        r = Response()
+        set_session_cookie(r, "a" * 64, req)
+        set_cookie = r.headers.get("set-cookie", "")
         assert "cf_session=" in set_cookie.lower()
-        assert "secure" in set_cookie.lower(), (
-            "Secure must be set when X-Forwarded-Proto is https even if BASE_URL is ws://; "
-            f"got Set-Cookie: {set_cookie!r}"
-        )
+        assert "secure" in set_cookie.lower()
 
     @pytest.mark.asyncio
     async def test_h2a_insecure_on_plain_http_without_forwarded(self, client, monkeypatch):
-        """Local http://test: no Secure when neither scheme nor X-Forwarded-Proto is https."""
         from app import config
+        from app.session_auth import set_session_cookie
+        from starlette.responses import Response
+        from unittest.mock import MagicMock
+        from fastapi import Request
 
         monkeypatch.setattr(config.settings, "BASE_URL", "ws://localhost:8089")
-        headers = _nip98("http://test/api/v1/auth/login", "POST")
-        resp = await client.post("/api/v1/auth/login", headers=headers)
-        assert resp.status_code == 200
-        set_cookie = resp.headers.get("set-cookie", "")
+        req = MagicMock(spec=Request)
+        req.url.scheme = "http"
+        req.headers = {}
+        r = Response()
+        set_session_cookie(r, "a" * 64, req)
+        set_cookie = r.headers.get("set-cookie", "")
         assert "cf_session=" in set_cookie.lower()
-        assert "secure" not in set_cookie.lower(), (
-            f"Secure must be absent on plain HTTP; got Set-Cookie: {set_cookie!r}"
-        )
+        assert "secure" not in set_cookie.lower()
 
     @pytest.mark.asyncio
     async def test_h2a_adversarial_forwarded_http_not_secure(self, client, monkeypatch):
-        """Adversarial: X-Forwarded-Proto: http must not mint a Secure cookie."""
         from app import config
+        from app.session_auth import set_session_cookie
+        from starlette.responses import Response
+        from unittest.mock import MagicMock
+        from fastapi import Request
 
         monkeypatch.setattr(config.settings, "BASE_URL", "wss://clankfeed.com")
-        headers = _nip98("http://test/api/v1/auth/login", "POST")
-        headers["X-Forwarded-Proto"] = "http"
-        resp = await client.post("/api/v1/auth/login", headers=headers)
-        assert resp.status_code == 200
-        set_cookie = resp.headers.get("set-cookie", "")
+        req = MagicMock(spec=Request)
+        req.url.scheme = "http"
+        req.headers = {"x-forwarded-proto": "http"}
+        r = Response()
+        set_session_cookie(r, "a" * 64, req)
+        set_cookie = r.headers.get("set-cookie", "")
         assert "cf_session=" in set_cookie.lower()
-        # Request says http — Secure follows the request, not BASE_URL alone
-        assert "secure" not in set_cookie.lower(), (
-            "X-Forwarded-Proto: http must win over BASE_URL=wss://; "
-            f"got Set-Cookie: {set_cookie!r}"
-        )
+        assert "secure" not in set_cookie.lower()
 
     @pytest.mark.asyncio
     async def test_h2a_logout_secure_matches_forwarded_https(self, client, monkeypatch):
-        """Logout delete_cookie must use Secure when clearing over HTTPS (browser match)."""
         from app import config
 
         monkeypatch.setattr(config.settings, "BASE_URL", "ws://localhost:8089")
-        headers = _nip98("http://test/api/v1/auth/login", "POST")
-        headers["X-Forwarded-Proto"] = "https"
-        await client.post("/api/v1/auth/login", headers=headers)
         logout = await client.post(
             "/api/v1/auth/logout",
             headers={"X-Forwarded-Proto": "https"},
@@ -742,9 +722,7 @@ class TestSessionSecureH2a:
         assert logout.status_code == 200
         set_cookie = logout.headers.get("set-cookie", "")
         assert "cf_session" in set_cookie.lower()
-        assert "secure" in set_cookie.lower(), (
-            f"logout Clear-Cookie over HTTPS needs Secure; got {set_cookie!r}"
-        )
+        assert "secure" in set_cookie.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -801,15 +779,21 @@ class TestCORSH4:
         from app import config
 
         monkeypatch.setattr(config.settings, "BASE_URL", "ws://localhost:8089")
-        headers = _nip98("http://test/api/v1/auth/login", "POST")
-        headers["Origin"] = "http://127.0.0.1:8089"
-        resp = await client.post("/api/v1/auth/login", headers=headers)
+        headers = {
+            "Origin": "http://127.0.0.1:8089",
+            "X-Requested-With": "XMLHttpRequest",
+            "Content-Type": "application/json",
+        }
+        resp = await client.post(
+            "/api/v1/post",
+            json={"content": "h4 origin ok"},
+            headers=headers,
+        )
         assert resp.status_code != 403, (
             "127.0.0.1:8089 is in cors_allow_origins() and must pass OriginCheck "
             f"when BASE_URL is localhost; got {resp.status_code}: {resp.text}"
         )
-        assert resp.status_code == 200
-        assert "cf_session" in client.cookies or "cf_session" in resp.headers.get("set-cookie", "").lower()
+        assert resp.status_code in (200, 402)
 
     @pytest.mark.asyncio
     async def test_h4_origincheck_rejects_evil_origin(self, client, monkeypatch):
@@ -817,9 +801,16 @@ class TestCORSH4:
         from app import config
 
         monkeypatch.setattr(config.settings, "BASE_URL", "ws://localhost:8089")
-        headers = _nip98("http://test/api/v1/auth/login", "POST")
-        headers["Origin"] = "https://evil.example"
-        resp = await client.post("/api/v1/auth/login", headers=headers)
+        headers = {
+            "Origin": "https://evil.example",
+            "X-Requested-With": "XMLHttpRequest",
+            "Content-Type": "application/json",
+        }
+        resp = await client.post(
+            "/api/v1/post",
+            json={"content": "evil"},
+            headers=headers,
+        )
         assert resp.status_code == 403
         assert "cross-origin" in resp.text.lower() or "cross-origin" in str(resp.json()).lower()
 
@@ -857,15 +848,18 @@ class TestOriginCheckH5:
     @pytest.mark.asyncio
     async def test_h5_no_origin_with_authorization_allowed(self, client):
         """Agents without Origin may authenticate via Authorization (no XRW needed)."""
-        headers = _nip98("http://test/api/v1/auth/login", "POST")
-        # Ensure no X-Requested-With sneaks in from a default
+        headers = _nip98("http://test/api/v1/post", "POST")
         headers.pop("X-Requested-With", None)
         from app.main import app
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as bare:
-            resp = await bare.post("/api/v1/auth/login", headers=headers)
+            resp = await bare.post(
+                "/api/v1/post",
+                json={"content": "h5 auth ok"},
+                headers={**headers, "Content-Type": "application/json"},
+            )
         assert resp.status_code != 403
-        assert resp.status_code == 200
+        assert resp.status_code in (200, 402)
 
     @pytest.mark.asyncio
     async def test_h5_valid_origin_without_xrw_allowed(self, client, monkeypatch):
@@ -895,19 +889,14 @@ class TestOriginCheckH5:
         assert "apiFetch" in index_src
         assert "apiFetch('/api/post/confirm'" in index_src or 'apiFetch("/api/post/confirm"' in index_src
         assert "apiFetch(`/api/v1/events/${eventId}/vote/confirm`" in index_src
-        # Profile paid-path POSTs (confirm + deposit) must use XRW wrappers (6.6)
+        # Profile paid-path POSTs use XRW wrappers; deposit APIs removed (14.5)
         profile_src = (_st / "profile.js").read_text() + "\n" + (_st / "profile.html").read_text()
         assert "apiFetch('/api/post/confirm'" in profile_src or 'apiFetch("/api/post/confirm"' in profile_src
-        assert "authFetch('/api/v1/account/deposit'" in profile_src or 'authFetch("/api/v1/account/deposit"' in profile_src
-        assert (
-            "authFetch('/api/v1/account/deposit/confirm'" in profile_src
-            or 'authFetch("/api/v1/account/deposit/confirm"' in profile_src
-        )
-        # Adversarial: bare fetch() on those paths would omit XRW
+        assert "/api/v1/account/deposit" not in profile_src
+        assert "section-deposit" not in profile_src
+        # Adversarial: bare fetch() on confirm would omit XRW
         assert "fetch('/api/post/confirm'" not in profile_src
         assert 'fetch("/api/post/confirm"' not in profile_src
-        assert "fetch('/api/v1/account/deposit'" not in profile_src
-        assert "fetch('/api/v1/account/deposit/confirm'" not in profile_src
 
     def test_h5_cors_allows_xrw_header(self):
         """CORS must allow X-Requested-With so browsers can send it cross-origin to our allowlist."""

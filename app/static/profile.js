@@ -128,15 +128,6 @@ async function showOwnAccount() {
     document.getElementById('key-priv').value = '(managed by extension)';
   }
 
-  // Fetch balance
-  try {
-    const resp = await authFetch('/api/v1/account/balance');
-    if (resp.ok) {
-      const data = await resp.json();
-      document.getElementById('acct-balance').textContent = data.balance_sats + ' sats';
-    }
-  } catch (e) {}
-
   // Fetch metadata
   try {
     const resp = await fetch(`/api/v1/events?authors=${userPubkey}&kinds=0&limit=1`);
@@ -234,39 +225,6 @@ async function saveProfile() {
   }
 }
 
-// ---- Deposit ----
-async function startDeposit() {
-  const amount = parseInt(document.getElementById('deposit-amount').value) || 5000;
-  try {
-    const resp = await authFetch('/api/v1/account/deposit', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({amount_sats: amount}),
-    });
-    const data = await resp.json();
-    if (!data.token) return;
-
-    data._title = `Deposit ${amount} sats:`;
-    showPaymentWidget(data, async (token, paymentId, method) => {
-      const body = { token, method };
-      if (method === 'tempo') body.tx_hash = paymentId;
-      else body.payment_hash = paymentId;
-      const cr = await authFetch('/api/v1/account/deposit/confirm', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(body),
-      });
-      const cd = await cr.json();
-      if (cd.deposited) {
-        hidePaymentWidget();
-        showOwnAccount();
-      }
-    }, null, document.getElementById('section-deposit'));
-  } catch (err) {
-    console.error('Deposit error:', err);
-  }
-}
-
 // ---- Public Profile View ----
 async function showPublicProfile(pubkey) {
   document.getElementById('view-login').classList.add('hidden');
@@ -330,7 +288,6 @@ async function showPublicProfile(pubkey) {
 document.getElementById('btn-ext-login')?.addEventListener('click', loginWithExtension);
 document.getElementById('btn-login-nsec')?.addEventListener('click', loginWithNsec);
 document.getElementById('btn-create-identity')?.addEventListener('click', createIdentity);
-document.getElementById('btn-deposit')?.addEventListener('click', startDeposit);
 document.getElementById('btn-save-profile')?.addEventListener('click', saveProfile);
 document.getElementById('btn-logout')?.addEventListener('click', doLogout);
 document.getElementById('copy-key-pub')?.addEventListener('click', () => {

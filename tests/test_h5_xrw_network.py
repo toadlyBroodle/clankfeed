@@ -310,127 +310,29 @@ async def test_h5_confirm_path_sends_xrw_via_route_mock(live_server):
 
 
 @pytest.mark.asyncio
-async def test_h5_profile_deposit_sends_xrw_via_route_mock(live_server):
-    """6.8: profile deposit + deposit/confirm authFetch POSTs must carry XRW.
-
-    6.6 only greps profile.html source; 6.7 covers index post/vote/confirm.
-    Under test-mode, deposit still returns a token but no bolt11 — route-mock
-    forces lightning payment_required so WebLN triggers the confirm callback.
-    """
+async def test_h5_profile_no_deposit_path_under_live(live_server):
+    """14.5: deposit chrome gone; profile identity + save still use XRW helpers."""
     playwright = pytest.importorskip("playwright.async_api")
     async_playwright = playwright.async_playwright
 
     base = live_server["base"]
-    pay_hash = "ef" * 32
-    fake_token = "dep-" + ("ab" * 16)
-    captured: list[tuple[str, str, dict]] = []
+    from pathlib import Path
+
+    profile_js = (Path(__file__).resolve().parents[1] / "app" / "static" / "profile.js").read_text()
+    assert "/api/v1/account/deposit" not in profile_js
+    assert "authFetch('/api/v1/events'" in profile_js or 'authFetch("/api/v1/events"' in profile_js
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
-
-        async def _route_handler(route):
-            req = route.request
-            url = req.url
-            if req.method == "POST" and "/api/v1/account/deposit" in url and "/confirm" not in url:
-                await route.fulfill(
-                    status=402,
-                    content_type="application/json",
-                    body=(
-                        '{"status":"payment_required","token":"%s",'
-                        '"deposit_amount_sats":5000,"methods":["lightning"],'
-                        '"bolt11":"lnbc1h5depxtestinvoice","payment_hash":"%s",'
-                        '"lightning":{"bolt11":"lnbc1h5depxtestinvoice",'
-                        '"payment_hash":"%s","amount_sats":5000,"expires_in":600}}'
-                        % (fake_token, pay_hash, pay_hash)
-                    ),
-                )
-                return
-            if req.method == "POST" and "/api/v1/account/deposit/confirm" in url:
-                await route.fulfill(
-                    status=200,
-                    content_type="application/json",
-                    body='{"deposited":true,"amount_sats":5000,"balance_sats":5000}',
-                )
-                return
-            await route.continue_()
-
-        await page.route("**/*", _route_handler)
-
-        def _on_request(req):
-            if req.method == "POST":
-                captured.append((req.method, req.url, dict(req.headers)))
-
-        page.on("request", _on_request)
         await page.goto(f"{base}/profile", wait_until="domcontentloaded", timeout=30_000)
         await page.wait_for_function(
             "() => !!(window.__nostrCrypto && window.__nostrCrypto.getPublicKey)",
             timeout=60_000,
         )
         await page.wait_for_selector("#view-login", timeout=10_000)
-        # Generate identity so authFetch can NIP-98-sign deposit POSTs
+        assert await page.locator("#section-deposit").count() == 0
         await page.click("text=Generate New Identity")
-        await page.wait_for_selector("#section-deposit", state="visible", timeout=15_000)
-
-        # WebLN mock before Deposit so payInvoice takes wallet path → onPaid → confirm
-        await page.evaluate(
-            """() => {
-              window.__bcConnected = true;
-              window.webln = { sendPayment: async () => ({ preimage: 'x' }) };
-            }"""
-        )
-        captured.clear()
-
-        await page.fill("#deposit-amount", "5000")
-        await page.locator("#section-deposit button").filter(has_text="Deposit").click()
-
-        for _ in range(80):
-            if any("/deposit/confirm" in u for _, u, _ in captured):
-                break
-            await page.wait_for_timeout(100)
-
-        deposit_hdrs = [
-            h
-            for _, u, h in captured
-            if "/api/v1/account/deposit" in u and "/confirm" not in u
-        ]
-        assert deposit_hdrs, (
-            f"expected POST /api/v1/account/deposit; saw: {[u for _, u, _ in captured]}"
-        )
-        assert _xrw(deposit_hdrs[-1]) == "XMLHttpRequest", (
-            f"authFetch deposit missing XRW; headers={deposit_hdrs[-1]}"
-        )
-
-        confirm_hdrs = [
-            h for _, u, h in captured if "/api/v1/account/deposit/confirm" in u
-        ]
-        assert confirm_hdrs, (
-            f"expected POST deposit/confirm after payment_required; saw: "
-            f"{[u for _, u, _ in captured]}"
-        )
-        assert _xrw(confirm_hdrs[-1]) == "XMLHttpRequest", (
-            f"authFetch deposit/confirm missing XRW; headers={confirm_hdrs[-1]}"
-        )
-
-        # Adversarial: bare fetch must NOT invent XRW
-        captured.clear()
-        await page.evaluate(
-            """async () => {
-              await fetch('/api/v1/account/deposit/confirm', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({token: 'z', method: 'lightning', payment_hash: 'cc'}),
-              });
-            }"""
-        )
-        for _ in range(40):
-            if any("/deposit/confirm" in u for _, u, _ in captured):
-                break
-            await page.wait_for_timeout(100)
-        bare = [h for _, u, h in captured if "/api/v1/account/deposit/confirm" in u]
-        assert bare, "expected bare fetch deposit/confirm"
-        assert _xrw(bare[-1]) is None, (
-            f"adversarial bare fetch unexpectedly had XRW; headers={bare[-1]}"
-        )
-
+        await page.wait_for_selector("#view-account:not(.hidden)", timeout=15_000)
+        assert await page.locator("#btn-deposit").count() == 0
         await browser.close()

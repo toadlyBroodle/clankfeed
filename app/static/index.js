@@ -593,7 +593,7 @@ function updateHeaderLink() {
     link.textContent = name;
     link.style.color = 'var(--accent)';
   } else {
-    link.textContent = 'Login';
+    link.textContent = 'Identity';
     link.style.color = '';
   }
 }

@@ -257,31 +257,18 @@ class TestL402PaysActions:
 class TestNoCreditBypass:
     @pytest.mark.asyncio
     async def test_funded_account_cannot_skip_l402(self, paid_client, monkeypatch):
-        """Credits must not short-circuit payment when payments are enabled."""
+        """Even a pre-existing funded Account row must not short-circuit L402."""
         import base64
         import json
         import time
         from app.database import async_session
-        from app.accounts import deposit_credits_by_pubkey
+        from app.accounts import create_account, deposit_credits_by_pubkey
+        from app.zaps import pubkey_from_privkey
 
-        # Auto-create account via NIP-98 balance probe, then fund
         sk = "e" * 64
-        bal_url = "http://test/api/v1/account/balance"
-        ev = {
-            "kind": 27235,
-            "created_at": int(time.time()),
-            "tags": [["u", bal_url], ["method", "GET"]],
-            "content": "",
-        }
-        signed = sign_event(sk, ev)
-        token = base64.b64encode(json.dumps(signed).encode()).decode()
-        bal = await paid_client.get(
-            "/api/v1/account/balance",
-            headers={"Authorization": f"Nostr {token}"},
-        )
-        assert bal.status_code == 200
-        pubkey = bal.json()["nostr_pubkey"]
+        pubkey = pubkey_from_privkey(sk)
         async with async_session() as db:
+            await create_account(db, pubkey)
             await deposit_credits_by_pubkey(db, pubkey, 500)
 
         post_url = "http://test/api/v1/post"

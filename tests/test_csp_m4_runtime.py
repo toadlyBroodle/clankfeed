@@ -493,20 +493,12 @@ async def test_m4_organic_post_shows_payment_widget_under_csp(live_server):
 
 
 @pytest.mark.asyncio
-async def test_m4_profile_deposit_shows_payment_widget_under_csp(live_server):
-    """6.16: route-mock profile deposit→402→showPaymentWidget under live CSP.
-
-    6.14 covers feed post only; startDeposit must open #pw-widget with
-    Lightning/Tempo tabs + cancel without script-src violations. Adversarial
-    empty-402 (token only, no bolt11/tempo methods) must not leave a usable
-    multi-method widget (tabs stay hidden / cancel still works).
-    """
+async def test_m4_profile_has_no_deposit_chrome_under_csp(live_server):
+    """14.5: deposit UI removed; profile still loads under CSP without script-src violations."""
     playwright = pytest.importorskip("playwright.async_api")
     async_playwright = playwright.async_playwright
 
     base = live_server["base"]
-    pay_hash = "ef" * 32
-    fake_token = "dep-" + ("ab" * 16)
     csp_violations: list[str] = []
 
     async with async_playwright() as p:
@@ -519,99 +511,17 @@ async def test_m4_profile_deposit_shows_payment_widget_under_csp(live_server):
                 csp_violations.append(text)
 
         page.on("console", _on_console)
-
-        async def _route_handler(route):
-            req = route.request
-            url = req.url
-            if (
-                req.method == "POST"
-                and "/api/v1/account/deposit" in url
-                and "/confirm" not in url
-            ):
-                tempo_recipient = "0x" + ("ab" * 20)
-                tempo_currency = "0x" + ("cd" * 20)
-                body = (
-                    '{"status":"payment_required","token":"%s",'
-                    '"deposit_amount_sats":5000,"methods":["lightning","tempo"],'
-                    '"bolt11":"lnbc1m4deptestinvoice","payment_hash":"%s",'
-                    '"lightning":{"bolt11":"lnbc1m4deptestinvoice",'
-                    '"payment_hash":"%s","amount_sats":5000,"expires_in":600},'
-                    '"tempo":{"amount_usd":"0.05","recipient":"%s",'
-                    '"currency":"%s","testnet":true}}'
-                ) % (fake_token, pay_hash, pay_hash, tempo_recipient, tempo_currency)
-                await route.fulfill(
-                    status=402,
-                    content_type="application/json",
-                    body=body,
-                )
-                return
-            await route.continue_()
-
-        await page.route("**/*", _route_handler)
         await page.goto(f"{base}/profile", wait_until="domcontentloaded", timeout=30_000)
         await page.wait_for_function(
             "() => !!(window.__nostrCrypto && window.__nostrCrypto.getPublicKey)",
             timeout=60_000,
         )
         await page.wait_for_selector("#view-login", timeout=10_000)
+        assert await page.locator("#section-deposit").count() == 0
+        assert await page.locator("#btn-deposit").count() == 0
+        assert await page.locator("#acct-balance").count() == 0
         await page.click("text=Generate New Identity")
-        await page.wait_for_selector("#section-deposit", state="visible", timeout=15_000)
-        await page.wait_for_timeout(500)
-
-        assert not csp_violations, (
-            f"CSP script-src violations before deposit: {csp_violations}"
-        )
-
-        await page.fill("#deposit-amount", "5000")
-        await page.locator("#btn-deposit").click()
-
-        await page.wait_for_selector("#pw-widget:not(.hidden)", timeout=10_000)
-        assert await page.locator("#pw-tab-ln:not(.hidden)").count() == 1
-        assert await page.locator("#pw-tab-tempo:not(.hidden)").count() == 1
-        title = await page.locator("#pw-title").text_content()
-        assert title and "Deposit" in title
-
-        await page.click("#pw-tab-tempo")
-        await page.wait_for_selector("#pw-tempo:not(.hidden)", timeout=5_000)
-        assert await page.locator("#pw-lightning.hidden").count() == 1
-
-        await page.click("#pw-cancel-btn")
-        await page.wait_for_selector("#pw-widget.hidden", state="attached", timeout=5_000)
-
-        assert not csp_violations, (
-            f"CSP script-src violations during deposit widget path: {csp_violations}"
-        )
-
-        # Adversarial: token-only 402 without lightning/tempo methods → no usable tabs
-        await page.unroute("**/*")
-
-        async def _empty_402(route):
-            req = route.request
-            if (
-                req.method == "POST"
-                and "/api/v1/account/deposit" in req.url
-                and "/confirm" not in req.url
-            ):
-                await route.fulfill(
-                    status=402,
-                    content_type="application/json",
-                    body=(
-                        '{"status":"payment_required","token":"x",'
-                        '"deposit_amount_sats":100,"methods":[]}'
-                    ),
-                )
-                return
-            await route.continue_()
-
-        await page.route("**/*", _empty_402)
-        await page.fill("#deposit-amount", "100")
-        await page.locator("#btn-deposit").click()
-        await page.wait_for_timeout(800)
-        # startDeposit opens widget whenever token is present, but tabs must stay hidden
-        ln_visible = await page.locator("#pw-tab-ln:not(.hidden)").count()
-        tempo_visible = await page.locator("#pw-tab-tempo:not(.hidden)").count()
-        assert ln_visible == 0 and tempo_visible == 0, (
-            "payment-method tabs visible without lightning/tempo methods"
-        )
-
+        await page.wait_for_selector("#view-account:not(.hidden)", timeout=15_000)
+        assert await page.locator("#section-deposit").count() == 0
+        assert not csp_violations, f"CSP script-src violations: {csp_violations}"
         await browser.close()

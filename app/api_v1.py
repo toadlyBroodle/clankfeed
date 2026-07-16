@@ -26,11 +26,9 @@ from app.config import (
 from app.database import get_db
 from app.lightning import create_invoice, check_payment_status, check_and_consume_payment
 from app.limiter import limiter
-from app.accounts import create_account, get_account, deposit_credits, spend_credits
 from app.rates import get_btc_usd_price, usd_to_sats
 from app.models import PendingEvent, NostrEvent
 from app.mpp import build_mpp_challenge, parse_mpp_credential, verify_mpp_credential, extract_payment_hash, build_receipt
-from app.crypto import decrypt_field
 from app.nostr import validate_event, sign_event
 from app.zaps import append_zap_split_tags, pubkey_from_privkey, validate_kind1_zap_fee_tags
 from app.relay import store_event, broadcast_event, store_pending_event, query_events, row_to_event
@@ -615,13 +613,8 @@ async def relay_post(request: Request, db: AsyncSession = Depends(get_db)):
     if reply_to and len(reply_to) == 64:
         tags.append(["e", reply_to, "", "reply"])
 
-    # Sign with account's Nostr key if logged in, otherwise relay key
-    from app.auth import get_auth
-    acct, _, _ = await get_auth(request, db)
+    # Always relay-signed (14.5: no custodial account keys)
     signing_key = settings.RELAY_PRIVATE_KEY
-    if acct and acct.nostr_privkey:
-        signing_key = decrypt_field(acct.nostr_privkey)
-
     if not signing_key:
         return JSONResponse(status_code=500, content={"detail": "Relay private key not configured"})
 
@@ -1052,32 +1045,26 @@ async def confirm_vote(request: Request, event_id: str, db: AsyncSession = Depen
 
 
 # ---------------------------------------------------------------------------
-# Browser session (httpOnly cookie — SECURITY H2)
+# Auth (NIP-98 identity only — Phase 14.5)
 # ---------------------------------------------------------------------------
+
+_ACCOUNTS_GONE = {
+    "detail": "Accounts and credits removed; pay per action with L402 (Phase 14)",
+}
+
 
 @router.post("/auth/login")
 @limiter.limit(RATE_EVENTS_READ)
-async def auth_login(request: Request, db: AsyncSession = Depends(get_db)):
-    """Mint httpOnly session cookie after NIP-98 auth. Browser clients only."""
-    from app.auth import get_auth
-    from app.session_auth import set_session_cookie
-
-    acct, pubkey, method = await get_auth(request, db)
-    if not acct or method != "nip98" or not pubkey:
-        return JSONResponse(
-            status_code=401,
-            content={"detail": "NIP-98 Authorization required to create session"},
-        )
-    body = {"pubkey": pubkey, "auth_method": "session"}
-    response = JSONResponse(content=body)
-    set_session_cookie(response, pubkey, request)
-    return response
+async def auth_login(request: Request):
+    """Session login removed (14.5). Use NIP-98 per request or client-side keys."""
+    del request
+    return JSONResponse(status_code=410, content=_ACCOUNTS_GONE)
 
 
 @router.post("/auth/logout")
 @limiter.limit(RATE_EVENTS_READ)
 async def auth_logout(request: Request):
-    """Clear the httpOnly session cookie."""
+    """Clear any legacy httpOnly session cookie."""
     from app.session_auth import clear_session_cookie
 
     response = JSONResponse(content={"ok": True})
@@ -1088,329 +1075,56 @@ async def auth_logout(request: Request):
 @router.get("/auth/me")
 @limiter.limit(RATE_EVENTS_READ)
 async def auth_me(request: Request, db: AsyncSession = Depends(get_db)):
-    """Return authenticated pubkey (NIP-98 or session cookie)."""
+    """Return NIP-98 authenticated pubkey (no account / no session cookie)."""
     from app.auth import get_auth
 
-    acct, pubkey, method = await get_auth(request, db)
-    if not acct or not pubkey:
+    _, pubkey, method = await get_auth(request, db)
+    if not pubkey:
         return JSONResponse(status_code=401, content={"detail": "Authentication required"})
     return {"pubkey": pubkey, "auth_method": method}
 
 
 # ---------------------------------------------------------------------------
-# Account endpoints
+# Account endpoints — hard-disabled (Phase 14.5)
 # ---------------------------------------------------------------------------
 
 @router.post("/account/create")
 @limiter.limit(RATE_ACCOUNT_CREATE)
-async def account_create(request: Request, db: AsyncSession = Depends(get_db)):
-    """Create a new account or import an existing Nostr key.
-
-    Body: {} (generate new keypair)
-          {"pubkey": "hex"} (link external pubkey)
-          {"nostr_privkey": "hex"} (import existing Nostr private key)
-    """
-    try:
-        body = await request.json()
-    except Exception as e:
-        logger.warning("Invalid JSON in account create (using empty body): %s", e)
-        body = {}
-
-    pubkey = body.get("pubkey", "")
-    if pubkey and (not isinstance(pubkey, str) or len(pubkey) != 64):
-        return JSONResponse(status_code=400, content={"detail": "pubkey must be 64-char hex"})
-
-    nostr_privkey = body.get("nostr_privkey", "")
-    if nostr_privkey and (not isinstance(nostr_privkey, str) or len(nostr_privkey) != 64):
-        return JSONResponse(status_code=400, content={"detail": "nostr_privkey must be 64-char hex"})
-
-    acct = await create_account(db, pubkey, nostr_privkey=nostr_privkey)
-    return {
-        "nostr_pubkey": acct.nostr_pubkey or "",
-        "balance_sats": acct.balance_sats or 0,
-    }
+async def account_create(request: Request):
+    del request
+    return JSONResponse(status_code=410, content=_ACCOUNTS_GONE)
 
 
 @router.get("/account/balance")
 @limiter.limit(RATE_EVENTS_READ)
-async def account_balance(request: Request, db: AsyncSession = Depends(get_db)):
-    """Check account balance. Accepts NIP-98 or X-Account-Key auth."""
-    from app.auth import get_auth
-    acct, _, _ = await get_auth(request, db)
-    if not acct:
-        return JSONResponse(status_code=401, content={"detail": "Authentication required"})
-
-    return {
-        "balance_sats": acct.balance_sats or 0,
-        "balance_usd": acct.balance_usd or "0",
-        "nostr_pubkey": acct.nostr_pubkey or "",
-    }
+async def account_balance(request: Request):
+    del request
+    return JSONResponse(status_code=410, content=_ACCOUNTS_GONE)
 
 
 @router.post("/account/deposit")
 @limiter.limit(RATE_INVOICE)
-async def account_deposit(request: Request, db: AsyncSession = Depends(get_db)):
-    """Deposit credits. Returns 402 with payment options.
-
-    Body: {"amount_sats": 1000} or {"amount_usd": "0.50"}
-    Accepts NIP-98 or X-Account-Key auth.
-    """
-    from app.auth import get_auth
-    acct, _, _ = await get_auth(request, db)
-    if not acct:
-        return JSONResponse(status_code=401, content={"detail": "Authentication required"})
-
-    try:
-        body = await request.json()
-    except Exception as e:
-        logger.warning("Invalid JSON body: %s", e)
-        return JSONResponse(status_code=400, content={"detail": "Invalid JSON body"})
-
-    req_sats = body.get("amount_sats", settings.POST_PRICE_SATS)
-    req_usd = body.get("amount_usd", settings.TEMPO_PRICE_USD)
-    if not isinstance(req_sats, int) or req_sats < settings.POST_PRICE_SATS:
-        req_sats = settings.POST_PRICE_SATS
-    if isinstance(req_usd, (int, float)):
-        req_usd = str(req_usd)
-
-    # Store deposit intent as pending event (reuse table)
-    deposit_data = {"deposit_account": acct.id, "amount_sats": req_sats, "amount_usd": req_usd}
-    token = await store_pending_event(db, deposit_data, amount_sats=req_sats, amount_usd=str(req_usd))
-
-    payment_hash = ""
-    bolt11 = ""
-    if payments_enabled():
-        invoice_data = await create_invoice(req_sats, f"clankfeed credit deposit")
-        pending = await db.get(PendingEvent, token)
-        pending.payment_hash = invoice_data["payment_hash"]
-        await db.commit()
-        payment_hash = invoice_data["payment_hash"]
-        bolt11 = invoice_data["payment_request"]
-
-    options = _build_payment_options(payment_hash, bolt11, amount_sats=req_sats, amount_usd=str(req_usd))
-
-    return JSONResponse(
-        status_code=402,
-        content={
-            "status": "payment_required",
-            "token": token,
-            "deposit_amount_sats": req_sats,
-            **options,
-        },
-        headers={"Cache-Control": "no-store"},
-    )
+async def account_deposit(request: Request):
+    del request
+    return JSONResponse(status_code=410, content=_ACCOUNTS_GONE)
 
 
 @router.post("/account/deposit/confirm")
 @limiter.limit(RATE_POST_CONFIRM)
-async def account_deposit_confirm(request: Request, db: AsyncSession = Depends(get_db)):
-    """Confirm deposit payment. Credits added to account.
+async def account_deposit_confirm(request: Request):
+    del request
+    return JSONResponse(status_code=410, content=_ACCOUNTS_GONE)
 
-    Body: {"token": "...", "method": "tempo", "tx_hash": "0x..."}
-    Accepts NIP-98 or X-Account-Key auth.
-    """
-    from app.auth import get_auth
-    acct, _, _ = await get_auth(request, db)
-    if not acct:
-        return JSONResponse(status_code=401, content={"detail": "Authentication required"})
-    api_key = acct.id
-
-    try:
-        body = await request.json()
-    except Exception as e:
-        logger.warning("Invalid JSON body: %s", e)
-        return JSONResponse(status_code=400, content={"detail": "Invalid JSON body"})
-
-    token = body.get("token", "")
-    method = body.get("method", "lightning")
-
-    pending = await db.get(PendingEvent, token)
-    if not pending or pending.expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
-        return JSONResponse(status_code=404, content={"detail": "Token expired or not found"})
-
-    # SECURITY (H6): the deposit token must belong to the confirming account,
-    # and must actually be a deposit token (not an event/vote token).
-    try:
-        deposit_data = json.loads(pending.event_json)
-    except (json.JSONDecodeError, ValueError):
-        deposit_data = {}
-    if not isinstance(deposit_data, dict) or deposit_data.get("deposit_account") != api_key:
-        return JSONResponse(status_code=403, content={"detail": "Deposit token does not belong to this account"})
-
-    # Verify payment (same logic as event confirm)
-    if method == "tempo":
-        tx_hash = body.get("tx_hash", "")
-        if not tx_hash or not re.fullmatch(r"0x[0-9a-fA-F]{64}", tx_hash):
-            return JSONResponse(status_code=400, content={"detail": "tx_hash must be 0x + 64 hex chars"})
-        from app.tempo_pay import _verify_tx_on_chain
-        paid = await _verify_tx_on_chain(
-            tx_hash, settings.TEMPO_RECIPIENT.lower(),
-            settings.TEMPO_CURRENCY.lower(), float(pending.amount_usd or settings.TEMPO_PRICE_USD),
-        )
-        payment_id = tx_hash
-    else:
-        pay_hash = body.get("payment_hash", "")
-        if not pay_hash or not re.fullmatch(r"[0-9a-fA-F]{64}", pay_hash):
-            return JSONResponse(status_code=400, content={"detail": "payment_hash must be hex"})
-        if pending.payment_hash and not _hmac.compare_digest(pending.payment_hash, pay_hash):
-            return JSONResponse(status_code=400, content={"detail": "Payment hash mismatch"})
-        paid = await check_payment_status(pay_hash)
-        payment_id = pay_hash
-
-    if not paid:
-        return JSONResponse(status_code=402, content={"detail": "Payment not yet received"})
-
-    consumed = await check_and_consume_payment(payment_id, db)
-    if not consumed:
-        return JSONResponse(status_code=402, content={
-            "type": "https://paymentauth.org/problems/invalid-challenge",
-            "title": "Invalid challenge",
-            "detail": "Payment already consumed",
-        })
-
-    # Add credits (convert USD to sats at spot for Tempo)
-    dep_usd = pending.amount_usd or "0"
-    if method == "tempo":
-        btc_price = await get_btc_usd_price()
-        dep_sats = usd_to_sats(float(dep_usd), btc_price) if btc_price > 0 else (pending.amount_sats or settings.POST_PRICE_SATS)
-    else:
-        dep_sats = pending.amount_sats or settings.POST_PRICE_SATS
-    acct = await deposit_credits(db, api_key, dep_sats, dep_usd)
-    if not acct:
-        return JSONResponse(status_code=404, content={"detail": "Account not found"})
-
-    await db.delete(pending)
-    await db.commit()
-    logger.info("Deposit confirmed: account=%s amount=%d sats method=%s balance=%d sats",
-                api_key[:12], dep_sats, method, acct.balance_sats or 0)
-
-    return {
-        "deposited": True,
-        "amount_sats": dep_sats,
-        "balance_sats": acct.balance_sats or 0,
-    }
-
-
-# ---------------------------------------------------------------------------
-# POST /api/v1/account/key  (export Nostr private key)
-# ---------------------------------------------------------------------------
 
 @router.post("/account/key")
 @limiter.limit(RATE_EVENTS_READ)
-async def account_export_key(request: Request, db: AsyncSession = Depends(get_db)):
-    """Export the account's Nostr private key. Accepts NIP-98 or X-Account-Key auth."""
-    from app.auth import get_auth
-    acct, _, _ = await get_auth(request, db)
-    if not acct:
-        return JSONResponse(status_code=401, content={"detail": "Authentication required"})
+async def account_export_key(request: Request):
+    del request
+    return JSONResponse(status_code=410, content=_ACCOUNTS_GONE)
 
-    return {
-        "nostr_privkey": decrypt_field(acct.nostr_privkey) if acct.nostr_privkey else "",
-        "nostr_pubkey": acct.nostr_pubkey or "",
-    }
-
-
-# ---------------------------------------------------------------------------
-# POST /api/v1/account/profile  (update avatar and about via kind:0)
-# ---------------------------------------------------------------------------
 
 @router.post("/account/profile")
 @limiter.limit(RATE_POST)
-async def account_update_profile(request: Request, db: AsyncSession = Depends(get_db)):
-    """Update account profile (name, about, picture) by posting a kind:0 metadata event.
-
-    Accepts NIP-98 or X-Account-Key auth. Uses credits if available.
-    Body: {"name": "...", "about": "...", "picture": "https://..."}
-    """
-    from app.auth import get_auth
-    acct, _, _ = await get_auth(request, db)
-    if not acct:
-        return JSONResponse(status_code=401, content={"detail": "Authentication required"})
-
-    if not acct.nostr_privkey:
-        return JSONResponse(status_code=500, content={"detail": "Account has no Nostr key"})
-
-    try:
-        body = await request.json()
-    except Exception as e:
-        logger.warning("Invalid JSON body: %s", e)
-        return JSONResponse(status_code=400, content={"detail": "Invalid JSON body"})
-
-    # Build kind:0 metadata content
-    metadata = {}
-    if "name" in body and isinstance(body["name"], str):
-        metadata["name"] = body["name"][:MAX_DISPLAY_NAME]
-    if "about" in body and isinstance(body["about"], str):
-        metadata["about"] = body["about"][:MAX_CONTENT_LENGTH]
-    if "picture" in body and isinstance(body["picture"], str):
-        metadata["picture"] = body["picture"][:1024]
-
-    if not metadata:
-        return JSONResponse(status_code=400, content={"detail": "Provide at least one of: name, about, picture"})
-
-    # Create and sign kind:0 event with account's key
-    event = {
-        "created_at": int(time.time()),
-        "kind": 0,
-        "tags": [],
-        "content": json.dumps(metadata),
-    }
-    signed = sign_event(decrypt_field(acct.nostr_privkey), event)
-
-    req_sats = settings.POST_PRICE_SATS
-
-    # No payment configured: store directly
-    if not payments_enabled() and not tempo_enabled():
-        await store_event(db, signed, sats_clank=req_sats)
-        await broadcast_event(signed)
-        return {"updated": True, "event": signed, "metadata": metadata}
-
-    # Unified payment router (14.13)
-    from app.payment import require_payment
-    settlement = await require_payment(
-        request,
-        amount_sats=req_sats,
-        memo="clankfeed profile update",
-        db=db,
-        challenge_on_missing=False,
-    )
-    if settlement:
-        await store_event(db, signed, sats_clank=req_sats)
-        await broadcast_event(signed)
-        return {"updated": True, "event": signed, "metadata": metadata}
-
-    # Requires payment
-    token = await store_pending_event(db, signed, amount_sats=req_sats)
-
-    payment_hash = ""
-    bolt11 = ""
-    if payments_enabled():
-        invoice_data = await create_invoice(req_sats, "clankfeed profile update")
-        pending = await db.get(PendingEvent, token)
-        pending.payment_hash = invoice_data["payment_hash"]
-        await db.commit()
-        payment_hash = invoice_data["payment_hash"]
-        bolt11 = invoice_data["payment_request"]
-
-    if not payments_enabled() and tempo_enabled():
-        options = _build_payment_options(payment_hash, bolt11, amount_sats=req_sats)
-        return JSONResponse(
-            status_code=402,
-            content={
-                "status": "payment_required",
-                "token": token,
-                **options,
-            },
-            headers={"Cache-Control": "no-store"},
-        )
-
-    return _payment_required_response(
-        {
-            "status": "payment_required",
-            "token": token,
-        },
-        payment_hash=payment_hash,
-        bolt11=bolt11,
-        amount_sats=req_sats,
-        description="Pay to update profile",
-    )
+async def account_update_profile(request: Request):
+    del request
+    return JSONResponse(status_code=410, content=_ACCOUNTS_GONE)
