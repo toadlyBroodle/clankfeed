@@ -179,6 +179,24 @@ async def query_events(
             else:
                 conditions.append(NostrEvent.tags.contains(f'"e", "{parent}"'))
 
+        # NIP-01 tag filters (#e, #p, …): SQL prefilter + _matches_filter post-check
+        for key, values in filt.items():
+            if not (isinstance(key, str) and key.startswith("#") and len(key) == 2):
+                continue
+            tag_name = key[1]
+            if not isinstance(values, list) or not values:
+                conditions.append(NostrEvent.id == "")
+                continue
+            tag_conds = []
+            for v in values:
+                if isinstance(v, str):
+                    # tags stored via json.dumps → substring ["e", "<id>"]
+                    tag_conds.append(NostrEvent.tags.contains(json.dumps([tag_name, v])))
+            if tag_conds:
+                conditions.append(or_(*tag_conds))
+            else:
+                conditions.append(NostrEvent.id == "")
+
         # Sort order
         if sort in ("clank", "value"):
             stmt = select(NostrEvent).order_by(NostrEvent.sats_clank.desc(), NostrEvent.created_at.desc())
@@ -195,9 +213,14 @@ async def query_events(
 
         rows = (await db.execute(stmt)).scalars().all()
         for row in rows:
-            if row.id not in seen_ids:
-                seen_ids.add(row.id)
-                results.append(row_to_event(row))
+            if row.id in seen_ids:
+                continue
+            event = row_to_event(row)
+            # Enforce NIP-01 filters (esp. #e/#p) — SQL contains is a prefilter only
+            if not _matches_filter(event, filt):
+                continue
+            seen_ids.add(row.id)
+            results.append(event)
 
     return results
 
@@ -378,7 +401,9 @@ async def _handle_event(conn: Connection, msg: list, db: AsyncSession):
             await conn.send(["OK", event_id, False, zap_err])
             return
 
-    # NWC events (NIP-47): store and broadcast without payment, but validate size
+    # NWC events (NIP-47): accept without payment, validate size.
+    # Kinds 23194/23195 are NIP-01 ephemeral — broadcast only, never persist
+    # (avoids stale REQ #e history flooding NWC clients). Kind 13194 (info) is stored.
     if event["kind"] in NWC_EVENT_KINDS:
         if len(event["content"]) > MAX_CONTENT_LENGTH:
             await conn.send(["OK", event_id, False, f"invalid: content exceeds {MAX_CONTENT_LENGTH} chars"])
@@ -386,7 +411,8 @@ async def _handle_event(conn: Connection, msg: list, db: AsyncSession):
         if len(event["tags"]) > MAX_EVENT_TAGS:
             await conn.send(["OK", event_id, False, f"invalid: too many tags (max {MAX_EVENT_TAGS})"])
             return
-        await store_event(db, event)
+        if event["kind"] not in (23194, 23195):
+            await store_event(db, event)
         await conn.send(["OK", event_id, True, ""])
         await broadcast_event(event)
         return
