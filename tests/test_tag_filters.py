@@ -15,6 +15,7 @@ from app.relay import (
     Connection,
     _handle_event,
     _matches_filter,
+    connections,
     query_events,
     store_event,
 )
@@ -220,3 +221,94 @@ class TestNwcEphemeralNoPersist:
             row = await db.get(NostrEvent, ev["id"])
             assert row is not None
             assert row.kind == 13194
+
+    @pytest.mark.asyncio
+    async def test_23195_broadcast_to_live_hash_e_subscriber(self, client):
+        """Sole delivery path after no-persist: matching #e subscriber must get EVENT."""
+        sub_ws = FakeWS()
+        sub = Connection(sub_ws)
+        sub.subscriptions["nwc-live"] = [{"kinds": [23195], "#e": [REQ_A]}]
+        connections.add(sub)
+        try:
+            ev = _nwc_response(REQ_A, content="live-broadcast")
+            pub_ws = FakeWS()
+            pub = Connection(pub_ws)
+            async with async_session() as db:
+                await _handle_event(pub, ["EVENT", ev], db)
+
+            assert any(m[0] == "OK" and m[1] == ev["id"] and m[2] is True for m in pub_ws.sent)
+            delivered = [
+                m for m in sub_ws.sent
+                if m[0] == "EVENT" and m[1] == "nwc-live" and m[2]["id"] == ev["id"]
+            ]
+            assert delivered, (
+                "ephemeral 23195 must reach live #e subscriber via broadcast_event "
+                "(dropping broadcast breaks BotFeed NWC — nothing is stored to query)"
+            )
+            assert delivered[0][2]["content"] == "live-broadcast"
+
+            async with async_session() as db:
+                assert await db.get(NostrEvent, ev["id"]) is None
+        finally:
+            connections.discard(sub)
+
+    @pytest.mark.asyncio
+    async def test_23195_broadcast_skips_non_matching_hash_e(self, client):
+        """Adversarial: subscriber on #e:REQ_A must not receive 23195 tagged REQ_B."""
+        sub_ws = FakeWS()
+        sub = Connection(sub_ws)
+        sub.subscriptions["nwc-live"] = [{"kinds": [23195], "#e": [REQ_A]}]
+        connections.add(sub)
+        try:
+            ev = _nwc_response(REQ_B, content="wrong-e")
+            pub_ws = FakeWS()
+            pub = Connection(pub_ws)
+            async with async_session() as db:
+                await _handle_event(pub, ["EVENT", ev], db)
+
+            assert any(m[0] == "OK" and m[1] == ev["id"] and m[2] is True for m in pub_ws.sent)
+            leaked = [
+                m for m in sub_ws.sent
+                if m[0] == "EVENT" and m[2].get("id") == ev["id"]
+            ]
+            assert leaked == [], "broadcast must honor #e filter (no cross-request leak)"
+        finally:
+            connections.discard(sub)
+
+    @pytest.mark.asyncio
+    async def test_websocket_e2e_ephemeral_23195_reaches_hash_e_sub(self, client):
+        """WS e2e: REQ #e then EVENT on same conn → real-time EVENT push + not persisted.
+
+        Same-connection avoids TestClient dual-WS deadlock; broadcast_event still
+        delivers to every matching subscription on the connection registry.
+        """
+        from starlette.testclient import TestClient
+        from app.main import app
+
+        ev = _nwc_response(REQ_A, content="ws-e2e-live")
+
+        with TestClient(app) as tc:
+            with tc.websocket_connect("/") as ws:
+                ws.receive_json()  # AUTH
+                ws.send_json([
+                    "REQ", "nwc-sub",
+                    {"kinds": [23195], "#e": [REQ_A], "limit": 50},
+                ])
+                while True:
+                    msg = ws.receive_json()
+                    if msg[0] == "EOSE":
+                        break
+
+                ws.send_json(["EVENT", ev])
+                ok = ws.receive_json()
+                assert ok[0] == "OK" and ok[1] == ev["id"] and ok[2] is True
+
+                got = ws.receive_json()
+                assert got[0] == "EVENT"
+                assert got[1] == "nwc-sub"
+                assert got[2]["id"] == ev["id"]
+                assert got[2]["content"] == "ws-e2e-live"
+                assert any(t[0] == "e" and t[1] == REQ_A for t in got[2]["tags"])
+
+        async with async_session() as db:
+            assert await db.get(NostrEvent, ev["id"]) is None
