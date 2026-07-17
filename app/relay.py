@@ -309,8 +309,12 @@ async def store_event(
         return
     logger.info("Event stored: id=%s kind=%d pubkey=%s value=%d sats",
                 event["id"][:12], event["kind"], event["pubkey"][:12], sats_clank)
-    # Phase 15: fan-out paid local accepts to public relays (not ingest/external).
-    if origin == "clankfeed" and settings.OUTBOX_ENABLED:
+    # Phase 15: fan-out paid local notes/metadata only (not free NWC/zap accepts).
+    if (
+        origin == "clankfeed"
+        and settings.OUTBOX_ENABLED
+        and event.get("kind") in ALLOWED_EVENT_KINDS
+    ):
         schedule_outbox(event)
 
 

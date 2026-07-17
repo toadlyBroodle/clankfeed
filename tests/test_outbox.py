@@ -230,6 +230,7 @@ class TestStoreEventSchedulesOutbox:
         self, db: AsyncSession, monkeypatch
     ):
         monkeypatch.setattr("app.outbox.settings.OUTBOX_ENABLED", False)
+        monkeypatch.setattr("app.relay.settings.OUTBOX_ENABLED", False)
         scheduled: list = []
 
         def fake_schedule(event):
@@ -238,6 +239,32 @@ class TestStoreEventSchedulesOutbox:
         event = _signed_note(content="no net")
         with patch("app.relay.schedule_outbox", side_effect=fake_schedule):
             await store_event(db, event, sats_clank=21, origin="clankfeed")
+
+        assert scheduled == []
+
+    @pytest.mark.asyncio
+    async def test_nwc_info_kind_does_not_outbox(
+        self, db: AsyncSession, monkeypatch
+    ):
+        """Free NWC accepts (13194) must not fan-out to public relays."""
+        monkeypatch.setattr("app.relay.settings.OUTBOX_ENABLED", True)
+        scheduled: list = []
+
+        def fake_schedule(event):
+            scheduled.append(event)
+
+        priv = "c" * 64
+        event = sign_event(
+            priv,
+            {
+                "created_at": 1_700_000_100,
+                "kind": 13194,
+                "tags": [],
+                "content": "{}",
+            },
+        )
+        with patch("app.relay.schedule_outbox", side_effect=fake_schedule):
+            await store_event(db, event, sats_clank=0, origin="clankfeed")
 
         assert scheduled == []
 
