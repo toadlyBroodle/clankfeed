@@ -34,6 +34,7 @@ from app.config import (
 from app import config as _cfg
 from app.models import NostrEvent, PendingEvent, Vote
 from app.nostr import validate_event, verify_event_id, verify_signature
+from app.outbox import schedule_outbox
 from app.zaps import (
     validate_kind1_zap_fee_tags,
     verify_zap_receipt,
@@ -308,6 +309,9 @@ async def store_event(
         return
     logger.info("Event stored: id=%s kind=%d pubkey=%s value=%d sats",
                 event["id"][:12], event["kind"], event["pubkey"][:12], sats_clank)
+    # Phase 15: fan-out paid local accepts to public relays (not ingest/external).
+    if origin == "clankfeed" and settings.OUTBOX_ENABLED:
+        schedule_outbox(event)
 
 
 async def store_pending_event(

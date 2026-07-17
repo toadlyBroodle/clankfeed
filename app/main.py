@@ -95,6 +95,16 @@ async def lifespan(app: FastAPI):
     cleanup_task = asyncio.create_task(_cleanup_expired_pending())
     from app.ingest import start_ingest_tasks
     ingest_tasks = start_ingest_tasks()
+    if settings.OUTBOX_ENABLED:
+        from app.outbox import outbox_relay_urls
+        targets = outbox_relay_urls()
+        logger.info(
+            "Outbox enabled: %d relay(s): %s",
+            len(targets),
+            ", ".join(targets) if targets else "(none)",
+        )
+    else:
+        logger.info("Outbox disabled")
     logger.info(f"clankfeed relay started (pubkey: {_relay_pubkey[:16]}...)")
     yield
     # Shutdown
@@ -572,6 +582,26 @@ def _nip11_response():
     # NIP-57 fee leg: expose relay lightning address when configured (14.6 web zap UX)
     if settings.RELAY_LUD16:
         doc["lud16"] = settings.RELAY_LUD16
+    # Phase 15: paid events may be republished to configured public relays
+    if settings.OUTBOX_ENABLED:
+        from app.outbox import outbox_relay_urls
+        relays = outbox_relay_urls()
+        doc["outbox"] = {
+            "enabled": True,
+            "policy": (
+                "Paid events accepted here may be republished to configured "
+                "public relays (outbox fan-out)."
+            ),
+            "relays": relays,
+        }
+        doc["outbox_relays"] = relays
+    else:
+        doc["outbox"] = {
+            "enabled": False,
+            "policy": (
+                "Outbox republish is disabled; paid events stay on this relay only."
+            ),
+        }
     return JSONResponse(
         content=doc,
         headers={

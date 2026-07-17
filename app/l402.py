@@ -166,7 +166,7 @@ def l402_402_detail(message: str, amount_sats: int | None = None) -> dict:
 def well_known_l402_document() -> dict:
     """Body for GET /.well-known/l402 discovery."""
     base = http_base_url()
-    return {
+    doc = {
         "protocol": "L402",
         "description": (
             "Lightning-native HTTP 402 payments. Pay invoice, get preimage, "
@@ -203,7 +203,15 @@ def well_known_l402_document() -> dict:
             ),
         },
         "docs": f"{base}/.well-known/l402",
+        "outbox": {
+            "enabled": settings.OUTBOX_ENABLED,
+            "policy": (
+                "After L402 settle, paid events may be republished (outbox) to "
+                "configured public relays so agents pay once on clankfeed."
+            ),
+        },
     }
+    return doc
 
 
 async def try_l402(

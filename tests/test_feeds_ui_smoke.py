@@ -56,6 +56,7 @@ def live_server(tmp_path):
         {
             "AUTH_ROOT_KEY": "test-mode",
             "EXTERNAL_INGEST": "false",
+            "OUTBOX_ENABLED": "false",
             "DATABASE_URL": f"sqlite+aiosqlite:///{db_path}",
             "RELAY_PRIVATE_KEY": "a" * 64,
             "TEMPO_RECIPIENT": "",

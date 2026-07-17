@@ -361,6 +361,7 @@ def live_server_free(tmp_path):
         {
             "AUTH_ROOT_KEY": "test-mode",
             "EXTERNAL_INGEST": "false",
+            "OUTBOX_ENABLED": "false",
             "DATABASE_URL": f"sqlite+aiosqlite:///{db_path}",
             "RELAY_PRIVATE_KEY": "a" * 64,
             "TEMPO_RECIPIENT": "",
@@ -445,6 +446,7 @@ def live_server_paid(tmp_path):
         {
             "AUTH_ROOT_KEY": "phase14-17-live-key",
             "EXTERNAL_INGEST": "false",
+            "OUTBOX_ENABLED": "false",
             "DATABASE_URL": f"sqlite+aiosqlite:///{db_path}",
             "RELAY_PRIVATE_KEY": "a" * 64,
             "TEMPO_RECIPIENT": "",

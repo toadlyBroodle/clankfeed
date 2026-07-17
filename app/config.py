@@ -3,6 +3,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# BotFeed discovery publish set (damus / nos.lol / snort / primal / wine).
+DEFAULT_OUTBOX_RELAYS = (
+    "wss://relay.damus.io,wss://nos.lol,wss://relay.snort.social,"
+    "wss://relay.primal.net,wss://nostr.wine"
+)
+
 
 class Settings:
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./db/relay.db")
@@ -26,6 +32,11 @@ class Settings:
         "EXTERNAL_RELAYS",
         "wss://relay.damus.io,wss://nos.lol,wss://relay.primal.net",
     )
+
+    # Outbox fan-out: after paid local store, republish client-signed events to
+    # public write relays (BotFeed discovery set). Off in tests (conftest).
+    OUTBOX_ENABLED: bool = os.getenv("OUTBOX_ENABLED", "true").lower() == "true"
+    OUTBOX_RELAYS: str = os.getenv("OUTBOX_RELAYS", DEFAULT_OUTBOX_RELAYS)
 
 
     # Tempo stablecoin settings (parked — see tempo_enabled / ENABLE_TEMPO)
