@@ -194,21 +194,27 @@ def _build_payment_options(
 
     if payments_enabled() and bolt11:
         methods.append("lightning")
+        from app.mpp import mpp_challenge_echo
         result["lightning"] = {
             "bolt11": bolt11,
             "payment_hash": payment_hash,
             "amount_sats": sats,
             "expires_in": 600,
+            "challenge": mpp_challenge_echo(
+                sats, payment_hash, bolt11, "clankfeed payment",
+            ),
         }
 
     if tempo_enabled():
         methods.append("tempo")
+        from app.tempo_pay import tempo_challenge_echo
         result["tempo"] = {
             "recipient": settings.TEMPO_RECIPIENT,
             "currency": settings.TEMPO_CURRENCY,
             "amount_usd": usd,
             "chain": "tempo",
             "testnet": settings.TEMPO_TESTNET,
+            "challenge": tempo_challenge_echo(usd, "clankfeed payment"),
         }
 
     if stripe_enabled():

@@ -114,10 +114,17 @@ async def payment_required_challenge(
                 "macaroon": mint_macaroon(invoice_data["payment_hash"]),
                 "invoice": invoice_data["payment_request"],
             }
+            from app.mpp import mpp_challenge_echo
             body["lightning"] = {
                 "bolt11": invoice_data["payment_request"],
                 "payment_hash": invoice_data["payment_hash"],
                 "amount_sats": sats,
+                "challenge": mpp_challenge_echo(
+                    sats,
+                    invoice_data["payment_hash"],
+                    invoice_data["payment_request"],
+                    description,
+                ),
             }
             methods = list(body.get("methods") or [])
             if "lightning" not in methods:
@@ -128,6 +135,19 @@ async def payment_required_challenge(
 
     if tempo_enabled():
         www_headers.append(build_tempo_challenge(usd, description))
+        from app.tempo_pay import tempo_challenge_echo
+        body["tempo"] = {
+            "recipient": settings.TEMPO_RECIPIENT,
+            "currency": settings.TEMPO_CURRENCY,
+            "amount_usd": usd,
+            "chain": "tempo",
+            "testnet": settings.TEMPO_TESTNET,
+            "challenge": tempo_challenge_echo(usd, description),
+        }
+        methods = list(body.get("methods") or [])
+        if "tempo" not in methods:
+            methods.append("tempo")
+        body["methods"] = methods
 
     if stripe_enabled():
         www_headers.append(build_stripe_challenge(stripe_usd, description))
@@ -556,16 +576,32 @@ async def api_post(request: Request, db: AsyncSession = Depends(get_db)):
         result["payment_hash"] = invoice_data["payment_hash"]
         result["amount_sats"] = price
         result["methods"].append("lightning")
+        from app.mpp import mpp_challenge_echo
+        result["lightning"] = {
+            "bolt11": invoice_data["payment_request"],
+            "payment_hash": invoice_data["payment_hash"],
+            "amount_sats": price,
+            "challenge": mpp_challenge_echo(
+                price,
+                invoice_data["payment_hash"],
+                invoice_data["payment_request"],
+                "clankfeed note posting",
+            ),
+        }
         result["how_to_pay"] = build_how_to_pay(include_l402=True)
 
         if tempo_enabled():
             result["methods"].append("tempo")
+            from app.tempo_pay import tempo_challenge_echo
             result["tempo"] = {
                 "recipient": settings.TEMPO_RECIPIENT,
                 "currency": settings.TEMPO_CURRENCY,
                 "amount_usd": settings.TEMPO_PRICE_USD,
                 "chain": "tempo",
                 "testnet": settings.TEMPO_TESTNET,
+                "challenge": tempo_challenge_echo(
+                    settings.TEMPO_PRICE_USD, "clankfeed note posting",
+                ),
             }
 
         if stripe_enabled():
@@ -606,15 +642,20 @@ async def api_post(request: Request, db: AsyncSession = Depends(get_db)):
             )
         return response
 
-    # Tempo / Stripe only (no Lightning)
+    # Tempo / Stripe only (no Lightning) — return true 402 with Payment challenges
+    from starlette.responses import Response as RawResponse
     if tempo_enabled():
         result["methods"].append("tempo")
+        from app.tempo_pay import tempo_challenge_echo
         result["tempo"] = {
             "recipient": settings.TEMPO_RECIPIENT,
             "currency": settings.TEMPO_CURRENCY,
             "amount_usd": settings.TEMPO_PRICE_USD,
             "chain": "tempo",
             "testnet": settings.TEMPO_TESTNET,
+            "challenge": tempo_challenge_echo(
+                settings.TEMPO_PRICE_USD, "clankfeed note posting",
+            ),
         }
         result["how_to_pay"] = build_how_to_pay(include_l402=False)
 
@@ -625,76 +666,40 @@ async def api_post(request: Request, db: AsyncSession = Depends(get_db)):
         )
         result["how_to_pay"] = build_how_to_pay(include_l402=False)
 
-    return result
+    if not result["methods"]:
+        return result
+
+    response = RawResponse(
+        content=json.dumps(result),
+        status_code=402,
+        media_type="application/json",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    if tempo_enabled():
+        response.headers.append(
+            "WWW-Authenticate",
+            build_tempo_challenge(settings.TEMPO_PRICE_USD, "clankfeed note posting"),
+        )
+    if stripe_enabled():
+        response.headers.append(
+            "WWW-Authenticate",
+            build_stripe_challenge(settings.STRIPE_PRICE_USD, "clankfeed note posting"),
+        )
+    return response
 
 
 @router.post("/api/post/confirm")
 @limiter.limit(RATE_POST_CONFIRM)
 async def api_post_confirm(request: Request, db: AsyncSession = Depends(get_db)):
-    """Confirm payment and store a web-client event.
+    """Phase 11c: legacy confirm removed — use Authorization: Payment (or L402)."""
+    return JSONResponse(
+        status_code=410,
+        content={
+            "detail": (
+                "Gone: /api/post/confirm removed. "
+                "Retry the original POST with Authorization: L402 <macaroon>:<preimage> "
+                "or Authorization: Payment <base64url-credential>."
+            ),
+        },
+    )
 
-    Body: {"token": "...", "payment_hash": "...", "method": "lightning"}
-      or: {"token": "...", "tx_hash": "...", "method": "tempo"}
-    """
-    try:
-        body = await request.json()
-    except Exception as e:
-        logger.warning("Invalid JSON body: %s", e)
-        return JSONResponse(status_code=400, content={"detail": "Invalid JSON body"})
-
-    token = body.get("token", "")
-    method = body.get("method", "lightning")
-
-    pending = await db.get(PendingEvent, token)
-    if not pending or pending.expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
-        return JSONResponse(status_code=404, content={"detail": "Token expired or not found"})
-
-    if method == "tempo":
-        tx_hash = body.get("tx_hash", "")
-        if not tx_hash or not re.fullmatch(r"0x[0-9a-fA-F]{64}", tx_hash):
-            return JSONResponse(status_code=400, content={"detail": "tx_hash must be 0x + 64 hex chars"})
-
-        from app.tempo_pay import _verify_tx_on_chain
-        paid = await _verify_tx_on_chain(
-            tx_hash,
-            settings.TEMPO_RECIPIENT.lower(),
-            settings.TEMPO_CURRENCY.lower(),
-            float(settings.TEMPO_PRICE_USD),
-        )
-        payment_id = tx_hash
-
-    else:
-        payment_hash = body.get("payment_hash", "")
-        if not payment_hash or not re.fullmatch(r"[0-9a-fA-F]{64}", payment_hash):
-            return JSONResponse(status_code=400, content={"detail": "payment_hash must be hex"})
-        if not _hmac.compare_digest(pending.payment_hash, payment_hash):
-            return JSONResponse(status_code=400, content={"detail": "Payment hash mismatch"})
-        paid = await check_payment_status(payment_hash)
-        payment_id = payment_hash
-
-    if not paid:
-        return JSONResponse(status_code=402, content={"detail": "Payment not yet received"})
-
-    # Consume payment (replay protection)
-    consumed = await check_and_consume_payment(payment_id, db)
-    if not consumed:
-        return JSONResponse(status_code=402, content={
-            "type": "https://paymentauth.org/problems/invalid-challenge",
-            "title": "Invalid challenge",
-            "detail": "Payment already consumed",
-        })
-
-    # Store the event
-    event = json.loads(pending.event_json)
-    await store_event(db, event)
-
-    # Clean up
-    await db.delete(pending)
-    await db.commit()
-
-    # Broadcast
-    await broadcast_event(event)
-    logger.info("Post confirmed (legacy): event=%s method=%s payment=%s",
-                event["id"][:12], method, payment_id[:16])
-
-    return {"event": event, "paid": True}

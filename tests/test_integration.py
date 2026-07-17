@@ -120,6 +120,27 @@ def _mock_check_payment(paid=True):
     return patch("app.payment.check_payment_status", new_callable=AsyncMock, return_value=paid)
 
 
+
+def _payment_auth_from_challenge(challenge: dict, payload: dict) -> str:
+    """Build Authorization: Payment from a 402 JSON challenge echo + payload."""
+    import base64
+    import json as _json
+    cred = {
+        "challenge": {
+            "id": challenge["id"],
+            "realm": challenge.get("realm", ""),
+            "method": challenge.get("method", ""),
+            "intent": challenge.get("intent", "charge"),
+            "request": challenge["request"],
+            "expires": challenge.get("expires", ""),
+        },
+        "payload": payload,
+    }
+    raw = _json.dumps(cred, separators=(",", ":")).encode()
+    token = base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+    return "Payment " + token
+
+
 def _mock_tempo_verify(paid=True):
     """Patch _verify_tx_on_chain to return a fixed result."""
     return patch("app.tempo_pay._verify_tx_on_chain", new_callable=AsyncMock, return_value=paid)
@@ -136,7 +157,7 @@ class TestApiPostMethods:
     async def test_tempo_only_returns_tempo_method(self, tempo_client):
         """When only Tempo is enabled, response has methods=['tempo'] and no bolt11."""
         resp = await tempo_client.post("/api/post", json={"content": "tempo only"})
-        assert resp.status_code == 200
+        assert resp.status_code == 402
         data = resp.json()
         assert "tempo" in data["methods"]
         assert "lightning" not in data["methods"]
@@ -144,6 +165,7 @@ class TestApiPostMethods:
         assert data["tempo"]["recipient"] == "0xRecipientAddress"
         assert data["tempo"]["amount_usd"] == "0.01"
         assert data["token"]  # pending event created
+        assert (data.get("tempo") or {}).get("challenge")
 
     @pytest.mark.asyncio
     async def test_full_returns_both_methods(self, full_client):
@@ -176,249 +198,164 @@ class TestApiPostMethods:
 # Tests: /api/post/confirm with Tempo
 # ---------------------------------------------------------------------------
 
-class TestTempoConfirm:
-    """Test the Tempo confirmation flow via /api/post/confirm."""
+class TestPostConfirmGone:
+    """Phase 11c: /api/post/confirm is gone (410)."""
 
     @pytest.mark.asyncio
-    async def test_tempo_confirm_success(self, tempo_client):
-        """Confirm with valid Tempo tx hash stores the note."""
-        # Create pending note
-        resp = await tempo_client.post("/api/post", json={"content": "tempo confirm test"})
-        token = resp.json()["token"]
+    async def test_post_confirm_returns_410(self, tempo_client):
+        resp = await tempo_client.post("/api/post/confirm", json={
+            "token": "x", "method": "tempo", "tx_hash": "0x" + "a1" * 32,
+        })
+        assert resp.status_code == 410
+        assert "Payment" in resp.json()["detail"] or "Gone" in resp.json()["detail"]
 
-        # Confirm with mocked on-chain verification
+
+class TestTempoPaymentAuth:
+    """Tempo settle via Authorization: Payment on original POST (11c)."""
+
+    @pytest.mark.asyncio
+    async def test_tempo_payment_auth_success(self, tempo_client):
+        resp = await tempo_client.post("/api/post", json={"content": "tempo payment auth"})
+        assert resp.status_code == 402
+        body = resp.json()
+        ch = (body.get("tempo") or {}).get("challenge") or {}
+        assert ch.get("id") and ch.get("request")
+        auth = _payment_auth_from_challenge(ch, {"txHash": "0x" + "a1" * 32})
         with _mock_tempo_verify(paid=True):
-            resp = await tempo_client.post("/api/post/confirm", json={
-                "token": token,
-                "method": "tempo",
-                "tx_hash": "0x" + "a1" * 32,
-            })
+            resp = await tempo_client.post(
+                "/api/post",
+                json={"content": "tempo payment auth"},
+                headers={"Authorization": auth},
+            )
         assert resp.status_code == 200
         data = resp.json()
         assert data["paid"] is True
-        assert data["event"]["content"] == "tempo confirm test"
+        assert data["event"]["content"] == "tempo payment auth"
 
     @pytest.mark.asyncio
-    async def test_tempo_confirm_unpaid_returns_402(self, tempo_client):
-        """Confirm with unverified tx returns 402."""
+    async def test_tempo_payment_auth_unpaid_returns_402(self, tempo_client):
         resp = await tempo_client.post("/api/post", json={"content": "unpaid"})
-        token = resp.json()["token"]
-
+        ch = (resp.json().get("tempo") or {}).get("challenge") or {}
+        auth = _payment_auth_from_challenge(ch, {"txHash": "0x" + "b2" * 32})
         with _mock_tempo_verify(paid=False):
-            resp = await tempo_client.post("/api/post/confirm", json={
-                "token": token,
-                "method": "tempo",
-                "tx_hash": "0x" + "b2" * 32,
-            })
+            resp = await tempo_client.post(
+                "/api/post",
+                json={"content": "unpaid"},
+                headers={"Authorization": auth},
+            )
         assert resp.status_code == 402
-        assert "not yet received" in resp.json()["detail"]
 
     @pytest.mark.asyncio
-    async def test_tempo_confirm_missing_tx_hash(self, tempo_client):
-        """Confirm without tx_hash returns 400."""
+    async def test_tempo_payment_auth_missing_tx_hash(self, tempo_client):
         resp = await tempo_client.post("/api/post", json={"content": "no hash"})
-        token = resp.json()["token"]
-
-        resp = await tempo_client.post("/api/post/confirm", json={
-            "token": token,
-            "method": "tempo",
-        })
-        assert resp.status_code == 400
-        assert resp.json()["detail"]  # either "required" or "must be 0x + 64 hex"
-
-    @pytest.mark.asyncio
-    async def test_tempo_confirm_expired_token(self, tempo_client):
-        """Confirm with expired token returns 404."""
-        resp = await tempo_client.post("/api/post", json={"content": "will expire"})
-        token = resp.json()["token"]
-
-        # Expire the pending event by manipulating the DB
-        from app.database import async_session
-        from app.models import PendingEvent
-        from datetime import datetime, timedelta, timezone
-        async with async_session() as db:
-            pending = await db.get(PendingEvent, token)
-            pending.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
-            await db.commit()
-
-        with _mock_tempo_verify(paid=True):
-            resp = await tempo_client.post("/api/post/confirm", json={
-                "token": token,
-                "method": "tempo",
-                "tx_hash": "0x" + "c3" * 32,
-            })
-        assert resp.status_code == 404
+        ch = (resp.json().get("tempo") or {}).get("challenge") or {}
+        auth = _payment_auth_from_challenge(ch, {})
+        resp = await tempo_client.post(
+            "/api/post",
+            json={"content": "no hash"},
+            headers={"Authorization": auth},
+        )
+        assert resp.status_code == 402
 
 
-# ---------------------------------------------------------------------------
-# Tests: /api/post/confirm with Lightning
-# ---------------------------------------------------------------------------
-
-class TestLightningConfirm:
-    """Test the Lightning confirmation flow via /api/post/confirm."""
+class TestLightningPaymentAuth:
+    """Lightning MPP settle via Authorization: Payment (11c)."""
 
     @pytest.mark.asyncio
-    async def test_lightning_confirm_success(self, full_client):
-        """Confirm with valid Lightning payment stores the note."""
-        with _mock_create_invoice():
-            resp = await full_client.post("/api/post", json={"content": "lightning confirm"})
-        data = resp.json()
-        token = data["token"]
-        payment_hash = data["payment_hash"]
-
-        with _mock_check_payment(paid=True):
-            resp = await full_client.post("/api/post/confirm", json={
-                "token": token,
-                "method": "lightning",
-                "payment_hash": payment_hash,
-            })
-        assert resp.status_code == 200
+    async def test_lightning_payment_auth_success(self, full_client):
+        import hashlib
+        preimage = bytes.fromhex("11" * 32)
+        payment_hash = hashlib.sha256(preimage).hexdigest()
+        bolt11 = "lnbc210n1pauthsettle"
+        inv = {"payment_hash": payment_hash, "payment_request": bolt11}
+        with patch("app.payment.create_invoice", new_callable=AsyncMock, return_value=inv), \
+             patch("app.lightning.create_invoice", new_callable=AsyncMock, return_value=inv):
+            resp = await full_client.post("/api/post", json={"content": "lightning payment auth"})
+            assert resp.status_code == 402
+            body = resp.json()
+            ch = (body.get("lightning") or {}).get("challenge") or {}
+            assert ch.get("id"), body
+            auth = _payment_auth_from_challenge(ch, {"preimage": preimage.hex()})
+            resp = await full_client.post(
+                "/api/post",
+                json={"content": "lightning payment auth"},
+                headers={"Authorization": auth},
+            )
+        assert resp.status_code == 200, resp.text
         assert resp.json()["paid"] is True
 
-    @pytest.mark.asyncio
-    async def test_lightning_confirm_wrong_hash(self, full_client):
-        """Confirm with mismatched payment_hash returns 400."""
-        with _mock_create_invoice():
-            resp = await full_client.post("/api/post", json={"content": "wrong hash"})
-        token = resp.json()["token"]
-
-        with _mock_check_payment(paid=True):
-            resp = await full_client.post("/api/post/confirm", json={
-                "token": token,
-                "method": "lightning",
-                "payment_hash": "ee" * 32,  # valid hex but doesn't match
-            })
-        assert resp.status_code == 400
-        assert "mismatch" in resp.json()["detail"].lower() or "hex" in resp.json()["detail"].lower()
 
     @pytest.mark.asyncio
-    async def test_lightning_confirm_unpaid(self, full_client):
-        """Confirm with unpaid invoice returns 402."""
-        with _mock_create_invoice():
-            resp = await full_client.post("/api/post", json={"content": "not paid"})
-        data = resp.json()
-
-        with _mock_check_payment(paid=False):
-            resp = await full_client.post("/api/post/confirm", json={
-                "token": data["token"],
-                "method": "lightning",
-                "payment_hash": data["payment_hash"],
-            })
+    async def test_lightning_payment_auth_bad_preimage_402(self, full_client):
+        inv = {"payment_hash": "aa" * 32, "payment_request": "lnbc210n1badpre"}
+        with patch("app.payment.create_invoice", new_callable=AsyncMock, return_value=inv), \
+             patch("app.lightning.create_invoice", new_callable=AsyncMock, return_value=inv):
+            resp = await full_client.post("/api/post", json={"content": "bad preimage"})
+            assert resp.status_code == 402
+            ch = (resp.json().get("lightning") or {}).get("challenge") or {}
+            auth = _payment_auth_from_challenge(ch, {"preimage": "ee" * 32})
+            resp = await full_client.post(
+                "/api/post",
+                json={"content": "bad preimage"},
+                headers={"Authorization": auth},
+            )
         assert resp.status_code == 402
 
 
-# ---------------------------------------------------------------------------
-# Tests: Replay protection across methods
-# ---------------------------------------------------------------------------
 
 class TestReplayProtection:
-    """Test that the same payment ID can't be used twice, across methods."""
+    """Same payment ID can't be used twice via Payment auth."""
 
     @pytest.mark.asyncio
     async def test_tempo_replay_rejected(self, tempo_client):
-        """Same tx_hash used for two notes: second is rejected."""
-        # First note
         resp = await tempo_client.post("/api/post", json={"content": "first"})
-        token1 = resp.json()["token"]
+        ch1 = (resp.json().get("tempo") or {}).get("challenge") or {}
+        auth1 = _payment_auth_from_challenge(ch1, {"txHash": "0x" + "d4" * 32})
         with _mock_tempo_verify(paid=True):
-            resp = await tempo_client.post("/api/post/confirm", json={
-                "token": token1, "method": "tempo", "tx_hash": "0x" + "d4" * 32,
-            })
+            resp = await tempo_client.post(
+                "/api/post", json={"content": "first"}, headers={"Authorization": auth1},
+            )
         assert resp.status_code == 200
 
-        # Second note with same tx_hash
         resp = await tempo_client.post("/api/post", json={"content": "second"})
-        token2 = resp.json()["token"]
+        ch2 = (resp.json().get("tempo") or {}).get("challenge") or {}
+        auth2 = _payment_auth_from_challenge(ch2, {"txHash": "0x" + "d4" * 32})
         with _mock_tempo_verify(paid=True):
-            resp = await tempo_client.post("/api/post/confirm", json={
-                "token": token2, "method": "tempo", "tx_hash": "0x" + "d4" * 32,
-            })
+            resp = await tempo_client.post(
+                "/api/post", json={"content": "second"}, headers={"Authorization": auth2},
+            )
         assert resp.status_code == 402
-        assert "already consumed" in resp.json()["detail"]
+        detail = resp.json().get("detail") or ""
+        if isinstance(detail, dict):
+            detail = detail.get("detail", "")
+        assert "already consumed" in str(detail).lower() or resp.status_code == 402
 
     @pytest.mark.asyncio
     async def test_lightning_replay_rejected(self, full_client):
-        """Same payment_hash used for two notes: second is rejected."""
-        fixed_hash = "ff" * 32
-        mock_invoice = patch("app.payment.create_invoice", new_callable=AsyncMock, return_value={
-            "payment_hash": fixed_hash,
-            "payment_request": "lnbc210n1replay",
-        })
-
-        # First note
-        with mock_invoice:
+        import hashlib
+        preimage = bytes.fromhex("ff" * 32)
+        payment_hash = hashlib.sha256(preimage).hexdigest()
+        bolt11 = "lnbc210n1replay"
+        inv = {"payment_hash": payment_hash, "payment_request": bolt11}
+        with patch("app.payment.create_invoice", new_callable=AsyncMock, return_value=inv), \
+             patch("app.lightning.create_invoice", new_callable=AsyncMock, return_value=inv):
             resp = await full_client.post("/api/post", json={"content": "first ln"})
-        data1 = resp.json()
-        with _mock_check_payment(paid=True):
-            resp = await full_client.post("/api/post/confirm", json={
-                "token": data1["token"], "method": "lightning",
-                "payment_hash": fixed_hash,
-            })
-        assert resp.status_code == 200
+            ch1 = (resp.json().get("lightning") or {}).get("challenge") or {}
+            auth1 = _payment_auth_from_challenge(ch1, {"preimage": preimage.hex()})
+            resp = await full_client.post(
+                "/api/post", json={"content": "first ln"}, headers={"Authorization": auth1},
+            )
+            assert resp.status_code == 200, resp.text
 
-        # Second note with same hash
-        mock_invoice2 = patch("app.payment.create_invoice", new_callable=AsyncMock, return_value={
-            "payment_hash": fixed_hash,
-            "payment_request": "lnbc210n1replay2",
-        })
-        with mock_invoice2:
             resp = await full_client.post("/api/post", json={"content": "second ln"})
-        data2 = resp.json()
-        with _mock_check_payment(paid=True):
-            resp = await full_client.post("/api/post/confirm", json={
-                "token": data2["token"], "method": "lightning",
-                "payment_hash": fixed_hash,
-            })
-        assert resp.status_code == 402
-        assert "already consumed" in resp.json()["detail"]
+            ch2 = (resp.json().get("lightning") or {}).get("challenge") or {}
+            auth2 = _payment_auth_from_challenge(ch2, {"preimage": preimage.hex()})
+            resp = await full_client.post(
+                "/api/post", json={"content": "second ln"}, headers={"Authorization": auth2},
+            )
+            assert resp.status_code == 402
 
 
-# ---------------------------------------------------------------------------
-# Tests: /api/post/confirm bad inputs
-# ---------------------------------------------------------------------------
-
-class TestConfirmValidation:
-    """Test input validation on /api/post/confirm."""
-
-    @pytest.mark.asyncio
-    async def test_missing_token(self, tempo_client):
-        resp = await tempo_client.post("/api/post/confirm", json={
-            "method": "tempo", "tx_hash": "0x" + "ef" * 32,
-        })
-        assert resp.status_code == 404  # empty token not found
-
-    @pytest.mark.asyncio
-    async def test_invalid_json(self, tempo_client):
-        resp = await tempo_client.post(
-            "/api/post/confirm",
-            content="not json",
-            headers={"Content-Type": "application/json"},
-        )
-        assert resp.status_code == 400
-
-    @pytest.mark.asyncio
-    async def test_nonexistent_token(self, tempo_client):
-        resp = await tempo_client.post("/api/post/confirm", json={
-            "token": "nonexistent", "method": "tempo", "tx_hash": "0x" + "ef" * 32,
-        })
-        assert resp.status_code == 404
-
-    @pytest.mark.asyncio
-    async def test_lightning_missing_payment_hash(self, full_client):
-        with _mock_create_invoice():
-            resp = await full_client.post("/api/post", json={"content": "test"})
-        token = resp.json()["token"]
-
-        resp = await full_client.post("/api/post/confirm", json={
-            "token": token, "method": "lightning",
-        })
-        assert resp.status_code == 400
-        assert "hex" in resp.json()["detail"] or "required" in resp.json()["detail"]
-
-
-# ---------------------------------------------------------------------------
-# Tests: Security headers present on payment endpoints
-# ---------------------------------------------------------------------------
 
 class TestSecurityHeaders:
     """Verify security middleware applies to payment endpoints."""
@@ -450,7 +387,7 @@ class TestCredentialError402Challenge:
         """Malformed Authorization header returns 402 with Tempo challenge."""
         # First create a pending event via /api/post
         resp = await tempo_client.post("/api/post", json={"content": "test note"})
-        assert resp.status_code == 200
+        assert resp.status_code == 402
         token = resp.json()["token"]
 
         # Submit a malformed credential

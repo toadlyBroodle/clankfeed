@@ -151,6 +151,38 @@ def build_mpp_challenge(
     return "Payment " + ", ".join(parts)
 
 
+
+
+def parse_mpp_challenge_header(header: str) -> dict[str, str]:
+    """Parse WWW-Authenticate: Payment ... into auth-param dict."""
+    params: dict[str, str] = {}
+    body = header[len("Payment "):] if header.startswith("Payment ") else header
+    for part in body.split(", "):
+        if "=" not in part:
+            continue
+        key, val = part.split("=", 1)
+        params[key.strip()] = val.strip().strip('"')
+    return params
+
+
+def mpp_challenge_echo(
+    amount_sats: int,
+    payment_hash: str,
+    invoice: str,
+    description: str = "",
+) -> dict[str, str]:
+    """Challenge fields for JSON 402 bodies (browser multi-WWW-Authenticate is flaky)."""
+    header = build_mpp_challenge(amount_sats, payment_hash, invoice, description)
+    params = parse_mpp_challenge_header(header)
+    return {
+        "id": params.get("id", ""),
+        "realm": params.get("realm", ""),
+        "method": params.get("method", "lightning"),
+        "intent": params.get("intent", "charge"),
+        "request": params.get("request", ""),
+        "expires": params.get("expires", ""),
+    }
+
 # ---------------------------------------------------------------------------
 # Parse MPP credential (Authorization header)
 # ---------------------------------------------------------------------------

@@ -161,6 +161,97 @@ function buildStripePaymentAuth(challenge, spt) {
   return 'Payment ' + _b64urlEncodeBytes(bytes);
 }
 
+
+/** Parse MPP Payment challenge from 402 JSON echo or WWW-Authenticate header. */
+function parsePaymentChallenge(resp, body, method) {
+  method = method || 'lightning';
+  if (body) {
+    const block = body[method] || (method === 'lightning' ? body.lightning : null);
+    if (block && block.challenge && block.challenge.id && block.challenge.request) {
+      return block.challenge;
+    }
+  }
+  const wwwAll = [];
+  if (resp && resp.headers) {
+    // get() returns first; browsers may join — scan full header string
+    const www = resp.headers.get('www-authenticate') || '';
+    if (www) wwwAll.push(www);
+  }
+  const joined = wwwAll.join(', ');
+  // Prefer method-matched Payment challenge
+  const re = /Payment\s+((?:[^,]|,(?!\s*[A-Za-z]+=))*)/gi;
+  let m;
+  while ((m = re.exec(joined)) !== null) {
+    const chunk = m[1] || '';
+    if (chunk.indexOf('method="' + method + '"') < 0 && chunk.indexOf("method='" + method + "'") < 0) {
+      continue;
+    }
+    const params = {};
+    chunk.replace(/(\w+)="([^"]*)"/g, (_, k, v) => { params[k] = v; });
+    if (params.id && params.request) {
+      return {
+        id: params.id,
+        realm: params.realm || '',
+        method: params.method || method,
+        intent: params.intent || 'charge',
+        request: params.request,
+        expires: params.expires || '',
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * Build Authorization: Payment <base64url> for Lightning MPP settle.
+ * challenge = data.lightning.challenge echo; preimage = 64-hex from WebLN/BC.
+ */
+function buildLightningPaymentAuth(challenge, preimage) {
+  if (!challenge || !challenge.id || !challenge.request || !preimage) {
+    throw new Error('Missing Lightning challenge or preimage');
+  }
+  const pre = String(preimage).replace(/^0x/i, '').toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(pre)) {
+    throw new Error('preimage must be 64 hex chars');
+  }
+  const credential = {
+    challenge: {
+      id: challenge.id,
+      realm: challenge.realm || '',
+      method: challenge.method || 'lightning',
+      intent: challenge.intent || 'charge',
+      request: challenge.request,
+      expires: challenge.expires || '',
+    },
+    payload: { preimage: pre },
+  };
+  const bytes = new TextEncoder().encode(JSON.stringify(credential));
+  return 'Payment ' + _b64urlEncodeBytes(bytes);
+}
+
+/**
+ * Build Authorization: Payment <base64url> for Tempo settle.
+ * challenge = data.tempo.challenge echo; txHash = 0x + 64 hex.
+ */
+function buildTempoPaymentAuth(challenge, txHash) {
+  if (!challenge || !challenge.id || !challenge.request || !txHash) {
+    throw new Error('Missing Tempo challenge or tx hash');
+  }
+  const credential = {
+    challenge: {
+      id: challenge.id,
+      realm: challenge.realm || '',
+      method: challenge.method || 'tempo',
+      intent: challenge.intent || 'charge',
+      request: challenge.request,
+      expires: challenge.expires || '',
+    },
+    payload: { txHash: txHash },
+  };
+  const bytes = new TextEncoder().encode(JSON.stringify(credential));
+  return 'Payment ' + _b64urlEncodeBytes(bytes);
+}
+
 /** Pay BOLT11 via WebLN / Bitcoin Connect; return hex preimage (no 0x). */
 async function payBolt11ForPreimage(bolt11, statusEl) {
   const setStatus = (msg, color) => {

@@ -198,21 +198,55 @@ async function saveProfile() {
       showOwnAccount();
     } else if (data.token) {
       data._title = 'Pay to update profile:';
-      showPaymentWidget(data, async (token, paymentId, method) => {
-        const body = { token, method };
-        if (method === 'tempo') body.tx_hash = paymentId;
-        else body.payment_hash = paymentId;
-        const cr = await apiFetch('/api/post/confirm', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify(body),
-        });
-        const cd = await cr.json();
-        if (cd.paid || cd.event) {
-          status.textContent = 'Saved!';
-          status.style.color = 'var(--accent)';
-          hidePaymentWidget();
-          showOwnAccount();
+      const eventOpts = {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({event: signed}),
+      };
+      showPaymentWidget(data, async (token, paymentId, method, preimage) => {
+        try {
+          let auth = null;
+          if (method === 'stripe') {
+            const ch = (data.stripe && data.stripe.challenge) || {};
+            auth = buildStripePaymentAuth(ch, paymentId);
+          } else if (method === 'tempo') {
+            const ch = (data.tempo && data.tempo.challenge)
+              || parsePaymentChallenge(null, data, 'tempo') || {};
+            auth = buildTempoPaymentAuth(ch, paymentId);
+          } else if (method === 'lightning') {
+            const ch = (data.lightning && data.lightning.challenge)
+              || parsePaymentChallenge(null, data, 'lightning') || {};
+            if (!preimage) {
+              status.textContent = 'Connect a Lightning wallet to settle (preimage required)';
+              status.style.color = 'var(--error)';
+              return;
+            }
+            auth = buildLightningPaymentAuth(ch, preimage);
+          } else {
+            status.textContent = 'Unsupported payment method';
+            status.style.color = 'var(--error)';
+            return;
+          }
+          const headers = Object.assign(
+            {},
+            eventOpts.headers || {},
+            { Authorization: auth, 'X-Requested-With': 'XMLHttpRequest' },
+          );
+          const cr = await authFetch('/api/v1/events', Object.assign({}, eventOpts, { headers }));
+          const cd = await cr.json().catch(() => ({}));
+          if (cd.paid || cd.event) {
+            status.textContent = 'Saved!';
+            status.style.color = 'var(--accent)';
+            hidePaymentWidget();
+            showOwnAccount();
+          } else {
+            status.textContent = (typeof cd.detail === 'string' ? cd.detail : null)
+              || 'Payment settle failed';
+            status.style.color = 'var(--error)';
+          }
+        } catch (err) {
+          status.textContent = (err && err.message) || 'Payment settle failed';
+          status.style.color = 'var(--error)';
         }
       }, null, document.getElementById('section-profile'));
     } else {

@@ -175,9 +175,9 @@ async def test_h5_post_and_vote_pos_send_xrw(live_server):
 
 @pytest.mark.asyncio
 async def test_h5_confirm_path_sends_xrw_via_route_mock(live_server):
-    """Route-mock payment_required → WebLN pay → confirm POST must carry XRW.
+    """Route-mock payment_required → WebLN pay → Payment-auth retry must carry XRW.
 
-    test-mode never reaches confirm naturally; this is the gap 6.7 closes.
+    Phase 11c: settle is Authorization: Payment on the original POST (not /confirm).
     """
     playwright = pytest.importorskip("playwright.async_api")
     async_playwright = playwright.async_playwright
@@ -185,6 +185,17 @@ async def test_h5_confirm_path_sends_xrw_via_route_mock(live_server):
     base = live_server["base"]
     pay_hash = "ab" * 32
     fake_token = "tok-" + ("cd" * 16)
+    # Minimal challenge echo the client needs for buildLightningPaymentAuth
+    challenge = {
+        "id": "challenge-id-h5",
+        "realm": "clankfeed.com",
+        "method": "lightning",
+        "intent": "charge",
+        "request": "dGVzdA",
+        "expires": "2099-01-01T00:00:00Z",
+    }
+    import json as _json
+    challenge_json = _json.dumps(challenge)
 
     with httpx.Client(
         base_url=base, timeout=10.0, headers={"X-Requested-With": "XMLHttpRequest"}
@@ -201,28 +212,31 @@ async def test_h5_confirm_path_sends_xrw_via_route_mock(live_server):
         async def _route_handler(route):
             req = route.request
             url = req.url
-            if req.method == "POST" and f"/api/v1/events/{note_id}/vote" in url and "/confirm" not in url:
+            if req.method == "POST" and f"/api/v1/events/{note_id}/vote" in url:
+                auth = (req.headers.get("authorization") or "")
+                if auth.startswith("Payment ") or auth.startswith("L402 "):
+                    await route.fulfill(
+                        status=200,
+                        content_type="application/json",
+                        body=(
+                            '{"voted":true,"new_sats_clank":42,"new_sats_ext":0,'
+                            '"direction":-1,"amount_sats":21}'
+                        ),
+                    )
+                    return
+                body = (
+                    '{"status":"payment_required","token":"%s","event_id":"%s",'
+                    '"direction":-1,"methods":["lightning"],'
+                    '"bolt11":"lnbc1h5xrwtestinvoice","payment_hash":"%s",'
+                    '"lightning":{"bolt11":"lnbc1h5xrwtestinvoice",'
+                    '"payment_hash":"%s","amount_sats":21,"expires_in":600,'
+                    '"challenge":%s}}'
+                    % (fake_token, note_id, pay_hash, pay_hash, challenge_json)
+                )
                 await route.fulfill(
                     status=402,
                     content_type="application/json",
-                    body=(
-                        '{"status":"payment_required","token":"%s","event_id":"%s",'
-                        '"direction":-1,"methods":["lightning"],'
-                        '"bolt11":"lnbc1h5xrwtestinvoice","payment_hash":"%s",'
-                        '"lightning":{"bolt11":"lnbc1h5xrwtestinvoice",'
-                        '"payment_hash":"%s","amount_sats":21,"expires_in":600}}'
-                        % (fake_token, note_id, pay_hash, pay_hash)
-                    ),
-                )
-                return
-            if req.method == "POST" and f"/api/v1/events/{note_id}/vote/confirm" in url:
-                await route.fulfill(
-                    status=200,
-                    content_type="application/json",
-                    body=(
-                        '{"voted":true,"new_sats_clank":42,"new_sats_ext":0,'
-                        '"direction":-1,"amount_sats":21}'
-                    ),
+                    body=body,
                 )
                 return
             await route.continue_()
@@ -237,13 +251,14 @@ async def test_h5_confirm_path_sends_xrw_via_route_mock(live_server):
         await page.goto(base, wait_until="domcontentloaded", timeout=30_000)
         await page.wait_for_selector(f"#note-{note_id}", timeout=15_000)
 
-        # Install WebLN mock before vote so payInvoice takes the wallet path
-        # and immediately invokes onPaid → apiFetch(.../vote/confirm).
+        # Valid 64-hex preimage for buildLightningPaymentAuth
         await page.evaluate(
             """() => {
               window.__bcConnected = true;
-              window.webln = { sendPayment: async () => ({ preimage: 'x' }) };
-            }"""
+              window.webln = {
+                sendPayment: async () => ({ preimage: '%s' })
+              };
+            }""" % ("11" * 32)
         )
 
         await page.click(f'#note-{note_id} button[title="Downvote"]')
@@ -251,62 +266,69 @@ async def test_h5_confirm_path_sends_xrw_via_route_mock(live_server):
         await page.click(f"#vote-submit-{note_id}")
 
         for _ in range(80):
-            if any(f"/vote/confirm" in u for _, u, _ in captured):
+            if any(
+                f"/api/v1/events/{note_id}/vote" in u
+                and (h.get("authorization") or "").startswith("Payment ")
+                for _, u, h in captured
+            ):
                 break
             await page.wait_for_timeout(100)
 
-        confirm_hdrs = [
-            h for _, u, h in captured if f"/api/v1/events/{note_id}/vote/confirm" in u
+        settle_hdrs = [
+            h for _, u, h in captured
+            if f"/api/v1/events/{note_id}/vote" in u
+            and (h.get("authorization") or "").startswith("Payment ")
         ]
-        assert confirm_hdrs, (
-            f"expected POST vote/confirm after payment_required; saw: "
-            f"{[u for _, u, _ in captured]}"
+        assert settle_hdrs, (
+            f"expected Payment-auth vote settle; saw: "
+            f"{[(u, (h.get('authorization') or '')[:40]) for _, u, h in captured]}"
         )
-        assert _xrw(confirm_hdrs[-1]) == "XMLHttpRequest", (
-            f"apiFetch vote/confirm missing XRW; headers={confirm_hdrs[-1]}"
+        assert _xrw(settle_hdrs[-1]) == "XMLHttpRequest", (
+            f"Payment settle missing XRW; headers={settle_hdrs[-1]}"
         )
 
-        # Also exercise post confirm via apiFetch directly (same wrapper)
+        # Also exercise apiFetch POST directly (same XRW wrapper)
         captured.clear()
         await page.evaluate(
             """async () => {
-              await apiFetch('/api/post/confirm', {
+              await apiFetch('/api/v1/post', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({token: 'x', method: 'lightning', payment_hash: 'aa'}),
+                body: JSON.stringify({content: 'h5-xrw-direct'}),
               });
             }"""
         )
         for _ in range(40):
-            if any("/api/post/confirm" in u for _, u, _ in captured):
+            if any("/api/v1/post" in u for _, u, _ in captured):
                 break
             await page.wait_for_timeout(100)
-        post_confirm = [h for _, u, h in captured if "/api/post/confirm" in u]
-        assert post_confirm, f"expected apiFetch /api/post/confirm; saw: {[u for _, u, _ in captured]}"
-        assert _xrw(post_confirm[-1]) == "XMLHttpRequest"
+        post_hdrs = [h for _, u, h in captured if "/api/v1/post" in u]
+        assert post_hdrs, f"expected apiFetch /api/v1/post; saw: {[u for _, u, _ in captured]}"
+        assert _xrw(post_hdrs[-1]) == "XMLHttpRequest"
 
-        # Adversarial: bare fetch must NOT invent XRW — proves we observe real headers
+        # Adversarial: bare fetch must NOT invent XRW
         captured.clear()
         await page.evaluate(
             """async () => {
-              await fetch('/api/post/confirm', {
+              await fetch('/api/v1/post', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({token: 'y', method: 'lightning', payment_hash: 'bb'}),
+                body: JSON.stringify({content: 'h5-xrw-bare'}),
               });
             }"""
         )
         for _ in range(40):
-            if any("/api/post/confirm" in u for _, u, _ in captured):
+            if any("/api/v1/post" in u for _, u, _ in captured):
                 break
             await page.wait_for_timeout(100)
-        bare = [h for _, u, h in captured if "/api/post/confirm" in u]
-        assert bare, "expected bare fetch /api/post/confirm"
+        bare = [h for _, u, h in captured if "/api/v1/post" in u]
+        assert bare, "expected bare fetch /api/v1/post"
         assert _xrw(bare[-1]) is None, (
             f"adversarial bare fetch unexpectedly had XRW; headers={bare[-1]}"
         )
 
         await browser.close()
+
 
 
 @pytest.mark.asyncio

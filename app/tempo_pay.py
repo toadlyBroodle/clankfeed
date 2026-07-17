@@ -65,6 +65,33 @@ def build_tempo_challenge(amount_usd: str, description: str = "") -> str:
     return "Payment " + ", ".join(parts)
 
 
+
+
+def parse_tempo_challenge_header(header: str) -> dict[str, str]:
+    """Parse WWW-Authenticate: Payment (tempo) into auth-param dict."""
+    params: dict[str, str] = {}
+    body = header[len("Payment "):] if header.startswith("Payment ") else header
+    for part in body.split(", "):
+        if "=" not in part:
+            continue
+        key, val = part.split("=", 1)
+        params[key.strip()] = val.strip().strip('"')
+    return params
+
+
+def tempo_challenge_echo(amount_usd: str, description: str = "") -> dict[str, str]:
+    """Challenge fields for JSON 402 bodies (browser multi-WWW-Authenticate is flaky)."""
+    header = build_tempo_challenge(amount_usd, description)
+    params = parse_tempo_challenge_header(header)
+    return {
+        "id": params.get("id", ""),
+        "realm": params.get("realm", ""),
+        "method": params.get("method", "tempo"),
+        "intent": params.get("intent", "charge"),
+        "request": params.get("request", ""),
+        "expires": params.get("expires", ""),
+    }
+
 async def verify_tempo_credential(credential: dict) -> bool:
     """Verify a Tempo stablecoin payment credential.
 

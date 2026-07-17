@@ -314,55 +314,60 @@ document.getElementById('post-form').addEventListener('submit', async (e) => {
         || ((data.methods || []).length > 0);
       if (hasPay) {
         data._title = data._title || 'Pay to post your note:';
-        showPaymentWidget(data, async (token, paymentId, method) => {
+        showPaymentWidget(data, async (token, paymentId, method, preimage) => {
           const statusEl = document.getElementById('pw-stripe-status')
             || document.getElementById('pw-tempo-status')
             || document.getElementById('pw-ln-status');
-          if (method === 'stripe') {
-            try {
+          try {
+            let auth = null;
+            if (method === 'stripe') {
               const ch = (data.stripe && data.stripe.challenge) || {};
-              const auth = buildStripePaymentAuth(ch, paymentId);
-              const headers = Object.assign(
-                {},
-                postOpts.headers || {},
-                { Authorization: auth, 'X-Requested-With': 'XMLHttpRequest' },
-              );
-              const cr = await apiFetch('/api/v1/post', Object.assign({}, postOpts, { headers }));
-              const cd = await cr.json().catch(() => ({}));
-              if (cr.ok && cd.paid) {
-                document.getElementById('post-content').value = '';
-                clearReplyState();
-                btn.disabled = false;
-                btn.textContent = 'Post Note';
-                hidePaymentWidget();
-              } else if (statusEl) {
-                statusEl.textContent = (typeof cd.detail === 'string' ? cd.detail : null)
-                  || 'Stripe settle failed';
-                statusEl.style.color = 'var(--error)';
+              auth = buildStripePaymentAuth(ch, paymentId);
+            } else if (method === 'tempo') {
+              const ch = (data.tempo && data.tempo.challenge)
+                || parsePaymentChallenge(null, data, 'tempo') || {};
+              auth = buildTempoPaymentAuth(ch, paymentId);
+            } else if (method === 'lightning') {
+              const ch = (data.lightning && data.lightning.challenge)
+                || parsePaymentChallenge(null, data, 'lightning') || {};
+              if (!preimage) {
+                if (statusEl) {
+                  statusEl.textContent = 'Connect a Lightning wallet to settle (preimage required)';
+                  statusEl.style.color = 'var(--error)';
+                }
+                return;
               }
-            } catch (err) {
+              auth = buildLightningPaymentAuth(ch, preimage);
+            } else {
               if (statusEl) {
-                statusEl.textContent = (err && err.message) || 'Stripe settle failed';
+                statusEl.textContent = 'Unsupported payment method';
                 statusEl.style.color = 'var(--error)';
               }
+              return;
             }
-            return;
-          }
-          const conf = { token, method };
-          if (method === 'tempo') conf.tx_hash = paymentId;
-          else conf.payment_hash = paymentId;
-          const cr = await apiFetch('/api/post/confirm', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(conf),
-          });
-          const cd = await cr.json();
-          if (cd.paid) {
-            document.getElementById('post-content').value = '';
-            clearReplyState();
-            btn.disabled = false;
-            btn.textContent = 'Post Note';
-            hidePaymentWidget();
+            const headers = Object.assign(
+              {},
+              postOpts.headers || {},
+              { Authorization: auth, 'X-Requested-With': 'XMLHttpRequest' },
+            );
+            const cr = await apiFetch('/api/v1/post', Object.assign({}, postOpts, { headers }));
+            const cd = await cr.json().catch(() => ({}));
+            if (cr.ok && cd.paid) {
+              document.getElementById('post-content').value = '';
+              clearReplyState();
+              btn.disabled = false;
+              btn.textContent = 'Post Note';
+              hidePaymentWidget();
+            } else if (statusEl) {
+              statusEl.textContent = (typeof cd.detail === 'string' ? cd.detail : null)
+                || (method + ' settle failed');
+              statusEl.style.color = 'var(--error)';
+            }
+          } catch (err) {
+            if (statusEl) {
+              statusEl.textContent = (err && err.message) || 'Payment settle failed';
+              statusEl.style.color = 'var(--error)';
+            }
           }
         }, () => {
           btn.disabled = false;
@@ -679,50 +684,59 @@ function voteSuccess(eventId, direction, amount, newValue, newSatsExt) {
 function showVotePayment(eventId, direction, data) {
   const amount = (data.lightning && data.lightning.amount_sats) || (data.amount_sats) || 21;
   data._title = `Pay to downvote (${amount} sats):`;
-  showPaymentWidget(data, async (token, paymentId, method) => {
+  showPaymentWidget(data, async (token, paymentId, method, preimage) => {
     const status = document.getElementById(`vote-status-${eventId}`);
-    if (method === 'stripe') {
-      try {
+    try {
+      let auth = null;
+      if (method === 'stripe') {
         const ch = (data.stripe && data.stripe.challenge) || {};
-        const auth = buildStripePaymentAuth(ch, paymentId);
-        const voteBody = { direction, amount_sats: amount };
-        const resp = await apiFetch(`/api/v1/events/${eventId}/vote`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: auth,
-            'X-Requested-With': 'XMLHttpRequest',
-          },
-          body: JSON.stringify(voteBody),
-        });
-        const d = await resp.json().catch(() => ({}));
-        if (d.voted) {
-          voteSuccess(eventId, direction, amount, d.new_sats_clank, d.new_sats_ext);
-          hidePaymentWidget();
-        } else if (status) {
-          status.textContent = (typeof d.detail === 'string' ? d.detail : null) || 'Stripe settle failed';
-          status.style.color = 'var(--error)';
+        auth = buildStripePaymentAuth(ch, paymentId);
+      } else if (method === 'tempo') {
+        const ch = (data.tempo && data.tempo.challenge)
+          || parsePaymentChallenge(null, data, 'tempo') || {};
+        auth = buildTempoPaymentAuth(ch, paymentId);
+      } else if (method === 'lightning') {
+        const ch = (data.lightning && data.lightning.challenge)
+          || parsePaymentChallenge(null, data, 'lightning') || {};
+        if (!preimage) {
+          if (status) {
+            status.textContent = 'Connect a Lightning wallet to settle (preimage required)';
+            status.style.color = 'var(--error)';
+          }
+          return;
         }
-      } catch (err) {
+        auth = buildLightningPaymentAuth(ch, preimage);
+      } else {
         if (status) {
-          status.textContent = (err && err.message) || 'Stripe settle failed';
+          status.textContent = 'Unsupported payment method';
           status.style.color = 'var(--error)';
         }
+        return;
       }
-      return;
-    }
-    const body = { token, method };
-    if (method === 'tempo') body.tx_hash = paymentId;
-    else body.payment_hash = paymentId;
-    const resp = await apiFetch(`/api/v1/events/${eventId}/vote/confirm`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body),
-    });
-    const d = await resp.json();
-    if (d.voted) {
-      voteSuccess(eventId, direction, amount, d.new_sats_clank, d.new_sats_ext);
-      hidePaymentWidget();
+      const voteBody = { direction, amount_sats: amount };
+      const resp = await apiFetch(`/api/v1/events/${eventId}/vote`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: auth,
+          'X-Requested-With': 'XMLHttpRequest',
+        },
+        body: JSON.stringify(voteBody),
+      });
+      const d = await resp.json().catch(() => ({}));
+      if (d.voted) {
+        voteSuccess(eventId, direction, amount, d.new_sats_clank, d.new_sats_ext);
+        hidePaymentWidget();
+      } else if (status) {
+        status.textContent = (typeof d.detail === 'string' ? d.detail : null)
+          || (method + ' settle failed');
+        status.style.color = 'var(--error)';
+      }
+    } catch (err) {
+      if (status) {
+        status.textContent = (err && err.message) || 'Payment settle failed';
+        status.style.color = 'var(--error)';
+      }
     }
   }, null, document.getElementById(`vote-prompt-${eventId}`));
 }
