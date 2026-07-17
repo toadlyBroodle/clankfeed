@@ -314,3 +314,45 @@ class TestPhase13RedirectsClosed:
         spec = (ROOT / "docs" / "SPEC.md").read_text()
         assert "- [ ] ~~13.13~~ → **14.8**" not in spec
         assert "- [x] ~~13.13~~ → **14.8**" in spec
+
+
+# ---------------------------------------------------------------------------
+# Queue hygiene: parked / Phase-14-superseded items must not stay open `- [ ]`
+# (open boxes block [no-work] bail and invite futile re-picks)
+# ---------------------------------------------------------------------------
+
+
+def _spec() -> str:
+    return (ROOT / "docs" / "SPEC.md").read_text()
+
+
+class TestStaleOpenCheckboxesClosed:
+    def test_11b_kind1_client_signing_is_cancelled_not_open(self):
+        """Web client kind:1 local signing was deferred to 11c; Phase 14 removed login."""
+        spec = _spec()
+        assert "- [ ] Client-side kind:1 post signing" not in spec
+        idx = spec.find("Client-side kind:1 post signing")
+        assert idx >= 0
+        chunk = spec[max(0, idx - 120) : idx + 220]
+        assert "CANCELLED" in chunk
+        assert "Phase 14" in chunk or "14." in chunk
+
+    def test_7a7_stripe_live_smoke_is_deferred_not_open(self):
+        """7a.7 needs human Stripe keys; park note defers indefinitely."""
+        spec = _spec()
+        assert "- [ ] 7a.7" not in spec
+        assert "- [x] 7a.7" in spec
+        idx = spec.find("7a.7")
+        chunk = spec[idx : idx + 200]
+        assert "DEFERRED" in chunk or "deferred" in _lower(chunk) or "indefinitely" in _lower(chunk)
+
+    def test_tempo_mainnet_setup_has_no_open_checkboxes(self):
+        """Tempo mainnet 'when ready' list must not leave open `- [ ]` under parked onramp."""
+        spec = _spec()
+        start = spec.find("**Mainnet setup")
+        assert start >= 0
+        end = spec.find("### Phase 7b: Tempo Stablecoin Integration", start)
+        chunk = spec[start:end] if end > start else spec[start : start + 800]
+        assert "- [ ]" not in chunk
+        assert "TEMPO_TESTNET" in chunk or "rpc.tempo.xyz" in chunk
+        assert "deferred" in _lower(chunk) or "parked" in _lower(chunk) or "when ready" in _lower(chunk)
