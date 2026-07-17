@@ -5,9 +5,18 @@ POST — not legacy /api/post/confirm. L402 remains primary; MPP is the true
 credential fallthrough. Tempo tab stays as manual tx-hash fallback.
 """
 
+from __future__ import annotations
+
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -211,3 +220,217 @@ class TestPayInvoicePreimageSettle:
         """Adversarial: paid-without-preimage must surface an explicit no-settle message."""
         src = _auth_src()
         assert "preimage unavailable" in src.lower() or "Preimage unavailable" in src
+
+    def test_api_md_documents_status_preimage(self):
+        """11c.11: GET /api/v1/payments/status must document optional preimage."""
+        api = (ROOT / "docs" / "API.md").read_text()
+        idx = api.find("GET /api/v1/payments/status")
+        assert idx >= 0, "API.md must document GET /api/v1/payments/status"
+        chunk = api[idx : idx + 900]
+        assert "preimage" in chunk.lower(), (
+            "status response docs must mention optional preimage for QR settle"
+        )
+        assert "64" in chunk, "docs should note 64-hex preimage shape"
+
+
+def _free_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def _wait_health(base: str, timeout: float = 20.0) -> None:
+    deadline = time.time() + timeout
+    last_err = None
+    while time.time() < deadline:
+        try:
+            r = httpx.get(f"{base}/health", timeout=1.0)
+            if r.status_code == 200:
+                return
+        except Exception as e:  # noqa: BLE001 — poll until up
+            last_err = e
+        time.sleep(0.15)
+    raise RuntimeError(f"server did not become healthy: {last_err}")
+
+
+@pytest.fixture
+def live_server(tmp_path):
+    """Uvicorn subprocess with file SQLite (AUTH_ROOT_KEY=test-mode)."""
+    db_path = tmp_path / "phase11c.db"
+    port = _free_port()
+    env = os.environ.copy()
+    env.update(
+        {
+            "AUTH_ROOT_KEY": "test-mode",
+            "EXTERNAL_INGEST": "false",
+            "DATABASE_URL": f"sqlite+aiosqlite:///{db_path}",
+            "RELAY_PRIVATE_KEY": "a" * 64,
+            "TEMPO_RECIPIENT": "",
+            "BASE_URL": f"ws://127.0.0.1:{port}",
+        }
+    )
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "app.main:app",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+        ],
+        cwd=str(ROOT),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    base = f"http://127.0.0.1:{port}"
+    try:
+        _wait_health(base)
+        yield {"base": base, "db": db_path, "port": port}
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+async def _drive_pay_invoice_poll(page, base: str, *, pay_hash: str, status_body: dict):
+    """Load index, stub no-WebLN, mock status poll, invoke payInvoice QR path."""
+
+    async def _route(route):
+        req = route.request
+        if "/api/v1/payments/status" in req.url:
+            await route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(status_body),
+            )
+            return
+        await route.continue_()
+
+    await page.route("**/api/v1/payments/status**", _route)
+    await page.goto(base, wait_until="domcontentloaded", timeout=30_000)
+    await page.wait_for_selector("#post-form", timeout=15_000)
+
+    started = await page.evaluate(
+        """({ payHash }) => {
+          if (typeof payInvoice !== 'function') return false;
+          window.__bcConnected = false;
+          try { delete window.webln; } catch (e) { window.webln = undefined; }
+          window.__onPaidCalls = [];
+          const status = document.createElement('div');
+          status.id = 'pw-ln-status-11c10';
+          document.body.appendChild(status);
+          const canvas = document.createElement('canvas');
+          canvas.id = 'pw-qr-11c10';
+          document.body.appendChild(canvas);
+          const bolt = document.createElement('div');
+          bolt.id = 'pw-bolt11-11c10';
+          document.body.appendChild(bolt);
+          payInvoice(
+            'lnbc21u1phase11c10polltest',
+            payHash,
+            status,
+            async (pre) => { window.__onPaidCalls.push(pre); },
+            canvas,
+            bolt
+          );
+          return true;
+        }""",
+        {"payHash": pay_hash},
+    )
+    assert started, "payInvoice not available on page"
+
+
+async def _wait_on_paid(page, *, timeout_ms: int = 12_000) -> list:
+    """Poll __onPaidCalls without wait_for_function (CSP blocks unsafe-eval)."""
+    deadline = time.time() + (timeout_ms / 1000.0)
+    while time.time() < deadline:
+        calls = await page.evaluate("() => window.__onPaidCalls || []")
+        if calls:
+            return calls
+        await page.wait_for_timeout(250)
+    return await page.evaluate("() => window.__onPaidCalls || []")
+
+
+async def _wait_status_match(page, pattern: str, *, timeout_ms: int = 12_000) -> str:
+    import re
+
+    deadline = time.time() + (timeout_ms / 1000.0)
+    rx = re.compile(pattern, re.I)
+    last = ""
+    while time.time() < deadline:
+        last = await page.locator("#pw-ln-status-11c10").inner_text()
+        if rx.search(last or ""):
+            return last
+        await page.wait_for_timeout(250)
+    return last
+
+
+@pytest.mark.asyncio
+async def test_playwright_pay_invoice_poll_settles_with_preimage(live_server):
+    """11c.10: paid+preimage status poll must call onPaid(pre), not settle null."""
+    playwright = pytest.importorskip("playwright.async_api")
+    async_playwright = playwright.async_playwright
+
+    base = live_server["base"]
+    pay_hash = "cd" * 32
+    preimage = "ab" * 32
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+
+        await _drive_pay_invoice_poll(
+            page,
+            base,
+            pay_hash=pay_hash,
+            status_body={
+                "paid": True,
+                "payment_hash": pay_hash,
+                "preimage": preimage,
+            },
+        )
+
+        # Poll interval is 3s — wait for control flow, not just source strings
+        calls = await _wait_on_paid(page)
+        assert calls == [preimage], f"expected onPaid({preimage!r}); got {calls!r}"
+        status_text = await page.locator("#pw-ln-status-11c10").inner_text()
+        assert "unavailable" not in status_text.lower()
+        await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_playwright_pay_invoice_poll_null_preimage_no_settle(live_server):
+    """11c.10 adversarial: paid+null must show no-settle message and skip onPaid."""
+    playwright = pytest.importorskip("playwright.async_api")
+    async_playwright = playwright.async_playwright
+
+    base = live_server["base"]
+    pay_hash = "ef" * 32
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+
+        await _drive_pay_invoice_poll(
+            page,
+            base,
+            pay_hash=pay_hash,
+            status_body={"paid": True, "payment_hash": pay_hash},
+        )
+
+        status_text = await _wait_status_match(page, r"preimage unavailable")
+        assert "preimage unavailable" in status_text.lower(), (
+            f"expected no-settle message; status={status_text!r}"
+        )
+        # Give the poll path a beat past the status update; onPaid must stay empty
+        await page.wait_for_timeout(500)
+        calls = await page.evaluate("() => window.__onPaidCalls || []")
+        assert calls == [], f"must not settle without preimage; onPaid got {calls!r}"
+        await browser.close()
