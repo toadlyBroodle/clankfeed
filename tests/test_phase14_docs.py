@@ -305,13 +305,13 @@ class TestClaudeMdNonCustodialArchitecture:
 
 class TestPhase13RedirectsClosed:
     def test_phase13_checklist_redirects_are_checked(self):
-        spec = (ROOT / "docs" / "SPEC.md").read_text()
+        spec = (ROOT / "docs" / "SPEC-DONE.md").read_text()
         # Bundled redirect lines must not remain open `- [ ]`
         assert "- [ ] ~~13.9–13.13~~" not in spec
         assert "- [x] ~~13.9–13.13~~" in spec
 
     def test_phase13_review_followup_redirect_is_checked(self):
-        spec = (ROOT / "docs" / "SPEC.md").read_text()
+        spec = (ROOT / "docs" / "SPEC-DONE.md").read_text()
         assert "- [ ] ~~13.13~~ → **14.8**" not in spec
         assert "- [x] ~~13.13~~ → **14.8**" in spec
 
@@ -323,7 +323,7 @@ class TestPhase13RedirectsClosed:
 
 
 def _spec() -> str:
-    return (ROOT / "docs" / "SPEC.md").read_text()
+    return (ROOT / "docs" / "SPEC-DONE.md").read_text()
 
 
 class TestStaleOpenCheckboxesClosed:
