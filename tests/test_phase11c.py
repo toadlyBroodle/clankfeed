@@ -173,3 +173,41 @@ class TestPostConfirmRemoved:
     def test_adversarial_index_has_no_confirm_fetch(self):
         index = _index_src()
         assert "post/confirm" not in index
+
+    @pytest.mark.asyncio
+    async def test_openapi_post_confirm_advertises_410(self, paid_client):
+        """11c.8: OpenAPI must not advertise 200 for a 410 Gone endpoint."""
+        from app.main import app
+
+        app.openapi_schema = None
+        try:
+            resp = await paid_client.get("/openapi.json")
+            assert resp.status_code == 200
+            paths = resp.json().get("paths") or {}
+            op = (paths.get("/api/post/confirm") or {}).get("post") or {}
+            responses = op.get("responses") or {}
+            assert "410" in responses, (
+                f"OpenAPI must declare 410 for /api/post/confirm; got {sorted(responses)}"
+            )
+            assert "200" not in responses, (
+                f"OpenAPI must not advertise success 200 for Gone confirm; got {sorted(responses)}"
+            )
+            assert op.get("deprecated") is True
+        finally:
+            app.openapi_schema = None
+
+
+class TestPayInvoicePreimageSettle:
+    """11c.7: QR/poll must not call onPaid(null) — preimage required after confirm→410."""
+
+    def test_pay_invoice_uses_status_preimage_not_null(self):
+        src = _auth_src()
+        assert "payments/status" in src
+        assert "preimage" in src
+        # Must not silently settle with null after poll reports paid
+        assert "onPaid(null)" not in src
+
+    def test_pay_invoice_null_preimage_shows_error_not_settle(self):
+        """Adversarial: paid-without-preimage must surface an explicit no-settle message."""
+        src = _auth_src()
+        assert "preimage unavailable" in src.lower() or "Preimage unavailable" in src

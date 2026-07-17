@@ -26,7 +26,12 @@ from app.config import (
     MAX_CONTENT_LENGTH, MAX_DISPLAY_NAME,
 )
 from app.database import get_db
-from app.lightning import create_invoice, check_payment_status, check_and_consume_payment
+from app.lightning import (
+    create_invoice,
+    check_payment_status,
+    check_and_consume_payment,
+    get_payment_status,
+)
 from app.models import PendingEvent, NostrEvent
 from app.mpp import (
     build_mpp_challenge,
@@ -491,8 +496,11 @@ async def pay_post(request: Request, token: str, db: AsyncSession = Depends(get_
 @limiter.limit(RATE_PAY_STATUS)
 async def pay_status(request: Request, payment_hash: str):
     """Poll LNBits for payment status (used by web client)."""
-    paid = await check_payment_status(payment_hash)
-    return {"paid": paid, "payment_hash": payment_hash}
+    status = await get_payment_status(payment_hash)
+    body = {"paid": status["paid"], "payment_hash": payment_hash}
+    if status.get("preimage"):
+        body["preimage"] = status["preimage"]
+    return body
 
 
 @router.post("/api/post")
@@ -688,7 +696,19 @@ async def api_post(request: Request, db: AsyncSession = Depends(get_db)):
     return response
 
 
-@router.post("/api/post/confirm")
+@router.post(
+    "/api/post/confirm",
+    status_code=410,
+    deprecated=True,
+    responses={
+        410: {
+            "description": (
+                "Gone — retry the original POST with Authorization: L402 "
+                "or Authorization: Payment"
+            ),
+        },
+    },
+)
 @limiter.limit(RATE_POST_CONFIRM)
 async def api_post_confirm(request: Request, db: AsyncSession = Depends(get_db)):
     """Phase 11c: legacy confirm removed — use Authorization: Payment (or L402)."""

@@ -325,7 +325,7 @@ async function payInvoice(bolt11, payHash, statusEl, onPaid, qrCanvas, bolt11Dis
     }
   }
 
-  // Fallback: show QR + poll for payment (no preimage — MPP/token confirm only)
+  // Fallback: show QR + poll. Settle needs preimage (confirm endpoint is 410).
   if (bolt11 && qrCanvas) {
     new QRious({ element: qrCanvas, value: bolt11.toUpperCase(), size: 160, foreground: '#4ade80', background: '#000', level: 'L' });
   }
@@ -354,12 +354,19 @@ async function payInvoice(bolt11, payHash, statusEl, onPaid, qrCanvas, bolt11Dis
       try {
         const pr = await fetch(`/api/v1/payments/status?payment_hash=${payHash}`);
         const ps = await pr.json();
-        if (ps.paid) {
-          clearInterval(_payPollTimer);
+        if (!ps.paid) return;
+        clearInterval(_payPollTimer);
+        const pre = String(ps.preimage || '').replace(/^0x/i, '');
+        if (/^[0-9a-fA-F]{64}$/.test(pre) && pre.toLowerCase() !== '0'.repeat(64)) {
           statusEl.textContent = 'Payment received! Confirming...';
           statusEl.style.color = 'var(--accent)';
-          await onPaid(null);
+          await onPaid(pre);
+          return;
         }
+        // Paid but no usable preimage — never settle without a real preimage
+        statusEl.textContent =
+          'Preimage unavailable — connect a Lightning wallet (WebLN/Bitcoin Connect) to settle';
+        statusEl.style.color = 'var(--error)';
       } catch (e) {}
     }, 3000);
   }

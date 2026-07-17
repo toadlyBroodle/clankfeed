@@ -24,7 +24,12 @@ from app.config import (
     MAX_DISPLAY_NAME, MAX_TAG_VALUE_LENGTH,
 )
 from app.database import get_db
-from app.lightning import create_invoice, check_payment_status, check_and_consume_payment
+from app.lightning import (
+    create_invoice,
+    check_payment_status,
+    check_and_consume_payment,
+    get_payment_status,
+)
 from app.limiter import limiter
 from app.rates import get_btc_usd_price, usd_to_sats
 from app.models import PendingEvent, NostrEvent
@@ -797,9 +802,12 @@ async def create_stripe_spt(request: Request):
 @router.get("/payments/status")
 @limiter.limit(RATE_PAY_STATUS)
 async def payment_status(request: Request, payment_hash: str):
-    """Poll Lightning payment status."""
-    paid = await check_payment_status(payment_hash)
-    return {"paid": paid, "payment_hash": payment_hash}
+    """Poll Lightning payment status (includes preimage when LNBits exposes it)."""
+    status = await get_payment_status(payment_hash)
+    body = {"paid": status["paid"], "payment_hash": payment_hash}
+    if status.get("preimage"):
+        body["preimage"] = status["preimage"]
+    return body
 
 
 # ---------------------------------------------------------------------------

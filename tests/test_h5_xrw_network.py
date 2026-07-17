@@ -330,6 +330,139 @@ async def test_h5_confirm_path_sends_xrw_via_route_mock(live_server):
         await browser.close()
 
 
+@pytest.mark.asyncio
+async def test_h5_post_form_l402_fail_payment_auth_settle(live_server):
+    """11c.9: post-form L402 wallet fail → Authorization: Payment retry carries XRW.
+
+    Mirrors vote Payment-auth settle for #post-form: route-mock 402 with L402 +
+    lightning challenge; WebLN throws once (L402 fail) then returns preimage for
+    MPP fallthrough; assert Payment Authorization + XRW on /api/v1/post.
+    """
+    playwright = pytest.importorskip("playwright.async_api")
+    async_playwright = playwright.async_playwright
+    import json as _json
+
+    base = live_server["base"]
+    pay_hash = "ab" * 32
+    fake_token = "tok-" + ("ef" * 16)
+    challenge = {
+        "id": "challenge-id-h5-post",
+        "realm": "clankfeed.com",
+        "method": "lightning",
+        "intent": "charge",
+        "request": "dGVzdA",
+        "expires": "2099-01-01T00:00:00Z",
+    }
+    challenge_json = _json.dumps(challenge)
+    preimage = "11" * 32
+    event_id = "aa" * 32
+
+    captured: list[tuple[str, str, dict]] = []
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+
+        async def _route_handler(route):
+            req = route.request
+            url = req.url
+            if req.method == "POST" and "/api/v1/post" in url and "/confirm" not in url:
+                auth = (req.headers.get("authorization") or "")
+                if auth.startswith("Payment ") or auth.startswith("L402 "):
+                    await route.fulfill(
+                        status=200,
+                        content_type="application/json",
+                        body=_json.dumps(
+                            {"paid": True, "event": {"id": event_id, "content": "ok"}}
+                        ),
+                    )
+                    return
+                body = {
+                    "status": "payment_required",
+                    "token": fake_token,
+                    "methods": ["lightning"],
+                    "bolt11": "lnbc1h5posttestinvoice",
+                    "payment_hash": pay_hash,
+                    "l402": {
+                        "macaroon": "mac_h5_post",
+                        "invoice": "lnbc1h5posttestinvoice",
+                    },
+                    "lightning": {
+                        "bolt11": "lnbc1h5posttestinvoice",
+                        "payment_hash": pay_hash,
+                        "amount_sats": 21,
+                        "expires_in": 600,
+                        "challenge": challenge,
+                    },
+                }
+                await route.fulfill(
+                    status=402,
+                    content_type="application/json",
+                    headers={
+                        "WWW-Authenticate": (
+                            'L402 macaroon="mac_h5_post", '
+                            'invoice="lnbc1h5posttestinvoice"'
+                        ),
+                    },
+                    body=_json.dumps(body),
+                )
+                return
+            await route.continue_()
+
+        await page.route("**/*", _route_handler)
+
+        def _on_request(req):
+            if req.method == "POST":
+                captured.append((req.method, req.url, dict(req.headers)))
+
+        page.on("request", _on_request)
+        await page.goto(base, wait_until="domcontentloaded", timeout=30_000)
+        await page.wait_for_selector("#post-form", timeout=10_000)
+
+        # First WebLN call fails (L402 path); subsequent succeed (Payment fallthrough)
+        await page.evaluate(
+            """() => {
+              let calls = 0;
+              window.__bcConnected = true;
+              window.webln = {
+                sendPayment: async () => {
+                  calls += 1;
+                  if (calls === 1) throw new Error('wallet cancelled');
+                  return { preimage: '%s' };
+                }
+              };
+            }""" % preimage
+        )
+
+        await page.fill("#post-content", "h5-post-payment-auth-settle")
+        await page.click("#post-btn")
+
+        for _ in range(100):
+            if any(
+                "/api/v1/post" in u
+                and "/confirm" not in u
+                and (h.get("authorization") or "").startswith("Payment ")
+                for _, u, h in captured
+            ):
+                break
+            await page.wait_for_timeout(100)
+
+        settle_hdrs = [
+            h for _, u, h in captured
+            if "/api/v1/post" in u
+            and "/confirm" not in u
+            and (h.get("authorization") or "").startswith("Payment ")
+        ]
+        assert settle_hdrs, (
+            f"expected Payment-auth post settle; saw: "
+            f"{[(u, (h.get('authorization') or '')[:40]) for _, u, h in captured]}"
+        )
+        assert _xrw(settle_hdrs[-1]) == "XMLHttpRequest", (
+            f"Payment post settle missing XRW; headers={settle_hdrs[-1]}"
+        )
+
+        await browser.close()
+
 
 @pytest.mark.asyncio
 async def test_h5_profile_no_deposit_path_under_live(live_server):
