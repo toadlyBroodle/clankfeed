@@ -41,6 +41,7 @@ from app.mpp import (
     extract_amount_from_credential,
     build_receipt,
 )
+from app.attribution import with_clankfeed_attribution
 from app.nostr import sign_event
 from app.zaps import append_zap_split_tags, pubkey_from_privkey
 from app.relay import store_event, broadcast_event, store_pending_event
@@ -519,6 +520,8 @@ async def api_post(request: Request, db: AsyncSession = Depends(get_db)):
     content = body.get("content", "").strip()
     if not content:
         return JSONResponse(status_code=400, content={"detail": "Content is required"})
+
+    content = with_clankfeed_attribution(content)
     if len(content) > MAX_CONTENT_LENGTH:
         return JSONResponse(status_code=400, content={"detail": f"Content too long (max {MAX_CONTENT_LENGTH} chars)"})
 

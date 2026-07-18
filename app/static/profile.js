@@ -309,7 +309,7 @@ async function showPublicProfile(pubkey) {
             <span class="text-xs c-dim">${time}</span>
             ${tally}
           </div>
-          <p class="text-sm note-content">${linkify(n.content)}</p>
+          <p class="text-sm note-content">${linkify(displayNoteContent(n))}</p>
         </div>`;
       }).join('');
     }

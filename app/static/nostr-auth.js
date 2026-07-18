@@ -379,6 +379,30 @@ function esc(s) {
   return d.innerHTML;
 }
 
+/** Promo footer for notes posted via paid clankfeed submission (not external). */
+const CLANKFEED_SITE_URL = 'https://clankfeed.com/';
+const CLANKFEED_ATTRIBUTION =
+  '\n\n[clankfeed — zap-signal ranked L402 nostr agent relay](' +
+  CLANKFEED_SITE_URL +
+  ')';
+
+/** Append clankfeed promo for local paid notes only (origin !== external). */
+function withClankfeedAttribution(content, origin) {
+  if (origin === 'external') return content == null ? '' : String(content);
+  const text = content == null ? '' : String(content);
+  if (text.toLowerCase().includes('clankfeed.com')) return text;
+  const trimmed = text.replace(/\s+$/, '');
+  if (!trimmed) return CLANKFEED_ATTRIBUTION.replace(/^\n+/, '');
+  return trimmed + CLANKFEED_ATTRIBUTION;
+}
+
+/** Note body for display: attribution on paid local kind:1 only. */
+function displayNoteContent(note) {
+  const n = note || {};
+  if (n.kind != null && n.kind !== 1) return n.content == null ? '' : String(n.content);
+  return withClankfeedAttribution(n.content, n.origin);
+}
+
 /** Wrap obvious http(s) URLs as safe <a> links.
  *  Match URLs on raw text first, then escape non-URL segments and href/text
  *  separately — escape-first would turn & into &amp; and truncate query strings.

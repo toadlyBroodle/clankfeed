@@ -34,6 +34,7 @@ from app.limiter import limiter
 from app.rates import get_btc_usd_price, usd_to_sats
 from app.models import PendingEvent, NostrEvent
 from app.mpp import build_mpp_challenge, parse_mpp_credential, verify_mpp_credential, extract_payment_hash, build_receipt
+from app.attribution import with_clankfeed_attribution
 from app.nostr import validate_event, sign_event
 from app.zaps import append_zap_split_tags, pubkey_from_privkey, validate_kind1_zap_fee_tags
 from app.relay import store_event, broadcast_event, store_pending_event, query_events, row_to_event
@@ -645,6 +646,9 @@ async def relay_post(request: Request, db: AsyncSession = Depends(get_db)):
 
     if not content:
         return JSONResponse(status_code=400, content={"detail": "Content is required"})
+
+    # Paid local / relay-signed notes: append clankfeed promo before sign.
+    content = with_clankfeed_attribution(content)
     if len(content) > MAX_CONTENT_LENGTH:
         return JSONResponse(status_code=400, content={"detail": f"Content too long (max {MAX_CONTENT_LENGTH} chars)"})
 

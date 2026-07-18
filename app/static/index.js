@@ -165,7 +165,7 @@ function renderNoteCard(n, isReply) {
           <span class="flex-1"></span>
           <span class="text-xs c-dim">${timeAgo}</span>
         </div>
-        <p class="text-sm note-content">${linkify(n.content)}</p>
+        <p class="text-sm note-content">${linkify(displayNoteContent(n))}</p>
         <div class="flex items-center gap-3 mt-1">
           <button class="reply-btn text-xs" data-action="reply" data-id="${esc(n.id)}" data-name="${nameAttr}" title="Reply">&#8627; reply</button>
           <button class="reply-btn text-xs" id="expand-replies-${n.id}" data-action="toggle-replies" data-id="${esc(n.id)}" title="Show replies">&#9662; replies</button>
