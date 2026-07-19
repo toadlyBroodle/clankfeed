@@ -5,6 +5,7 @@ Covers the four acceptance flows that static/source suites cannot prove:
   (2) /profile→/ nsec drop → alert + zero /api/v1/post
   (3) stale-session zap re-entry (nsec scrub; extension without window.nostr)
   (4) /profile [copy] privkey when clipboard.writeText denied → execCommand fallback
+      (via real #copy-key-priv click, not evaluate-only)
 """
 
 from __future__ import annotations
@@ -443,6 +444,7 @@ class TestStaleZapReentryLive167:
 class TestClipboardFallbackLive167:
     @pytest.mark.asyncio
     async def test_copy_privkey_falls_back_to_exec_command(self, live_server):
+        """Drive #copy-key-priv click (profile.js wiring), not evaluate-only helper."""
         from app.zaps import pubkey_from_privkey
         from playwright.async_api import async_playwright
 
@@ -457,16 +459,15 @@ class TestClipboardFallbackLive167:
             )
             await _wait_auth_ready(page)
 
-            # Deny clipboard.writeText (producer shape: permission / insecure context)
-            result = await page.evaluate(
+            # Install clipboard denial + execCommand spy (producer: insecure / denied)
+            await page.evaluate(
                 """([sk, pk]) => {
-                  let execCalls = 0;
+                  window.__cfExecCopyCalls = 0;
                   const origExec = document.execCommand.bind(document);
                   document.execCommand = function (cmd, ...rest) {
-                    if (cmd === 'copy') execCalls += 1;
+                    if (cmd === 'copy') window.__cfExecCopyCalls += 1;
                     return origExec(cmd, ...rest);
                   };
-                  // Force clipboard path to reject so copyToClipboard falls through
                   Object.defineProperty(navigator, 'clipboard', {
                     configurable: true,
                     get() {
@@ -478,30 +479,92 @@ class TestClipboardFallbackLive167:
                     },
                   });
                   setAuthState('nsec', pk, sk);
-                  return (async () => {
-                    // Drive account view so #key-priv is populated
-                    if (typeof showOwnAccount === 'function') {
-                      await showOwnAccount();
-                    }
-                    const priv = document.getElementById('key-priv');
-                    if (!priv || !priv.value) {
-                      return { ok: false, reason: 'key-priv empty', execCalls };
-                    }
-                    const ok = await copyToClipboard(priv.value);
-                    return {
-                      ok,
-                      execCalls,
-                      privLen: priv.value.length,
-                      privMatches: priv.value.toLowerCase() === sk.toLowerCase(),
-                    };
-                  })();
                 }""",
                 [_NSEC_SK, user_pk],
             )
+            await page.evaluate(
+                "async () => { if (typeof showOwnAccount === 'function') await showOwnAccount(); }"
+            )
+            priv = await page.evaluate(
+                "() => ({ value: (document.getElementById('key-priv') || {}).value || '', "
+                "visible: !!(document.getElementById('copy-key-priv')) })"
+            )
+            assert priv["value"], f"key-priv empty before click: {priv}"
+            assert priv["value"].lower() == _NSEC_SK.lower()
+            assert priv["visible"] is True
+
+            before = await page.evaluate("() => window.__cfExecCopyCalls")
+            # RESULT path: real UI click — regressions in profile.js listener are visible
+            await page.click("#copy-key-priv")
+            for _ in range(40):
+                after = await page.evaluate("() => window.__cfExecCopyCalls")
+                if after > before:
+                    break
+                await asyncio.sleep(0.05)
             await browser.close()
 
-        assert result.get("privMatches") is True, f"privkey not loaded: {result}"
-        assert result.get("ok") is True, f"copyToClipboard returned false: {result}"
-        assert result.get("execCalls", 0) >= 1, (
-            f"execCommand('copy') was not used after clipboard denial: {result}"
+        assert after > before, (
+            f"execCommand('copy') not used after #copy-key-priv click "
+            f"(before={before}, after={after}); click wiring or fallback broken"
+        )
+
+    @pytest.mark.asyncio
+    async def test_copy_privkey_click_without_listener_does_not_exec_copy(
+        self, live_server
+    ):
+        """Adversarial: removing profile.js click wiring must not satisfy execCalls."""
+        from app.zaps import pubkey_from_privkey
+        from playwright.async_api import async_playwright
+
+        user_pk = pubkey_from_privkey(_NSEC_SK)
+        base = live_server
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=not _headed())
+            page = await browser.new_page()
+            await page.goto(
+                f"{base}/profile", wait_until="domcontentloaded", timeout=30_000
+            )
+            await _wait_auth_ready(page)
+
+            await page.evaluate(
+                """([sk, pk]) => {
+                  window.__cfExecCopyCalls = 0;
+                  const origExec = document.execCommand.bind(document);
+                  document.execCommand = function (cmd, ...rest) {
+                    if (cmd === 'copy') window.__cfExecCopyCalls += 1;
+                    return origExec(cmd, ...rest);
+                  };
+                  Object.defineProperty(navigator, 'clipboard', {
+                    configurable: true,
+                    get() {
+                      return {
+                        writeText: async () => {
+                          throw new Error('Clipboard permission denied');
+                        },
+                      };
+                    },
+                  });
+                  // Strip click listeners (clone) so click is a no-op for copy
+                  const btn = document.getElementById('copy-key-priv');
+                  if (btn) {
+                    const clone = btn.cloneNode(true);
+                    btn.parentNode.replaceChild(clone, btn);
+                  }
+                  setAuthState('nsec', pk, sk);
+                }""",
+                [_NSEC_SK, user_pk],
+            )
+            await page.evaluate(
+                "async () => { if (typeof showOwnAccount === 'function') await showOwnAccount(); }"
+            )
+            before = await page.evaluate("() => window.__cfExecCopyCalls")
+            await page.click("#copy-key-priv")
+            await asyncio.sleep(0.3)
+            after = await page.evaluate("() => window.__cfExecCopyCalls")
+            await browser.close()
+
+        assert after == before == 0, (
+            f"stripped #copy-key-priv still triggered execCommand "
+            f"(before={before}, after={after})"
         )
