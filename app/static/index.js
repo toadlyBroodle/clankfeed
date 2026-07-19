@@ -255,12 +255,16 @@ document.getElementById('post-form').addEventListener('submit', async (e) => {
       await submitClientSignedPost(content, btn);
       return;
     }
-    // Stale nsec session (pubkey cached, key scrubbed after /profile→/) — do not
-    // relay-sign with a logged-in display_name façade; mirror submitZap re-entry.
-    if (authMode === 'nsec' && !userNsec) {
+    // Stale session (pubkey cached, cannot sign): nsec scrubbed after /profile→/
+    // OR extension mode without window.nostr — do not relay-sign under a logged-in
+    // display_name façade; mirror submitZap re-entry. True anon still relay-signs.
+    if (isLoggedIn() && !canSign()) {
       btn.disabled = false;
       btn.textContent = 'Post Note';
-      alert('Re-enter your private key on /profile to sign');
+      const msg = (authMode === 'extension')
+        ? 'Restore your Nostr extension (or set identity on /profile) to sign'
+        : 'Re-enter your private key on /profile to sign';
+      alert(msg);
       return;
     }
     // Anonymous / cannot-sign → relay-signed /api/v1/post
@@ -761,9 +765,11 @@ async function submitZap(eventId) {
   const status = document.getElementById(`vote-status-${eventId}`);
 
   if (!canSign()) {
-    status.textContent = (authMode === 'nsec' && !userNsec)
-      ? 'Re-enter your private key on /profile to sign'
-      : 'Set identity on /profile to zap';
+    status.textContent = (authMode === 'extension' && !window.nostr)
+      ? 'Restore your Nostr extension (or set identity on /profile) to zap'
+      : (authMode === 'nsec' && !userNsec)
+        ? 'Re-enter your private key on /profile to sign'
+        : 'Set identity on /profile to zap';
     status.style.color = 'var(--error)';
     return;
   }

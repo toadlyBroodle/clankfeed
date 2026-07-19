@@ -130,32 +130,28 @@ class TestStaleNsecPostReentry166:
         index = _index()
         # Extract post-form submit handler region
         assert "post-form" in index
-        region = index.split("post-form", 1)[1][:1200]
+        region = index.split("post-form", 1)[1][:1600]
         assert "canSign()" in region
-        # Stale nsec gate (mirror submitZap)
-        assert "authMode" in region or "userNsec" in region
-        assert "userNsec" in region
+        # Broad stale gate (isLoggedIn && !canSign) covers nsec scrub + extension gone
+        assert "isLoggedIn()" in region or "userNsec" in region
         # Must mention re-enter / profile prompt
         assert "/profile" in region or "Re-enter" in region or "re-enter" in region
 
     def test_stale_nsec_does_not_call_relay_signed(self):
-        """When authMode==='nsec' && !userNsec, must return before submitRelaySignedPost."""
+        """When logged-in but !canSign (nsec scrubbed), must return before submitRelaySignedPost."""
         index = _index()
-        # Find the submit listener body between canSign branch and submitRelaySignedPost
         assert "submitRelaySignedPost" in index
-        # The gate must sit BETWEEN canSign false and relay call
         form_handler = index.split("addEventListener('submit'", 1)[1].split(
             "async function submitClientSignedPost", 1
         )[0]
-        assert "userNsec" in form_handler
-        # Pattern: if stale → message + return; else relay
         assert "return" in form_handler
-        # Must not go straight from !canSign() to submitRelaySignedPost without nsec check
         after_cansign = form_handler.split("canSign()", 1)[1]
-        # Before submitRelaySignedPost there must be an authMode/userNsec stale check
         before_relay = after_cansign.split("submitRelaySignedPost", 1)[0]
-        assert "userNsec" in before_relay
-        assert "nsec" in before_relay
+        # Gate must sit between canSign false and relay call
+        assert "isLoggedIn()" in before_relay or "userNsec" in before_relay
+        assert "return" in before_relay
+        # nsec re-entry copy still present for non-extension stale sessions
+        assert "Re-enter" in before_relay or "re-enter" in before_relay or "/profile" in before_relay
 
     def test_true_anon_still_uses_relay_post(self):
         """Unauthenticated users (no authMode) still call submitRelaySignedPost."""
