@@ -19,6 +19,23 @@ async function initPage() {
 }
 
 
+function setAvatarPlaceholder(el, initial) {
+  if (!el) return;
+  const keepId = el.id || '';
+  const letter = (initial || '?').charAt(0).toUpperCase() || '?';
+  // Already a placeholder div — just update the letter.
+  if (el.tagName !== 'IMG' && el.classList && el.classList.contains('avatar-placeholder')) {
+    el.textContent = letter;
+    return;
+  }
+  // Leftover <img> (or other node) after setAvatarImg — restore id-preserving placeholder.
+  const div = document.createElement('div');
+  if (keepId) div.id = keepId;
+  div.className = 'avatar-placeholder text-lg';
+  div.textContent = letter;
+  el.replaceWith(div);
+}
+
 function setAvatarImg(el, src, className, style) {
   if (!el) return;
   const keepId = el.id || '';
@@ -154,7 +171,7 @@ async function showOwnAccount() {
       setAvatarImg(document.getElementById('acct-avatar'), meta.picture, 'avatar', 'width:48px;height:48px;border-radius:50%;object-fit:cover;');
     } else {
       const initial = (meta.name || meta.display_name || '?').charAt(0).toUpperCase();
-      document.getElementById('acct-avatar').textContent = initial;
+      setAvatarPlaceholder(document.getElementById('acct-avatar'), initial);
     }
   } else {
     document.getElementById('acct-name').textContent = userPubkey.slice(0, 12) + '...';
@@ -294,7 +311,7 @@ async function showPublicProfile(pubkey) {
         setAvatarImg(document.getElementById('pub-avatar'), meta.picture, '', 'width:48px;height:48px;border-radius:50%;object-fit:cover;border:2px solid var(--border);');
       } else {
         const initial = (meta.name || meta.display_name || '?').charAt(0).toUpperCase();
-        document.getElementById('pub-avatar').textContent = initial;
+        setAvatarPlaceholder(document.getElementById('pub-avatar'), initial);
       }
     } else {
       document.getElementById('pub-name').textContent = pubkey.slice(0, 12) + '...';
