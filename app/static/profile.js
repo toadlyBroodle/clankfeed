@@ -124,27 +124,26 @@ async function showOwnAccount() {
     document.getElementById('key-priv').value = '(managed by extension)';
   }
 
-  // Fetch metadata
-  try {
-    const resp = await fetch(`/api/v1/events?authors=${userPubkey}&kinds=0&limit=1`);
-    const data = await resp.json();
-    if (data.events && data.events.length > 0) {
-      const meta = JSON.parse(data.events[0].content);
-      document.getElementById('acct-name').textContent = meta.name || meta.display_name || userPubkey.slice(0, 12) + '...';
-      document.getElementById('prof-name').value = meta.name || meta.display_name || '';
-      document.getElementById('prof-about').value = meta.about || '';
-      document.getElementById('prof-picture').value = meta.picture || '';
-      if (meta.picture) {
-        setAvatarImg(document.getElementById('acct-avatar'), meta.picture, 'avatar', 'width:48px;height:48px;border-radius:50%;object-fit:cover;');
-      } else {
-        const initial = (meta.name || meta.display_name || '?').charAt(0).toUpperCase();
-        document.getElementById('acct-avatar').textContent = initial;
-      }
+  // Fetch kind:0 metadata (name/about/picture/lud16) into UI
+  const meta = await fetchKind0Profile(userPubkey);
+  if (meta) {
+    document.getElementById('acct-name').textContent = meta.name || meta.display_name || userPubkey.slice(0, 12) + '...';
+    document.getElementById('prof-name').value = meta.name || meta.display_name || '';
+    document.getElementById('prof-about').value = meta.about || '';
+    document.getElementById('prof-picture').value = meta.picture || '';
+    document.getElementById('prof-lud16').value = meta.lud16 || '';
+    if (meta.picture) {
+      setAvatarImg(document.getElementById('acct-avatar'), meta.picture, 'avatar', 'width:48px;height:48px;border-radius:50%;object-fit:cover;');
     } else {
-      document.getElementById('acct-name').textContent = userPubkey.slice(0, 12) + '...';
+      const initial = (meta.name || meta.display_name || '?').charAt(0).toUpperCase();
+      document.getElementById('acct-avatar').textContent = initial;
     }
-  } catch (e) {
+  } else {
     document.getElementById('acct-name').textContent = userPubkey.slice(0, 12) + '...';
+    document.getElementById('prof-name').value = '';
+    document.getElementById('prof-about').value = '';
+    document.getElementById('prof-picture').value = '';
+    document.getElementById('prof-lud16').value = '';
   }
 }
 
@@ -153,9 +152,10 @@ async function saveProfile() {
   const name = document.getElementById('prof-name').value.trim();
   const about = document.getElementById('prof-about').value.trim();
   const picture = document.getElementById('prof-picture').value.trim();
+  const lud16 = document.getElementById('prof-lud16').value.trim();
   const status = document.getElementById('prof-status');
 
-  if (!name && !about && !picture) {
+  if (!name && !about && !picture && !lud16) {
     status.textContent = 'Fill at least one field';
     status.style.color = 'var(--error)';
     return;
@@ -168,6 +168,7 @@ async function saveProfile() {
   if (name) metadata.name = name;
   if (about) metadata.about = about;
   if (picture) metadata.picture = picture;
+  if (lud16) metadata.lud16 = lud16;
 
   try {
     const event = {

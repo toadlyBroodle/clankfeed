@@ -7,7 +7,7 @@ const WS_URL = location.protocol === 'https:'
 let ws = null;
 let subId = 'feed-' + Math.random().toString(36).slice(2, 10);
 let notes = [];
-let metadataCache = {};  // pubkey -> {name, about, picture}
+let metadataCache = {};  // pubkey -> {name, about, picture, lud16, …}
 let currentSort = 'newest';
 let currentFeed = 'clankfeed';  // 'clankfeed' | 'external'
 let relayPubkey = '';  // set from NIP-11, used to label relay-signed notes as 'anon'
@@ -743,20 +743,25 @@ async function resolveLud16ForPubkey(pubkey) {
   if (meta && typeof meta.lud16 === 'string' && meta.lud16.includes('@')) {
     return meta.lud16.trim();
   }
-  // Fetch kind:0 from API
-  try {
-    const resp = await apiFetch(`/api/v1/events?kinds=0&authors=${pubkey}&limit=1`);
-    const data = await resp.json();
-    const ev = (data.events || [])[0];
-    if (ev && ev.content) {
-      const parsed = JSON.parse(ev.content);
-      if (parsed.lud16) {
-        metadataCache[pubkey] = parsed;
-        return String(parsed.lud16).trim();
-      }
+  const parsed = await fetchKind0Profile(pubkey);
+  if (parsed) {
+    metadataCache[pubkey] = parsed;
+    if (typeof parsed.lud16 === 'string' && parsed.lud16.includes('@')) {
+      return parsed.lud16.trim();
     }
-  } catch (e) {}
+  }
   return null;
+}
+
+/** Load logged-in user's kind:0 into metadataCache (header / zaps). */
+async function hydrateOwnProfile() {
+  if (!isLoggedIn() || !userPubkey) return null;
+  const meta = await fetchKind0Profile(userPubkey);
+  if (meta) {
+    metadataCache[userPubkey] = meta;
+    updateHeaderLink();
+  }
+  return meta;
 }
 
 async function submitZap(eventId) {
@@ -1133,6 +1138,7 @@ document.getElementById('notes-feed')?.addEventListener('click', handleFeedActio
 
 connect();
 updateHeaderLink();
+hydrateOwnProfile();
 setTimeout(updateHeaderLink, 500);
 setFeed('clankfeed');  // load clankfeed-only feed via REST (origin=clankfeed)
 

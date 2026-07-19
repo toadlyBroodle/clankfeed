@@ -168,6 +168,27 @@ function apiFetch(url, options = {}) {
   return fetch(url, Object.assign({}, options, {headers}));
 }
 
+/**
+ * Fetch the latest kind:0 metadata for a pubkey.
+ * Returns parsed {name, about, picture, lud16, …} or null (missing / bad JSON / network).
+ */
+async function fetchKind0Profile(pubkey) {
+  if (!pubkey) return null;
+  try {
+    const resp = await apiFetch(
+      `/api/v1/events?authors=${encodeURIComponent(pubkey)}&kinds=0&limit=1`,
+    );
+    const data = await resp.json();
+    const ev = (data.events || [])[0];
+    if (!ev || ev.content == null || ev.content === '') return null;
+    const parsed = JSON.parse(ev.content);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    return parsed;
+  } catch (e) {
+    return null;
+  }
+}
+
 // ---- Payment Helper ----
 // Pay a Lightning invoice via Bitcoin Connect (if wallet connected) or QR + polling fallback.
 // qrCanvas/bolt11Display are optional DOM elements for fallback QR display.
