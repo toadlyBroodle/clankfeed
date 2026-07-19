@@ -179,6 +179,7 @@ async function showOwnAccount() {
     document.getElementById('prof-about').value = '';
     document.getElementById('prof-picture').value = '';
     document.getElementById('prof-lud16').value = '';
+    setAvatarPlaceholder(document.getElementById('acct-avatar'), '?');
   }
 }
 
@@ -315,9 +316,13 @@ async function showPublicProfile(pubkey) {
       }
     } else {
       document.getElementById('pub-name').textContent = pubkey.slice(0, 12) + '...';
+      document.getElementById('pub-about').textContent = '';
+      setAvatarPlaceholder(document.getElementById('pub-avatar'), '?');
     }
   } catch (e) {
     document.getElementById('pub-name').textContent = pubkey.slice(0, 12) + '...';
+    document.getElementById('pub-about').textContent = '';
+    setAvatarPlaceholder(document.getElementById('pub-avatar'), '?');
   }
 
   // Fetch notes
