@@ -47,6 +47,7 @@ function normalizeNsec(input) {
  */
 async function copyToClipboard(text) {
   const value = text == null ? '' : String(text);
+  if (!value) return false;
   if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
     try {
       await navigator.clipboard.writeText(value);

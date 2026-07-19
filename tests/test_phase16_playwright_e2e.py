@@ -4,8 +4,8 @@ Covers the four acceptance flows that static/source suites cannot prove:
   (1) in-memory nsec → POST /api/v1/events + note card shows user pubkey
   (2) /profile→/ nsec drop → alert + zero /api/v1/post
   (3) stale-session zap re-entry (nsec scrub; extension without window.nostr)
-  (4) /profile [copy] privkey when clipboard.writeText denied → execCommand fallback
-      (via real #copy-key-priv click, not evaluate-only)
+  (4) /profile [copy] priv/pubkey when clipboard.writeText denied → execCommand fallback
+      (via real #copy-key-priv / #copy-key-pub click; empty #key-priv ≠ copy success)
 """
 
 from __future__ import annotations
@@ -567,4 +567,146 @@ class TestClipboardFallbackLive167:
         assert after == before == 0, (
             f"stripped #copy-key-priv still triggered execCommand "
             f"(before={before}, after={after})"
+        )
+
+    @pytest.mark.asyncio
+    async def test_copy_pubkey_falls_back_to_exec_command(self, live_server):
+        """Drive #copy-key-pub click under clipboard denial (mirror of priv path)."""
+        from app.zaps import pubkey_from_privkey
+        from playwright.async_api import async_playwright
+
+        user_pk = pubkey_from_privkey(_NSEC_SK)
+        base = live_server
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=not _headed())
+            page = await browser.new_page()
+            await page.goto(
+                f"{base}/profile", wait_until="domcontentloaded", timeout=30_000
+            )
+            await _wait_auth_ready(page)
+
+            await page.evaluate(
+                """([sk, pk]) => {
+                  window.__cfExecCopyCalls = 0;
+                  const origExec = document.execCommand.bind(document);
+                  document.execCommand = function (cmd, ...rest) {
+                    if (cmd === 'copy') window.__cfExecCopyCalls += 1;
+                    return origExec(cmd, ...rest);
+                  };
+                  Object.defineProperty(navigator, 'clipboard', {
+                    configurable: true,
+                    get() {
+                      return {
+                        writeText: async () => {
+                          throw new Error('Clipboard permission denied');
+                        },
+                      };
+                    },
+                  });
+                  setAuthState('nsec', pk, sk);
+                }""",
+                [_NSEC_SK, user_pk],
+            )
+            await page.evaluate(
+                "async () => { if (typeof showOwnAccount === 'function') await showOwnAccount(); }"
+            )
+            pub = await page.evaluate(
+                "() => ({ value: (document.getElementById('key-pub') || {}).value || '', "
+                "visible: !!(document.getElementById('copy-key-pub')) })"
+            )
+            assert pub["value"], f"key-pub empty before click: {pub}"
+            assert pub["value"].lower() == user_pk.lower()
+            assert pub["visible"] is True
+
+            before = await page.evaluate("() => window.__cfExecCopyCalls")
+            await page.click("#copy-key-pub")
+            for _ in range(40):
+                after = await page.evaluate("() => window.__cfExecCopyCalls")
+                if after > before:
+                    break
+                await asyncio.sleep(0.05)
+            await browser.close()
+
+        assert after > before, (
+            f"execCommand('copy') not used after #copy-key-pub click "
+            f"(before={before}, after={after}); click wiring or fallback broken"
+        )
+
+    @pytest.mark.asyncio
+    async def test_empty_key_priv_click_is_not_copy_success(self, live_server):
+        """Empty #key-priv cardinality: click must not count as non-empty copy success."""
+        from app.zaps import pubkey_from_privkey
+        from playwright.async_api import async_playwright
+
+        user_pk = pubkey_from_privkey(_NSEC_SK)
+        base = live_server
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=not _headed())
+            page = await browser.new_page()
+            await page.goto(
+                f"{base}/profile", wait_until="domcontentloaded", timeout=30_000
+            )
+            await _wait_auth_ready(page)
+
+            await page.evaluate(
+                """([sk, pk]) => {
+                  window.__cfExecCopyCalls = 0;
+                  window.__cfExecCopyNonEmpty = 0;
+                  const origExec = document.execCommand.bind(document);
+                  document.execCommand = function (cmd, ...rest) {
+                    if (cmd === 'copy') {
+                      window.__cfExecCopyCalls += 1;
+                      const el = document.activeElement;
+                      const val = el && 'value' in el ? String(el.value || '') : '';
+                      if (val.length > 0) window.__cfExecCopyNonEmpty += 1;
+                    }
+                    return origExec(cmd, ...rest);
+                  };
+                  Object.defineProperty(navigator, 'clipboard', {
+                    configurable: true,
+                    get() {
+                      return {
+                        writeText: async () => {
+                          throw new Error('Clipboard permission denied');
+                        },
+                      };
+                    },
+                  });
+                  setAuthState('nsec', pk, sk);
+                }""",
+                [_NSEC_SK, user_pk],
+            )
+            await page.evaluate(
+                "async () => { if (typeof showOwnAccount === 'function') await showOwnAccount(); }"
+            )
+            # Clear priv after account view so the field is empty (cardinality none)
+            cleared = await page.evaluate(
+                """() => {
+                  const el = document.getElementById('key-priv');
+                  if (!el) return { ok: false, reason: 'missing' };
+                  el.value = '';
+                  return { ok: true, value: el.value };
+                }"""
+            )
+            assert cleared["ok"] is True and cleared["value"] == "", cleared
+
+            before_raw = await page.evaluate("() => window.__cfExecCopyCalls")
+            before_ne = await page.evaluate("() => window.__cfExecCopyNonEmpty")
+            await page.click("#copy-key-priv")
+            await asyncio.sleep(0.3)
+            after_ne = await page.evaluate("() => window.__cfExecCopyNonEmpty")
+            after_raw = await page.evaluate("() => window.__cfExecCopyCalls")
+            await browser.close()
+
+        assert before_ne == 0 and before_raw == 0
+        assert after_ne == 0, (
+            f"empty #key-priv click counted as non-empty copy success "
+            f"(nonEmpty={after_ne}, rawExecCalls={after_raw})"
+        )
+        # Empty copy must not invoke execCommand at all (not a silent '' clipboard write)
+        assert after_raw == before_raw == 0, (
+            f"empty #key-priv click still ran execCommand('copy') "
+            f"(before={before_raw}, after={after_raw}); empty must not count as copy success"
         )
