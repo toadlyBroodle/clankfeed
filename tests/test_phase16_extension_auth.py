@@ -395,3 +395,160 @@ class TestNip07MockPostLive168:
         stored = match[0].get("event") or match[0]
         assert stored["pubkey"] == ext_pk
         assert stored["pubkey"] != relay_pk
+
+
+# ---------------------------------------------------------------------------
+# 16.11 — stale-extension zap UI: vote-status restore copy, no signing
+# ---------------------------------------------------------------------------
+
+
+class TestStaleExtensionZapSource1611:
+    """submitZap must show extension restore copy when authMode=extension && !window.nostr."""
+
+    def test_submit_zap_extension_restore_copy(self):
+        index = _index()
+        fn = index.split("async function submitZap", 1)[1].split(
+            "\nasync function ", 1
+        )[0]
+        assert "canSign()" in fn
+        assert "authMode === 'extension'" in fn
+        assert "window.nostr" in fn
+        assert "Restore your Nostr extension" in fn
+        assert "/profile" in fn
+
+    def test_submit_zap_nsec_reentry_copy_still_distinct(self):
+        """Invariant: nsec scrub path keeps its own re-entry message."""
+        index = _index()
+        fn = index.split("async function submitZap", 1)[1].split(
+            "\nasync function ", 1
+        )[0]
+        assert "Re-enter your private key" in fn or "re-enter" in fn.lower()
+
+
+class TestStaleExtensionZapLive1611:
+    """Runtime: extension façade + no window.nostr → zap vote-status restore; no sign."""
+
+    @pytest.mark.asyncio
+    async def test_stale_extension_zap_shows_restore_status_no_sign(self, live_server):
+        import httpx
+        from app.zaps import pubkey_from_privkey
+        from playwright.async_api import async_playwright
+
+        ext_pk = pubkey_from_privkey(_EXT_SK)
+        base = live_server
+
+        with httpx.Client(
+            base_url=base,
+            timeout=10.0,
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        ) as c:
+            note = c.post(
+                "/api/v1/post", json={"content": "p16-11-stale-ext-zap"}
+            ).json()["event"]["id"]
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            await page.goto(f"{base}/", wait_until="domcontentloaded", timeout=30_000)
+            await _wait_auth_ready(page)
+            await page.wait_for_selector(f"#note-{note}", timeout=15_000)
+
+            # Producer: logged-in extension façade WITHOUT window.nostr
+            await page.evaluate(
+                """([pk]) => {
+                  try { delete window.nostr; } catch (e) { window.nostr = undefined; }
+                  setAuthState('extension', pk, '');
+                  // Spy: any sign attempt must be visible to the test
+                  const orig = window.signNostrEvent;
+                  window.signNostrEvent = async function (...args) {
+                    window.__zapSignCalls = (window.__zapSignCalls || 0) + 1;
+                    if (typeof orig === 'function') return orig.apply(this, args);
+                    return null;
+                  };
+                }""",
+                [ext_pk],
+            )
+            assert await page.evaluate("() => isLoggedIn() && !canSign()") is True
+
+            await page.click(f'#note-{note} button[data-action="zap"]')
+            await page.wait_for_selector(
+                f"#vote-prompt-{note}.active", timeout=5_000
+            )
+            await page.click(f'#note-{note} button[data-action="submit-vote"]')
+
+            # Poll textContent (avoid wait_for_function string eval under CSP)
+            import asyncio
+
+            status = ""
+            for _ in range(50):
+                status = (
+                    await page.locator(f"#vote-status-{note}").text_content()
+                ) or ""
+                if "extension" in status.lower():
+                    break
+                await asyncio.sleep(0.1)
+            sign_count = await page.evaluate("() => window.__zapSignCalls || 0")
+            await browser.close()
+
+        assert status is not None and status.strip(), "vote-status stayed empty"
+        low = status.lower()
+        assert "restore" in low and "extension" in low, f"unexpected status: {status!r}"
+        assert "/profile" in status or "profile" in low
+        assert sign_count == 0, f"signNostrEvent was called {sign_count} time(s)"
+        assert "building zap" not in low
+        assert "could not sign" not in low
+
+    @pytest.mark.asyncio
+    async def test_true_anon_zap_does_not_show_extension_restore(self, live_server):
+        """Adversarial: logged-out zap hint must not use the extension restore copy."""
+        import asyncio
+        import httpx
+        from playwright.async_api import async_playwright
+
+        base = live_server
+        with httpx.Client(
+            base_url=base,
+            timeout=10.0,
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        ) as c:
+            note = c.post(
+                "/api/v1/post", json={"content": "p16-11-anon-zap"}
+            ).json()["event"]["id"]
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            await page.goto(f"{base}/", wait_until="domcontentloaded", timeout=30_000)
+            await _wait_auth_ready(page)
+            await page.wait_for_selector(f"#note-{note}", timeout=15_000)
+
+            # Ensure truly anon (no façade). clearAuthState is async; await it.
+            await page.evaluate(
+                """async () => {
+                  try { delete window.nostr; } catch (e) { window.nostr = undefined; }
+                  if (typeof clearAuthState === 'function') await clearAuthState();
+                }"""
+            )
+            assert await page.evaluate("() => !isLoggedIn() && !canSign()") is True
+
+            await page.click(f'#note-{note} button[data-action="zap"]')
+            await page.wait_for_selector(
+                f"#vote-prompt-{note}.active", timeout=5_000
+            )
+            await page.click(f'#note-{note} button[data-action="submit-vote"]')
+
+            status = ""
+            for _ in range(50):
+                status = (
+                    await page.locator(f"#vote-status-{note}").text_content()
+                ) or ""
+                if "identity" in status.lower():
+                    break
+                await asyncio.sleep(0.1)
+            await browser.close()
+
+        assert status is not None and status.strip(), "vote-status stayed empty"
+        low = status.lower()
+        assert "identity" in low and "/profile" in status
+        assert "restore" not in low
+        assert "extension" not in low
