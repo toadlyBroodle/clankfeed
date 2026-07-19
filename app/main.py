@@ -524,8 +524,15 @@ async def root(request: Request):
         return _nip11_response()
     index = STATIC_DIR / "index.html"
     if index.exists():
-        return FileResponse(index)
-    return JSONResponse(content={"name": settings.RELAY_NAME, "description": settings.RELAY_DESCRIPTION})
+        # Vary: Accept — browsers must not reuse HTML for NIP-11 Accept fetches
+        return FileResponse(
+            index,
+            headers={"Vary": "Accept", "Cache-Control": "no-store"},
+        )
+    return JSONResponse(
+        content={"name": settings.RELAY_NAME, "description": settings.RELAY_DESCRIPTION},
+        headers={"Vary": "Accept", "Cache-Control": "no-store"},
+    )
 
 
 def _nip11_response():
@@ -602,11 +609,19 @@ def _nip11_response():
                 "Outbox republish is disabled; paid events stay on this relay only."
             ),
         }
+    # Zap fee-split discovery for client-signed kind:1 (NIP-57 Appendix G)
+    doc["zap_fees"] = {
+        "author_weight": settings.ZAP_AUTHOR_WEIGHT,
+        "relay_weight": settings.ZAP_RELAY_WEIGHT,
+        "relay_url": settings.BASE_URL,
+    }
     return JSONResponse(
         content=doc,
         headers={
             "Access-Control-Allow-Origin": "*",
             "Content-Type": "application/nostr+json",
+            "Vary": "Accept",
+            "Cache-Control": "no-store",
         },
     )
 

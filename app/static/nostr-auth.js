@@ -17,6 +17,13 @@ function isLoggedIn() {
   return !!(authMode && userPubkey);
 }
 
+/** True when we can produce a Nostr signature right now (not merely a cached pubkey). */
+function canSign() {
+  if (authMode === 'extension' && window.nostr) return true;
+  if (authMode === 'nsec' && userNsec) return true;
+  return false;
+}
+
 function setAuthState(mode, pubkey, nsec) {
   authMode = mode;
   userPubkey = pubkey;

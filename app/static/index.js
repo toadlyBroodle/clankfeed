@@ -12,6 +12,7 @@ let currentSort = 'newest';
 let currentFeed = 'clankfeed';  // 'clankfeed' | 'external'
 let relayPubkey = '';  // set from NIP-11, used to label relay-signed notes as 'anon'
 let relayLud16 = '';  // NIP-57 fee-leg lud16 from NIP-11 (14.6)
+let zapFeeConfig = { authorWeight: 9, relayWeight: 1, relayUrl: '' };
 
 // ---- WebSocket Relay Client ----
 function connect() {
@@ -249,142 +250,327 @@ document.getElementById('post-form').addEventListener('submit', async (e) => {
   btn.textContent = 'Submitting...';
 
   try {
-    const body = { content };
-    const name = document.getElementById('post-name').value.trim();
-    if (name) body.display_name = name;
-    const amount = parseInt(document.getElementById('post-amount').value);
-    if (amount && amount >= 21) body.amount_sats = amount;
-    const replyTo = document.getElementById('post-form').dataset.replyTo;
-    if (replyTo) body.reply_to = replyTo;
-
-    const postOpts = {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body),
-    };
-    // Use apiFetch (no NIP-98) so L402 Authorization is free for the settle retry
-    let resp = await apiFetch('/api/v1/post', postOpts);
-    let data = await resp.json().catch(() => ({}));
-
-    if (resp.ok && data.paid) {
-      document.getElementById('post-content').value = '';
-      clearReplyState();
-      btn.disabled = false;
-      btn.textContent = 'Post Note';
+    // Logged-in identity that can sign → client-signed kind:1 via /api/v1/events
+    if (canSign()) {
+      await submitClientSignedPost(content, btn);
       return;
     }
-
-    if (resp.status === 402 || data.status === 'payment_required') {
-      const challenge = parseL402Challenge(resp, data);
-      if (challenge) {
-        data._title = 'Pay to post (L402):';
-        showPaymentWidget(data, null, () => {
-          btn.disabled = false;
-          btn.textContent = 'Post Note';
-        }, document.getElementById('post-form'));
-        const lnStatus = document.getElementById('pw-ln-status');
-        try {
-          resp = await payL402AndRetry('/api/v1/post', postOpts, challenge, lnStatus);
-          data = await resp.json().catch(() => ({}));
-          if (resp.ok && data.paid) {
-            document.getElementById('post-content').value = '';
-            clearReplyState();
-            hidePaymentWidget();
-            btn.disabled = false;
-            btn.textContent = 'Post Note';
-            return;
-          }
-          if (lnStatus) {
-            lnStatus.textContent = (typeof data.detail === 'string' ? data.detail : null)
-              || 'L402 settle failed — try Tempo tab if available';
-            lnStatus.style.color = 'var(--error)';
-          }
-        } catch (payErr) {
-          if (lnStatus) {
-            lnStatus.textContent = payErr.message || 'Payment failed';
-            lnStatus.style.color = 'var(--error)';
-          }
-        }
-        // Fall through to Tempo/MPP widget if L402 wallet path failed
-      }
-
-      // Tempo / Stripe / QR fallback (also used when 402 has no L402 challenge)
-      const hasPay = data.bolt11 || data.tempo || data.stripe
-        || (data.lightning && data.lightning.bolt11)
-        || ((data.methods || []).length > 0);
-      if (hasPay) {
-        data._title = data._title || 'Pay to post your note:';
-        showPaymentWidget(data, async (token, paymentId, method, preimage) => {
-          const statusEl = document.getElementById('pw-stripe-status')
-            || document.getElementById('pw-tempo-status')
-            || document.getElementById('pw-ln-status');
-          try {
-            let auth = null;
-            if (method === 'stripe') {
-              const ch = (data.stripe && data.stripe.challenge) || {};
-              auth = buildStripePaymentAuth(ch, paymentId);
-            } else if (method === 'tempo') {
-              const ch = (data.tempo && data.tempo.challenge)
-                || parsePaymentChallenge(null, data, 'tempo') || {};
-              auth = buildTempoPaymentAuth(ch, paymentId);
-            } else if (method === 'lightning') {
-              const ch = (data.lightning && data.lightning.challenge)
-                || parsePaymentChallenge(null, data, 'lightning') || {};
-              if (!preimage) {
-                if (statusEl) {
-                  statusEl.textContent = 'Connect a Lightning wallet to settle (preimage required)';
-                  statusEl.style.color = 'var(--error)';
-                }
-                return;
-              }
-              auth = buildLightningPaymentAuth(ch, preimage);
-            } else {
-              if (statusEl) {
-                statusEl.textContent = 'Unsupported payment method';
-                statusEl.style.color = 'var(--error)';
-              }
-              return;
-            }
-            const headers = Object.assign(
-              {},
-              postOpts.headers || {},
-              { Authorization: auth, 'X-Requested-With': 'XMLHttpRequest' },
-            );
-            const cr = await apiFetch('/api/v1/post', Object.assign({}, postOpts, { headers }));
-            const cd = await cr.json().catch(() => ({}));
-            if (cr.ok && cd.paid) {
-              document.getElementById('post-content').value = '';
-              clearReplyState();
-              btn.disabled = false;
-              btn.textContent = 'Post Note';
-              hidePaymentWidget();
-            } else if (statusEl) {
-              statusEl.textContent = (typeof cd.detail === 'string' ? cd.detail : null)
-                || (method + ' settle failed');
-              statusEl.style.color = 'var(--error)';
-            }
-          } catch (err) {
-            if (statusEl) {
-              statusEl.textContent = (err && err.message) || 'Payment settle failed';
-              statusEl.style.color = 'var(--error)';
-            }
-          }
-        }, () => {
-          btn.disabled = false;
-          btn.textContent = 'Post Note';
-        }, document.getElementById('post-form'));
-        return;
-      }
-    }
-
-    btn.disabled = false;
-    btn.textContent = 'Post Note';
+    // Anonymous / stale session → relay-signed /api/v1/post
+    await submitRelaySignedPost(content, btn);
   } catch (err) {
     console.error('Post error:', err);
     btn.disabled = false;
     btn.textContent = 'Post Note';
   }
 });
+
+/** Build NIP-57 zap fee tags for a client-signed kind:1 (author + relay). */
+function buildClientZapFeeTags(authorPubkey) {
+  const relayUrl = zapFeeConfig.relayUrl
+    || (location.protocol === 'https:' ? `wss://${location.host}` : `ws://${location.host}`);
+  const aw = String(zapFeeConfig.authorWeight || 9);
+  const rw = String(zapFeeConfig.relayWeight || 1);
+  const rpk = relayPubkey;
+  if (!rpk) return null;
+  return [
+    ['zap', authorPubkey, relayUrl, aw],
+    ['zap', rpk, relayUrl, rw],
+  ];
+}
+
+/** Client-signed post: user nsec/NIP-07 signs, settle via /api/v1/events. */
+async function submitClientSignedPost(content, btn) {
+  const name = document.getElementById('post-name').value.trim();
+  const amount = parseInt(document.getElementById('post-amount').value);
+  const replyTo = document.getElementById('post-form').dataset.replyTo;
+
+  const tags = [];
+  if (name) tags.push(['display_name', name]);
+  if (replyTo && replyTo.length === 64) tags.push(['e', replyTo, '', 'reply']);
+
+  const authorPk = userPubkey;
+  const zapTags = buildClientZapFeeTags(authorPk);
+  if (!zapTags) {
+    btn.disabled = false;
+    btn.textContent = 'Post Note';
+    alert('Relay info not loaded yet — wait a moment and retry');
+    return;
+  }
+  tags.push(...zapTags);
+
+  const event = {
+    kind: 1,
+    created_at: Math.floor(Date.now() / 1000),
+    tags,
+    content,
+  };
+  const signed = await signNostrEvent(event);
+  if (!signed) {
+    btn.disabled = false;
+    btn.textContent = 'Post Note';
+    alert('Could not sign note — re-enter your key on /profile');
+    return;
+  }
+
+  const body = { event: signed };
+  if (amount && amount >= 21) body.amount_sats = amount;
+
+  const postOpts = {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  };
+  // NIP-98 so we pass the early-auth gate and get pending+L402 JSON (like profile)
+  let resp = await authFetch('/api/v1/events', postOpts);
+  let data = await resp.json().catch(() => ({}));
+
+  if (resp.ok && data.paid) {
+    document.getElementById('post-content').value = '';
+    clearReplyState();
+    btn.disabled = false;
+    btn.textContent = 'Post Note';
+    return;
+  }
+
+  if (resp.status === 402 || data.status === 'payment_required') {
+    const challenge = parseL402Challenge(resp, data);
+    if (challenge) {
+      data._title = 'Pay to post (L402):';
+      showPaymentWidget(data, null, () => {
+        btn.disabled = false;
+        btn.textContent = 'Post Note';
+      }, document.getElementById('post-form'));
+      const lnStatus = document.getElementById('pw-ln-status');
+      try {
+        resp = await payL402AndRetry('/api/v1/events', postOpts, challenge, lnStatus);
+        data = await resp.json().catch(() => ({}));
+        if (resp.ok && data.paid) {
+          document.getElementById('post-content').value = '';
+          clearReplyState();
+          hidePaymentWidget();
+          btn.disabled = false;
+          btn.textContent = 'Post Note';
+          return;
+        }
+        if (lnStatus) {
+          lnStatus.textContent = (typeof data.detail === 'string' ? data.detail : null)
+            || 'L402 settle failed — try Tempo tab if available';
+          lnStatus.style.color = 'var(--error)';
+        }
+      } catch (payErr) {
+        if (lnStatus) {
+          lnStatus.textContent = payErr.message || 'Payment failed';
+          lnStatus.style.color = 'var(--error)';
+        }
+      }
+    }
+
+    const hasPay = data.bolt11 || data.tempo || data.stripe
+      || (data.lightning && data.lightning.bolt11)
+      || ((data.methods || []).length > 0);
+    if (hasPay) {
+      data._title = data._title || 'Pay to post your note:';
+      showPaymentWidget(data, async (token, paymentId, method, preimage) => {
+        const statusEl = document.getElementById('pw-stripe-status')
+          || document.getElementById('pw-tempo-status')
+          || document.getElementById('pw-ln-status');
+        try {
+          let auth = null;
+          if (method === 'stripe') {
+            const ch = (data.stripe && data.stripe.challenge) || {};
+            auth = buildStripePaymentAuth(ch, paymentId);
+          } else if (method === 'tempo') {
+            const ch = (data.tempo && data.tempo.challenge)
+              || parsePaymentChallenge(null, data, 'tempo') || {};
+            auth = buildTempoPaymentAuth(ch, paymentId);
+          } else if (method === 'lightning') {
+            const ch = (data.lightning && data.lightning.challenge)
+              || parsePaymentChallenge(null, data, 'lightning') || {};
+            if (!preimage) {
+              if (statusEl) {
+                statusEl.textContent = 'Connect a Lightning wallet to settle (preimage required)';
+                statusEl.style.color = 'var(--error)';
+              }
+              return;
+            }
+            auth = buildLightningPaymentAuth(ch, preimage);
+          } else {
+            if (statusEl) {
+              statusEl.textContent = 'Unsupported payment method';
+              statusEl.style.color = 'var(--error)';
+            }
+            return;
+          }
+          const headers = Object.assign(
+            {},
+            postOpts.headers || {},
+            { Authorization: auth, 'X-Requested-With': 'XMLHttpRequest' },
+          );
+          const cr = await apiFetch('/api/v1/events', Object.assign({}, postOpts, { headers }));
+          const cd = await cr.json().catch(() => ({}));
+          if (cr.ok && cd.paid) {
+            document.getElementById('post-content').value = '';
+            clearReplyState();
+            btn.disabled = false;
+            btn.textContent = 'Post Note';
+            hidePaymentWidget();
+          } else if (statusEl) {
+            statusEl.textContent = (typeof cd.detail === 'string' ? cd.detail : null)
+              || (method + ' settle failed');
+            statusEl.style.color = 'var(--error)';
+          }
+        } catch (err) {
+          if (statusEl) {
+            statusEl.textContent = (err && err.message) || 'Payment settle failed';
+            statusEl.style.color = 'var(--error)';
+          }
+        }
+      }, () => {
+        btn.disabled = false;
+        btn.textContent = 'Post Note';
+      }, document.getElementById('post-form'));
+      return;
+    }
+  }
+
+  btn.disabled = false;
+  btn.textContent = 'Post Note';
+  if (data.detail) alert(typeof data.detail === 'string' ? data.detail : 'Post failed');
+}
+
+/** Anonymous relay-signed post via /api/v1/post. */
+async function submitRelaySignedPost(content, btn) {
+  const body = { content };
+  const name = document.getElementById('post-name').value.trim();
+  if (name) body.display_name = name;
+  const amount = parseInt(document.getElementById('post-amount').value);
+  if (amount && amount >= 21) body.amount_sats = amount;
+  const replyTo = document.getElementById('post-form').dataset.replyTo;
+  if (replyTo) body.reply_to = replyTo;
+
+  const postOpts = {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  };
+  // Use apiFetch (no NIP-98) so L402 Authorization is free for the settle retry
+  let resp = await apiFetch('/api/v1/post', postOpts);
+  let data = await resp.json().catch(() => ({}));
+
+  if (resp.ok && data.paid) {
+    document.getElementById('post-content').value = '';
+    clearReplyState();
+    btn.disabled = false;
+    btn.textContent = 'Post Note';
+    return;
+  }
+
+  if (resp.status === 402 || data.status === 'payment_required') {
+    const challenge = parseL402Challenge(resp, data);
+    if (challenge) {
+      data._title = 'Pay to post (L402):';
+      showPaymentWidget(data, null, () => {
+        btn.disabled = false;
+        btn.textContent = 'Post Note';
+      }, document.getElementById('post-form'));
+      const lnStatus = document.getElementById('pw-ln-status');
+      try {
+        resp = await payL402AndRetry('/api/v1/post', postOpts, challenge, lnStatus);
+        data = await resp.json().catch(() => ({}));
+        if (resp.ok && data.paid) {
+          document.getElementById('post-content').value = '';
+          clearReplyState();
+          hidePaymentWidget();
+          btn.disabled = false;
+          btn.textContent = 'Post Note';
+          return;
+        }
+        if (lnStatus) {
+          lnStatus.textContent = (typeof data.detail === 'string' ? data.detail : null)
+            || 'L402 settle failed — try Tempo tab if available';
+          lnStatus.style.color = 'var(--error)';
+        }
+      } catch (payErr) {
+        if (lnStatus) {
+          lnStatus.textContent = payErr.message || 'Payment failed';
+          lnStatus.style.color = 'var(--error)';
+        }
+      }
+      // Fall through to Tempo/MPP widget if L402 wallet path failed
+    }
+
+    // Tempo / Stripe / QR fallback (also used when 402 has no L402 challenge)
+    const hasPay = data.bolt11 || data.tempo || data.stripe
+      || (data.lightning && data.lightning.bolt11)
+      || ((data.methods || []).length > 0);
+    if (hasPay) {
+      data._title = data._title || 'Pay to post your note:';
+      showPaymentWidget(data, async (token, paymentId, method, preimage) => {
+        const statusEl = document.getElementById('pw-stripe-status')
+          || document.getElementById('pw-tempo-status')
+          || document.getElementById('pw-ln-status');
+        try {
+          let auth = null;
+          if (method === 'stripe') {
+            const ch = (data.stripe && data.stripe.challenge) || {};
+            auth = buildStripePaymentAuth(ch, paymentId);
+          } else if (method === 'tempo') {
+            const ch = (data.tempo && data.tempo.challenge)
+              || parsePaymentChallenge(null, data, 'tempo') || {};
+            auth = buildTempoPaymentAuth(ch, paymentId);
+          } else if (method === 'lightning') {
+            const ch = (data.lightning && data.lightning.challenge)
+              || parsePaymentChallenge(null, data, 'lightning') || {};
+            if (!preimage) {
+              if (statusEl) {
+                statusEl.textContent = 'Connect a Lightning wallet to settle (preimage required)';
+                statusEl.style.color = 'var(--error)';
+              }
+              return;
+            }
+            auth = buildLightningPaymentAuth(ch, preimage);
+          } else {
+            if (statusEl) {
+              statusEl.textContent = 'Unsupported payment method';
+              statusEl.style.color = 'var(--error)';
+            }
+            return;
+          }
+          const headers = Object.assign(
+            {},
+            postOpts.headers || {},
+            { Authorization: auth, 'X-Requested-With': 'XMLHttpRequest' },
+          );
+          const cr = await apiFetch('/api/v1/post', Object.assign({}, postOpts, { headers }));
+          const cd = await cr.json().catch(() => ({}));
+          if (cr.ok && cd.paid) {
+            document.getElementById('post-content').value = '';
+            clearReplyState();
+            btn.disabled = false;
+            btn.textContent = 'Post Note';
+            hidePaymentWidget();
+          } else if (statusEl) {
+            statusEl.textContent = (typeof cd.detail === 'string' ? cd.detail : null)
+              || (method + ' settle failed');
+            statusEl.style.color = 'var(--error)';
+          }
+        } catch (err) {
+          if (statusEl) {
+            statusEl.textContent = (err && err.message) || 'Payment settle failed';
+            statusEl.style.color = 'var(--error)';
+          }
+        }
+      }, () => {
+        btn.disabled = false;
+        btn.textContent = 'Post Note';
+      }, document.getElementById('post-form'));
+      return;
+    }
+  }
+
+  btn.disabled = false;
+  btn.textContent = 'Post Note';
+}
 
 
 // ---- Voting / Zap ----
@@ -566,8 +752,10 @@ async function submitZap(eventId) {
   const amount = parseInt(amountInput.value) || 21;
   const status = document.getElementById(`vote-status-${eventId}`);
 
-  if (!isLoggedIn()) {
-    status.textContent = 'Set identity on /profile to zap';
+  if (!canSign()) {
+    status.textContent = (authMode === 'nsec' && !userNsec)
+      ? 'Re-enter your private key on /profile to sign'
+      : 'Set identity on /profile to zap';
     status.style.color = 'var(--error)';
     return;
   }
@@ -934,9 +1122,16 @@ updateHeaderLink();
 setTimeout(updateHeaderLink, 500);
 setFeed('clankfeed');  // load clankfeed-only feed via REST (origin=clankfeed)
 
-// Fetch relay info for pubkey display
-fetch('/', { headers: { 'Accept': 'application/nostr+json' }})
-  .then(r => r.json())
+// Fetch relay info for pubkey display + zap fee config (cache: no-store avoids
+// serving cached HTML when Accept negotiates NIP-11 JSON on the same URL)
+fetch('/', { headers: { 'Accept': 'application/nostr+json' }, cache: 'no-store' })
+  .then(async r => {
+    const ct = (r.headers.get('content-type') || '').toLowerCase();
+    if (!ct.includes('json') && !ct.includes('nostr+json')) {
+      throw new Error('NIP-11 expected JSON, got ' + (ct || 'unknown'));
+    }
+    return r.json();
+  })
   .then(info => {
     if (info.pubkey) {
       relayPubkey = info.pubkey;
@@ -946,5 +1141,13 @@ fetch('/', { headers: { 'Accept': 'application/nostr+json' }})
       updateHeaderLink();  // update with user's display name if available
     }
     if (info.lud16) relayLud16 = info.lud16;
+    const fees = info.zap_fees || info.zapFees;
+    if (fees && typeof fees === 'object') {
+      zapFeeConfig = {
+        authorWeight: fees.author_weight || fees.authorWeight || 9,
+        relayWeight: fees.relay_weight || fees.relayWeight || 1,
+        relayUrl: fees.relay_url || fees.relayUrl || '',
+      };
+    }
   })
   .catch(e => console.error('NIP-11 fetch failed:', e));
