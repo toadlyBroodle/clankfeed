@@ -20,12 +20,30 @@ async function initPage() {
 
 
 function setAvatarImg(el, src, className, style) {
+  if (!el) return;
+  const keepId = el.id || '';
+  // Prefer mutating an existing <img> so the id never leaves the DOM.
+  if (el.tagName === 'IMG') {
+    if (className) el.className = className;
+    if (style) el.setAttribute('style', style);
+    el.onerror = () => {
+      const div = document.createElement('div');
+      if (keepId) div.id = keepId;
+      div.className = 'avatar-placeholder text-lg';
+      div.textContent = '?';
+      el.replaceWith(div);
+    };
+    el.src = src;
+    return;
+  }
   const img = document.createElement('img');
+  if (keepId) img.id = keepId;
   if (className) img.className = className;
   if (style) img.setAttribute('style', style);
   img.src = src;
   img.addEventListener('error', () => {
     const div = document.createElement('div');
+    if (keepId) div.id = keepId;
     div.className = 'avatar-placeholder text-lg';
     div.textContent = '?';
     img.replaceWith(div);
