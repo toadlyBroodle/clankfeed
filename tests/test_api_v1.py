@@ -254,7 +254,9 @@ class TestReadEvents:
         assert resp.status_code == 200
         data = resp.json()
         assert data["count"] >= 1
-        assert any(e["content"] == "readable" for e in data["events"])
+        from tests.conftest import attributed
+
+        assert any(e["content"] == attributed("readable") for e in data["events"])
 
     @pytest.mark.asyncio
     async def test_read_filter_by_author(self, client):
@@ -291,7 +293,9 @@ class TestGetEvent:
         event_id = resp.json()["event"]["id"]
         resp = await client.get(f"/api/v1/events/{event_id}")
         assert resp.status_code == 200
-        assert resp.json()["event"]["content"] == "findme"
+        from tests.conftest import attributed
+
+        assert resp.json()["event"]["content"] == attributed("findme")
 
     @pytest.mark.asyncio
     async def test_get_nonexistent(self, client):

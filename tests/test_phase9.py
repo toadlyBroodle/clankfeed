@@ -101,8 +101,10 @@ class TestSortAndFilter:
 
         resp = await client.get("/api/v1/events?sort=value&kinds=1")
         events = resp.json()["events"]
+        from tests.conftest import attributed
+
         assert events[0]["sats_clank"] >= events[-1]["sats_clank"]
-        assert events[0]["content"] == "high"
+        assert events[0]["content"] == attributed("high")
 
     @pytest.mark.asyncio
     async def test_sort_by_newest(self, client):
@@ -122,8 +124,10 @@ class TestSortAndFilter:
 
         resp = await client.get("/api/v1/events?min_value=100&kinds=1")
         events = resp.json()["events"]
+        from tests.conftest import attributed
+
         assert all(e["sats_clank"] >= 100 for e in events)
-        assert any(e["content"] == "pricey" for e in events)
+        assert any(e["content"] == attributed("pricey") for e in events)
 
     @pytest.mark.asyncio
     async def test_max_value_filter(self, client):
@@ -144,8 +148,10 @@ class TestSortAndFilter:
 
         resp = await client.get("/api/v1/events?sort=value&min_value=100&max_value=300&kinds=1")
         events = resp.json()["events"]
+        from tests.conftest import attributed
+
         assert len(events) == 1
-        assert events[0]["content"] == "b"
+        assert events[0]["content"] == attributed("b")
 
     @pytest.mark.asyncio
     async def test_invalid_sort_defaults_to_newest(self, client):
@@ -197,8 +203,10 @@ class TestReplies:
         await client.post("/api/v1/post", json={"content": "unrelated"})
 
         resp = await client.get(f"/api/v1/events?reply_to={parent_id}&kinds=1")
+        from tests.conftest import attributed
+
         assert resp.json()["count"] == 1
-        assert resp.json()["events"][0]["content"] == "reply"
+        assert resp.json()["events"][0]["content"] == attributed("reply")
 
     @pytest.mark.asyncio
     async def test_replies_to_nonexistent(self, client):

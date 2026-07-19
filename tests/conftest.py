@@ -12,6 +12,7 @@ import pytest
 import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
 
+from app.attribution import with_clankfeed_attribution
 from app.database import engine, Base
 from app.main import app
 from app.zaps import build_zap_split_tags, pubkey_from_privkey
@@ -22,6 +23,11 @@ def kind1_tags(privkey_hex: str, extra: list | None = None) -> list:
     tags = list(extra or [])
     tags.extend(build_zap_split_tags(pubkey_from_privkey(privkey_hex)))
     return tags
+
+
+def attributed(body: str) -> str:
+    """Expected stored content for relay-signed /api/v1/post and /api/post notes."""
+    return with_clankfeed_attribution(body)
 
 
 @pytest_asyncio.fixture

@@ -182,7 +182,9 @@ class TestL402PaysActions:
         data = resp.json()
         assert data.get("paid") is True
         assert "event" in data
-        assert data["event"]["content"] == "paid via l402"
+        from tests.conftest import attributed
+
+        assert data["event"]["content"] == attributed("paid via l402")
         assert data.get("credits_used") is not True
 
     @pytest.mark.asyncio
@@ -348,7 +350,9 @@ class TestPayPostAcceptsL402:
         )
         data = resp.json()
         assert "event" in data
-        assert data["event"]["content"] == "pending for l402 pay"
+        from tests.conftest import attributed
+
+        assert data["event"]["content"] == attributed("pending for l402 pay")
 
     @pytest.mark.asyncio
     async def test_pay_post_accepts_lsat_prefix(self, paid_client):
@@ -363,7 +367,9 @@ class TestPayPostAcceptsL402:
                 headers={"Authorization": auth},
             )
         assert resp.status_code == 200, resp.text
-        assert resp.json()["event"]["content"] == "pending for l402 pay"
+        from tests.conftest import attributed
+
+        assert resp.json()["event"]["content"] == attributed("pending for l402 pay")
 
     @pytest.mark.asyncio
     async def test_pay_post_invalid_l402_gets_fresh_challenge(self, paid_client):

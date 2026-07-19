@@ -98,13 +98,21 @@ class TestAutolinkUI4Source:
         index = ((_STATIC / "index.js").read_text() + "\n" + (_STATIC / "index.html").read_text())
         fn = index.split("function renderNoteCard", 1)[1].split("\nfunction ", 1)[0]
         assert "linkify(" in fn
-        # Must not dump raw esc(content) alone into the content paragraph
-        assert "linkify(n.content)" in fn or "linkify(n.content ||" in fn
+        # Display-time attribution: linkify(displayNoteContent(n)), not raw n.content
+        assert (
+            "linkify(displayNoteContent(n))" in fn
+            or "linkify(n.content)" in fn
+            or "linkify(n.content ||" in fn
+        )
 
     def test_profile_notes_use_linkify(self):
         profile = ((_STATIC / "profile.js").read_text() + "\n" + (_STATIC / "profile.html").read_text())
         assert "linkify(" in profile
-        assert "linkify(n.content)" in profile or "linkify(n.content ||" in profile
+        assert (
+            "linkify(displayNoteContent(n))" in profile
+            or "linkify(n.content)" in profile
+            or "linkify(n.content ||" in profile
+        )
 
     def test_linkify_only_http_https_and_escapes(self):
         js = (_STATIC / "nostr-auth.js").read_text()
@@ -524,7 +532,10 @@ async def test_ui42_profile_autolink_and_many_links(live_server):
 
 @pytest.mark.asyncio
 async def test_ui43_zero_url_note_has_no_note_links(live_server):
-    """UI-4.3: note with no http(s) → zero .note-link anchors (none cardinality)."""
+    """UI-4.3: user text with no http(s) → zero non-promo .note-link anchors.
+
+    Local kind:1 notes still get one display-time clankfeed.com attribution link.
+    """
     pytest.importorskip("playwright")
     from playwright.async_api import async_playwright
 
@@ -538,10 +549,19 @@ async def test_ui43_zero_url_note_has_no_note_links(live_server):
 
         plain = page.locator(f"#note-{seeded['plain_note_id']}")
         await plain.wait_for(timeout=15000)
-        plain_links = plain.locator(
+        all_links = plain.locator(
             ".note-content a.note-link, .note-content a[href^='http']"
         )
-        assert await plain_links.count() == 0
+        hrefs = [
+            await all_links.nth(i).get_attribute("href")
+            for i in range(await all_links.count())
+        ]
+        # Local notes get display-time clankfeed promo; user text must still add zero URLs
+        non_promo = [h for h in hrefs if h and "clankfeed.com" not in h.lower()]
+        assert non_promo == [], f"unexpected non-promo links: {non_promo}"
+        assert any(h and "clankfeed.com" in h.lower() for h in hrefs), (
+            "expected display-time attribution link on local plain note"
+        )
         # Adversarial: bare www. / javascript: must not become hrefs either
         assert await plain.locator("a[href^='javascript:']").count() == 0
         assert await plain.locator("a[href*='notalink']").count() == 0

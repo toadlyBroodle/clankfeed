@@ -53,7 +53,9 @@ async def test_api_post_test_mode(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["paid"] is True
-    assert data["event"]["content"] == "Hello from test!"
+    from tests.conftest import attributed
+
+    assert data["event"]["content"] == attributed("Hello from test!")
     assert len(data["event"]["id"]) == 64
     assert len(data["event"]["sig"]) == 128
 

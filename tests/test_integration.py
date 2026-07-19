@@ -191,7 +191,9 @@ class TestApiPostMethods:
         assert resp.status_code == 200
         data = resp.json()
         assert data["paid"] is True
-        assert data["event"]["content"] == "free post"
+        from tests.conftest import attributed
+
+        assert data["event"]["content"] == attributed("free post")
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +232,9 @@ class TestTempoPaymentAuth:
         assert resp.status_code == 200
         data = resp.json()
         assert data["paid"] is True
-        assert data["event"]["content"] == "tempo payment auth"
+        from tests.conftest import attributed
+
+        assert data["event"]["content"] == attributed("tempo payment auth")
 
     @pytest.mark.asyncio
     async def test_tempo_payment_auth_unpaid_returns_402(self, tempo_client):

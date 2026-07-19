@@ -136,13 +136,15 @@ async def test_h5_post_and_vote_pos_send_xrw(live_server):
         )
 
         # Seeded note appears after paid post; vote on it
+        from tests.conftest import attributed
+
         note_id = None
         with httpx.Client(
             base_url=base, timeout=10.0, headers={"X-Requested-With": "XMLHttpRequest"}
         ) as c:
             events = c.get("/api/v1/events?kinds=1&limit=5").json()["events"]
             for e in events:
-                if e.get("content") == "h5-xrw-post-note":
+                if e.get("content") == attributed("h5-xrw-post-note"):
                     note_id = e["id"]
                     break
         assert note_id, "posted note not found via API"

@@ -116,8 +116,10 @@ class TestXSS:
         xss = '<script>alert("xss")</script>'
         resp = await client.post("/api/v1/post", json={"content": xss})
         assert resp.status_code == 200
-        # Content stored verbatim (escaping is client-side)
-        assert resp.json()["event"]["content"] == xss
+        # XSS payload preserved; relay-signed posts also bake attribution
+        from tests.conftest import attributed
+
+        assert resp.json()["event"]["content"] == attributed(xss)
 
     @pytest.mark.asyncio
     async def test_xss_in_display_name(self, client):

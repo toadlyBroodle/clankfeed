@@ -37,8 +37,12 @@ class TestNoteContentOverflowUI1:
         assert "function renderNoteCard" in index
         fn = index.split("function renderNoteCard", 1)[1].split("\nfunction ", 1)[0]
         assert "note-content" in fn
-        # Content paragraph must carry the wrap class (not bare whitespace-pre-wrap alone)
-        assert "note-content" in fn and ("n.content" in fn or "${esc(n.content)}" in fn)
+        # Content paragraph uses wrap class + note body (raw or displayNoteContent)
+        assert "note-content" in fn and (
+            "displayNoteContent(n)" in fn
+            or "n.content" in fn
+            or "${esc(n.content)}" in fn
+        )
 
     def test_profile_notes_use_note_content_class(self):
         profile = ((_STATIC / "profile.js").read_text() + "\n" + (_STATIC / "profile.html").read_text())
