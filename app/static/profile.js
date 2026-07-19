@@ -55,18 +55,14 @@ async function loginWithNsec() {
   errEl.classList.add('hidden');
   if (!input) return;
   try {
-    if (!/^[0-9a-f]{64}$/i.test(input)) {
-      errEl.textContent = 'Invalid key: must be 64-char hex';
-      errEl.classList.remove('hidden');
-      return;
-    }
-    const pubkey = derivePubkey(input);
-    setAuthState('nsec', pubkey, input);
+    const privhex = normalizeNsec(input);
+    const pubkey = derivePubkey(privhex);
+    setAuthState('nsec', pubkey, privhex);
     document.getElementById('login-nsec').value = '';
     await establishSession();
     showOwnAccount();
   } catch (err) {
-    errEl.textContent = 'Invalid private key';
+    errEl.textContent = 'Invalid private key (hex or nsec1…)';
     errEl.classList.remove('hidden');
   }
 }
@@ -86,13 +82,13 @@ async function createIdentity() {
     document.getElementById('new-pub').value = pubkey;
     document.getElementById('new-priv').value = privhex;
     document.getElementById('new-identity-display').classList.remove('hidden');
-    document.getElementById('copy-new-pub').onclick = () => {
-      navigator.clipboard.writeText(pubkey);
+    document.getElementById('copy-new-pub').onclick = async () => {
+      await copyToClipboard(pubkey);
       document.getElementById('copy-new-pub').textContent = '[copied!]';
       setTimeout(() => document.getElementById('copy-new-pub').textContent = '[copy]', 1500);
     };
-    document.getElementById('copy-new-priv').onclick = () => {
-      navigator.clipboard.writeText(privhex);
+    document.getElementById('copy-new-priv').onclick = async () => {
+      await copyToClipboard(privhex);
       document.getElementById('copy-new-priv').textContent = '[copied!]';
       setTimeout(() => document.getElementById('copy-new-priv').textContent = '[copy]', 1500);
     };
@@ -325,10 +321,10 @@ document.getElementById('btn-create-identity')?.addEventListener('click', create
 document.getElementById('btn-save-profile')?.addEventListener('click', saveProfile);
 document.getElementById('btn-logout')?.addEventListener('click', doLogout);
 document.getElementById('copy-key-pub')?.addEventListener('click', () => {
-  navigator.clipboard.writeText(document.getElementById('key-pub').value);
+  copyToClipboard(document.getElementById('key-pub').value);
 });
 document.getElementById('copy-key-priv')?.addEventListener('click', () => {
-  navigator.clipboard.writeText(document.getElementById('key-priv').value);
+  copyToClipboard(document.getElementById('key-priv').value);
 });
 ['new-pub', 'new-priv', 'key-pub'].forEach((id) => {
   document.getElementById(id)?.addEventListener('focus', (e) => e.target.select());

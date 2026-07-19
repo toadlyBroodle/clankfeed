@@ -33,9 +33,10 @@
     <div class="space-y-3">
       <button class="px-3 py-2 rounded w-full text-left" id="btn-ext-login" style="display:none; border: 1px solid var(--border);">Login with Nostr Extension (NIP-07)</button>
       <div>
-        <label class="text-xs c-dim">Private key (hex)</label>
+        <label class="text-xs c-dim">Private key (hex or nsec1…)</label>
         <div class="flex gap-2 mt-1">
-          <input id="login-nsec" type="password" class="p-2 rounded flex-1" placeholder="paste hex private key">
+          <input id="login-nsec" type="text" autocomplete="off" spellcheck="false" autocapitalize="off"
+            class="p-2 rounded flex-1" placeholder="paste hex or nsec1… private key">
           <button class="px-3 py-2 rounded" id="btn-login-nsec">Login</button>
         </div>
       </div>

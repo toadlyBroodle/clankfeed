@@ -24,6 +24,53 @@ function canSign() {
   return false;
 }
 
+/**
+ * Normalize a private key input to 64-char lowercase hex.
+ * Accepts raw hex or NIP-19 bech32 nsec1… (via __nostrCrypto.decodeNsecBytes).
+ */
+function normalizeNsec(input) {
+  const raw = String(input == null ? '' : input).trim();
+  if (!raw) throw new Error('empty key');
+  if (/^[0-9a-f]{64}$/i.test(raw)) return raw.toLowerCase();
+  const crypto = window.__nostrCrypto;
+  if (!crypto || typeof crypto.decodeNsecBytes !== 'function') {
+    throw new Error('crypto not ready');
+  }
+  if (!/^nsec1/i.test(raw)) throw new Error('invalid key');
+  return crypto.bytesToHex(crypto.decodeNsecBytes(raw));
+}
+
+/**
+ * Copy text to clipboard; falls back to select + execCommand when
+ * navigator.clipboard is missing or rejects (non-secure context / permission).
+ * Returns a Promise<boolean>.
+ */
+async function copyToClipboard(text) {
+  const value = text == null ? '' : String(text);
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    try {
+      await navigator.clipboard.writeText(value);
+      return true;
+    } catch (e) {
+      /* fall through */
+    }
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = value;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return !!ok;
+  } catch (e) {
+    return false;
+  }
+}
+
 function setAuthState(mode, pubkey, nsec) {
   authMode = mode;
   userPubkey = pubkey;

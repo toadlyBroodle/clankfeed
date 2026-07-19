@@ -255,7 +255,15 @@ document.getElementById('post-form').addEventListener('submit', async (e) => {
       await submitClientSignedPost(content, btn);
       return;
     }
-    // Anonymous / stale session → relay-signed /api/v1/post
+    // Stale nsec session (pubkey cached, key scrubbed after /profile→/) — do not
+    // relay-sign with a logged-in display_name façade; mirror submitZap re-entry.
+    if (authMode === 'nsec' && !userNsec) {
+      btn.disabled = false;
+      btn.textContent = 'Post Note';
+      alert('Re-enter your private key on /profile to sign');
+      return;
+    }
+    // Anonymous / cannot-sign → relay-signed /api/v1/post
     await submitRelaySignedPost(content, btn);
   } catch (err) {
     console.error('Post error:', err);
