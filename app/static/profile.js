@@ -232,12 +232,22 @@ async function saveProfile() {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({event: signed}),
     });
-    const data = await resp.json();
+    let data = await resp.json();
     if (data.paid || data.event) {
       status.textContent = 'Saved!';
       status.style.color = 'var(--accent)';
       showOwnAccount();
     } else if (data.token || resp.status === 402 || data.status === 'payment_required') {
+      const sats = (data.lightning && data.lightning.amount_sats)
+        || data.amount_sats
+        || 21;
+      if (!window.confirm(
+        `Update profile for ${sats} sats?\n\nYou will be asked to pay a Lightning invoice. Cancel if you do not want to pay.`,
+      )) {
+        status.textContent = 'Save cancelled — no payment sent';
+        status.style.color = 'var(--dim)';
+        return;
+      }
       data._title = 'Pay to update profile:';
       status.textContent = 'Payment required — pay the invoice to save';
       status.style.color = 'var(--dim)';
@@ -246,52 +256,91 @@ async function saveProfile() {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({event: signed}),
       };
-      showPaymentWidget(data, async (token, paymentId, method, preimage) => {
+      // Primary: L402 pay + retry (same as home post) — keeps macaroon:preimage intact.
+      const challenge = parseL402Challenge(resp, data);
+      if (challenge) {
+        showPaymentWidget(data, null, null, document.getElementById('section-profile'));
+        const lnStatus = document.getElementById('pw-ln-status');
         try {
-          let auth = null;
-          if (method === 'stripe') {
-            const ch = (data.stripe && data.stripe.challenge) || {};
-            auth = buildStripePaymentAuth(ch, paymentId);
-          } else if (method === 'tempo') {
-            const ch = (data.tempo && data.tempo.challenge)
-              || parsePaymentChallenge(null, data, 'tempo') || {};
-            auth = buildTempoPaymentAuth(ch, paymentId);
-          } else if (method === 'lightning') {
-            const ch = (data.lightning && data.lightning.challenge)
-              || parsePaymentChallenge(null, data, 'lightning') || {};
-            if (!preimage) {
-              status.textContent = 'Connect a Lightning wallet to settle (preimage required)';
-              status.style.color = 'var(--error)';
-              return;
-            }
-            auth = buildLightningPaymentAuth(ch, preimage);
-          } else {
-            status.textContent = 'Unsupported payment method';
-            status.style.color = 'var(--error)';
-            return;
-          }
-          const headers = Object.assign(
-            {},
-            eventOpts.headers || {},
-            { Authorization: auth, 'X-Requested-With': 'XMLHttpRequest' },
-          );
-          const cr = await authFetch('/api/v1/events', Object.assign({}, eventOpts, { headers }));
-          const cd = await cr.json().catch(() => ({}));
-          if (cd.paid || cd.event) {
+          const settled = await payL402AndRetry('/api/v1/events', eventOpts, challenge, lnStatus);
+          const cd = await settled.json().catch(() => ({}));
+          if (settled.ok && (cd.paid || cd.event)) {
             status.textContent = 'Saved!';
             status.style.color = 'var(--accent)';
             hidePaymentWidget();
             showOwnAccount();
-          } else {
-            status.textContent = (typeof cd.detail === 'string' ? cd.detail : null)
-              || 'Payment settle failed';
-            status.style.color = 'var(--error)';
+            return;
           }
-        } catch (err) {
-          status.textContent = (err && err.message) || 'Payment settle failed';
+          if (lnStatus) {
+            lnStatus.textContent = (typeof cd.detail === 'string' ? cd.detail : null)
+              || 'L402 settle failed — try QR / wallet again';
+            lnStatus.style.color = 'var(--error)';
+          }
+          status.textContent = (typeof cd.detail === 'string' ? cd.detail : null)
+            || 'Payment settle failed';
+          status.style.color = 'var(--error)';
+        } catch (payErr) {
+          if (lnStatus) {
+            lnStatus.textContent = payErr.message || 'Payment failed';
+            lnStatus.style.color = 'var(--error)';
+          }
+          status.textContent = payErr.message || 'Payment failed';
           status.style.color = 'var(--error)';
         }
-      }, null, document.getElementById('section-profile'));
+      }
+      // Fallback: widget QR / MPP Payment / Tempo / Stripe (apiFetch — never authFetch)
+      const hasPay = data.bolt11 || data.tempo || data.stripe
+        || (data.lightning && data.lightning.bolt11)
+        || ((data.methods || []).length > 0);
+      if (hasPay) {
+        showPaymentWidget(data, async (token, paymentId, method, preimage) => {
+          try {
+            let auth = null;
+            if (method === 'stripe') {
+              const ch = (data.stripe && data.stripe.challenge) || {};
+              auth = buildStripePaymentAuth(ch, paymentId);
+            } else if (method === 'tempo') {
+              const ch = (data.tempo && data.tempo.challenge)
+                || parsePaymentChallenge(null, data, 'tempo') || {};
+              auth = buildTempoPaymentAuth(ch, paymentId);
+            } else if (method === 'lightning') {
+              const ch = (data.lightning && data.lightning.challenge)
+                || parsePaymentChallenge(null, data, 'lightning') || {};
+              if (!preimage) {
+                status.textContent = 'Connect a Lightning wallet to settle (preimage required)';
+                status.style.color = 'var(--error)';
+                return;
+              }
+              auth = buildLightningPaymentAuth(ch, preimage);
+            } else {
+              status.textContent = 'Unsupported payment method';
+              status.style.color = 'var(--error)';
+              return;
+            }
+            const headers = Object.assign(
+              {},
+              eventOpts.headers || {},
+              { Authorization: auth, 'X-Requested-With': 'XMLHttpRequest' },
+            );
+            // apiFetch (not authFetch): must not replace Payment/L402 with NIP-98
+            const cr = await apiFetch('/api/v1/events', Object.assign({}, eventOpts, { headers }));
+            const cd = await cr.json().catch(() => ({}));
+            if (cd.paid || cd.event) {
+              status.textContent = 'Saved!';
+              status.style.color = 'var(--accent)';
+              hidePaymentWidget();
+              showOwnAccount();
+            } else {
+              status.textContent = (typeof cd.detail === 'string' ? cd.detail : null)
+                || 'Payment settle failed';
+              status.style.color = 'var(--error)';
+            }
+          } catch (err) {
+            status.textContent = (err && err.message) || 'Payment settle failed';
+            status.style.color = 'var(--error)';
+          }
+        }, null, document.getElementById('section-profile'));
+      }
     } else {
       status.textContent = data.detail || 'Failed';
       status.style.color = 'var(--error)';

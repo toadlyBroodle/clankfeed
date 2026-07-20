@@ -165,6 +165,13 @@ async function authHeaders(url, method, extra) {
   if (!headers['X-Requested-With'] && !headers['x-requested-with']) {
     headers['X-Requested-With'] = 'XMLHttpRequest';
   }
+  // Never clobber L402 / LSAT / MPP Payment credentials with NIP-98.
+  // Profile save + post settle pass Authorization: L402|Payment via authFetch;
+  // overwriting them made settle mint a fresh 402 invoice after the user paid.
+  const existing = headers['Authorization'] || headers['authorization'] || '';
+  if (/^(L402|LSAT|Payment)\b/i.test(String(existing).trim())) {
+    return headers;
+  }
   const nip98 = await makeNip98Auth(url, method);
   if (nip98) {
     headers['Authorization'] = nip98;
