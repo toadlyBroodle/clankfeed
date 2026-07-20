@@ -1020,11 +1020,12 @@ async function toggleReplies(eventId) {
     const resp = await fetch(`/api/v1/events/${eventId}/replies?sort=newest&limit=50`);
     const data = await resp.json();
     const replies = data.replies || [];
-    // Reliability: refresh this note's count from expand response
+    // Never lower a prior reply-counts total with capped page size (limit=50)
     const cnt = typeof data.count === 'number' ? data.count : replies.length;
     if (cnt > 0) {
-      replyCountCache[eventId] = cnt;
-      applyReplyCountToBtn(eventId, cnt, true);
+      const merged = Math.max(replyCountCache[eventId] || 0, cnt);
+      replyCountCache[eventId] = merged;
+      applyReplyCountToBtn(eventId, merged, true);
     }
 
     if (replies.length === 0) {

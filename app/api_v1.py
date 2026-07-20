@@ -40,7 +40,7 @@ from app.zaps import append_zap_split_tags, pubkey_from_privkey, validate_kind1_
 from app.relay import store_event, broadcast_event, store_pending_event, query_events, row_to_event
 from app.tempo_pay import build_tempo_challenge, verify_tempo_credential, extract_tempo_tx_hash
 from app.stripe_pay import build_stripe_challenge
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, func
 
 logger = logging.getLogger("clankfeed.api_v1")
 
@@ -950,7 +950,21 @@ async def get_replies(
 
     filt = {"reply_to": event_id, "kinds": [1], "limit": min(max(limit, 1), 500)}
     replies = await query_events(db, [filt], sort=sort)
-    return {"event_id": event_id, "replies": replies, "count": len(replies)}
+    # True total (unbounded) — same e-tag match as reply-counts / reply_to filter.
+    # Do NOT use len(replies): that is the capped page size.
+    total = (
+        await db.execute(
+            select(func.count())
+            .select_from(NostrEvent)
+            .where(
+                and_(
+                    NostrEvent.kind == 1,
+                    NostrEvent.tags.contains(f'"e", "{event_id}"'),
+                )
+            )
+        )
+    ).scalar() or 0
+    return {"event_id": event_id, "replies": replies, "count": int(total)}
 
 
 # ---------------------------------------------------------------------------
