@@ -110,23 +110,28 @@ function scheduleReplyCountFetch() {
   replyCountTimer = setTimeout(fetchReplyCounts, 500);
 }
 
-async function fetchReplyCounts() {
-  const ids = notes.map(n => n.id);
-  if (!ids.length) return;
+function applyReplyCountToBtn(eid, count, expanded) {
+  const btn = document.getElementById(`expand-replies-${eid}`);
+  if (!btn || !count) return;
+  btn.classList.add('has-replies');
+  const arrow = expanded ? '&#9652;' : '&#9662;';
+  btn.innerHTML = `${arrow} ${count} replies`;
+}
+
+async function fetchReplyCounts(ids) {
+  const eventIds = ids && ids.length ? ids : notes.map(n => n.id);
+  if (!eventIds.length) return;
   try {
     const resp = await apiFetch('/api/v1/events/reply-counts', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({event_ids: ids})
+      body: JSON.stringify({event_ids: eventIds})
     });
     const data = await resp.json();
-    replyCountCache = data.counts || {};
-    for (const [eid, count] of Object.entries(replyCountCache)) {
-      const btn = document.getElementById(`expand-replies-${eid}`);
-      if (btn) {
-        btn.classList.add('has-replies');
-        btn.innerHTML = `&#9662; ${count} replies`;
-      }
+    // Merge — do not wipe counts for ids not in this batch (nested expand)
+    Object.assign(replyCountCache, data.counts || {});
+    for (const [eid, count] of Object.entries(data.counts || {})) {
+      applyReplyCountToBtn(eid, count, !!expandedReplies[eid]);
     }
   } catch (e) {}
 }
@@ -1015,6 +1020,12 @@ async function toggleReplies(eventId) {
     const resp = await fetch(`/api/v1/events/${eventId}/replies?sort=newest&limit=50`);
     const data = await resp.json();
     const replies = data.replies || [];
+    // Reliability: refresh this note's count from expand response
+    const cnt = typeof data.count === 'number' ? data.count : replies.length;
+    if (cnt > 0) {
+      replyCountCache[eventId] = cnt;
+      applyReplyCountToBtn(eventId, cnt, true);
+    }
 
     if (replies.length === 0) {
       container.innerHTML = '<p class="text-xs c-dim p-2">No replies yet.</p>';
@@ -1023,6 +1034,12 @@ async function toggleReplies(eventId) {
 
     container.innerHTML = replies.map(r => renderNoteCard(r, true)).join('');
     bindAvatarFallback(container);
+    // Apply any cached counts to newly rendered nested expand buttons
+    for (const r of replies) {
+      applyReplyCountToBtn(r.id, replyCountCache[r.id], false);
+    }
+    // Fetch counts for nested reply cards (merge into cache)
+    await fetchReplyCounts(replies.map(r => r.id));
   } catch (err) {
     container.innerHTML = '<p class="text-xs c-error p-2">Failed to load replies.</p>';
   }
@@ -1040,22 +1057,41 @@ function scrollToNote(eventId) {
 // ---- Sort & Filter & Feed ----
 let filterMinValue = null;
 let filterMaxValue = null;
+let filterSinceKey = 'all';  // all | 1day | 3day | 1week | 1month
+
+const SINCE_WINDOW_SECS = {
+  '1day': 86400,
+  '3day': 259200,
+  '1week': 604800,
+  '1month': 2592000,
+};
+
+function sinceParamForFilter() {
+  const secs = SINCE_WINDOW_SECS[filterSinceKey];
+  if (!secs) return null;
+  return Math.floor(Date.now() / 1000) - secs;
+}
 
 function applyFilters() {
   const minVal = document.getElementById('filter-min').value;
   const maxVal = document.getElementById('filter-max').value;
   filterMinValue = minVal ? parseInt(minVal) : null;
   filterMaxValue = maxVal ? parseInt(maxVal) : null;
+  const sinceEl = document.getElementById('filter-since');
+  if (sinceEl) filterSinceKey = sinceEl.value || 'all';
   const clearBtn = document.getElementById('clear-filters-btn');
-  clearBtn.style.display = (filterMinValue !== null || filterMaxValue !== null) ? 'inline' : 'none';
+  clearBtn.style.display = (filterMinValue !== null || filterMaxValue !== null || filterSinceKey !== 'all') ? 'inline' : 'none';
   setSort(currentSort);
 }
 
 function clearFilters() {
   filterMinValue = null;
   filterMaxValue = null;
+  filterSinceKey = 'all';
   document.getElementById('filter-min').value = '';
   document.getElementById('filter-max').value = '';
+  const sinceEl = document.getElementById('filter-since');
+  if (sinceEl) sinceEl.value = 'all';
   document.getElementById('clear-filters-btn').style.display = 'none';
   setSort(currentSort);
 }
@@ -1099,6 +1135,8 @@ async function setSort(mode) {
     }
     if (filterMinValue !== null) url += `&min_value=${filterMinValue}`;
     if (filterMaxValue !== null) url += `&max_value=${filterMaxValue}`;
+    const since = sinceParamForFilter();
+    if (since !== null) url += `&since=${since}`;
     const resp = await fetch(url);
     const data = await resp.json();
     const fetched = data.events || [];
@@ -1141,6 +1179,15 @@ document.getElementById('sort-newest')?.addEventListener('click', () => setSort(
 document.getElementById('sort-value')?.addEventListener('click', () => setSort('value'));
 document.getElementById('apply-filters-btn')?.addEventListener('click', applyFilters);
 document.getElementById('clear-filters-btn')?.addEventListener('click', clearFilters);
+document.getElementById('filter-since')?.addEventListener('change', () => {
+  const sinceEl = document.getElementById('filter-since');
+  filterSinceKey = (sinceEl && sinceEl.value) || 'all';
+  const clearBtn = document.getElementById('clear-filters-btn');
+  if (clearBtn) {
+    clearBtn.style.display = (filterMinValue !== null || filterMaxValue !== null || filterSinceKey !== 'all') ? 'inline' : 'none';
+  }
+  setSort(currentSort);
+});
 document.getElementById('notes-feed')?.addEventListener('click', handleFeedAction);
 
 connect();

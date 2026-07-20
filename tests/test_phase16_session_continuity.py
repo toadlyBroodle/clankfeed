@@ -472,6 +472,9 @@ class TestSaveProfileStatusLive1618:
 
             await page.route("**/api/v1/events", _fulfill_402)
 
+            # 16.25: saveProfile window.confirm before pay — accept so widget opens
+            await page.evaluate("() => { window.confirm = () => true; }")
+
             await page.click("#btn-save-profile")
             for _ in range(50):
                 status = await page.evaluate(

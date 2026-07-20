@@ -74,6 +74,13 @@
           <button id="sort-value" class="px-2 py-1 rounded bg-alt" data-sort="value">Top</button>
         </div>
         <div class="flex items-center gap-1 filter-group">
+          <select id="filter-since" class="p-1 rounded text-xs" title="Time window">
+            <option value="all" selected>all</option>
+            <option value="1day">1day</option>
+            <option value="3day">3day</option>
+            <option value="1week">1week</option>
+            <option value="1month">1month</option>
+          </select>
           <input id="filter-min" type="number" min="0" class="p-1 rounded w-filter" placeholder="min sats" title="Minimum value in sats">
           <span class="c-dim">-</span>
           <input id="filter-max" type="number" min="0" class="p-1 rounded w-filter" placeholder="max sats" title="Maximum value in sats">
