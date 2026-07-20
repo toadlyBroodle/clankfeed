@@ -4,12 +4,19 @@
  */
 
 // ---- Auth State ----
-// Persist only non-secrets (mode + pubkey) for UX. nsec stays in memory only
-// (SECURITY H2). HTTP auth uses an httpOnly cf_session cookie after login.
+// Persist non-secrets (mode + pubkey) in localStorage for UX. nsec is
+// tab-scoped sessionStorage only — never localStorage (SECURITY H2 amendment
+// 16.17: memory-only broke multi-page signing). Cleared on logout / tab close.
 let authMode = localStorage.getItem('cf_auth_mode') || '';
 let userPubkey = localStorage.getItem('cf_pubkey') || '';
-let userNsec = ''; // never read from localStorage
-// Scrub any legacy secrets left from older clients
+let userNsec = '';
+try {
+  if (authMode === 'nsec') {
+    const stored = sessionStorage.getItem('cf_nsec') || '';
+    if (/^[0-9a-f]{64}$/i.test(stored)) userNsec = stored.toLowerCase();
+  }
+} catch (e) { /* sessionStorage unavailable */ }
+// Scrub any legacy secrets left from older clients (localStorage banned)
 localStorage.removeItem('cf_nsec');
 localStorage.removeItem('clankfeed_api_key');
 
@@ -78,8 +85,15 @@ function setAuthState(mode, pubkey, nsec) {
   userNsec = nsec || '';
   localStorage.setItem('cf_auth_mode', mode);
   localStorage.setItem('cf_pubkey', pubkey);
-  localStorage.removeItem('cf_nsec');
+  localStorage.removeItem('cf_nsec'); // never persist secret in localStorage
   localStorage.removeItem('clankfeed_api_key');
+  try {
+    if (mode === 'nsec' && userNsec) {
+      sessionStorage.setItem('cf_nsec', userNsec);
+    } else {
+      sessionStorage.removeItem('cf_nsec');
+    }
+  } catch (e) { /* sessionStorage unavailable */ }
 }
 
 async function establishSession() {
@@ -95,6 +109,9 @@ async function clearAuthState() {
   localStorage.removeItem('cf_pubkey');
   localStorage.removeItem('cf_nsec');
   localStorage.removeItem('clankfeed_api_key');
+  try {
+    sessionStorage.removeItem('cf_nsec');
+  } catch (e) {}
   try {
     await apiFetch('/api/v1/auth/logout', { method: 'POST', credentials: 'include' });
   } catch (e) {}

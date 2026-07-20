@@ -766,8 +766,15 @@ async function hydrateOwnProfile() {
 
 async function submitZap(eventId) {
   const amountInput = document.getElementById(`vote-amount-${eventId}`);
-  const amount = parseInt(amountInput.value) || 21;
   const status = document.getElementById(`vote-status-${eventId}`);
+  if (!amountInput) {
+    if (status) {
+      status.textContent = 'Amount input missing';
+      status.style.color = 'var(--error)';
+    }
+    return;
+  }
+  const amount = parseInt(amountInput.value) || 21;
 
   if (!canSign()) {
     status.textContent = (authMode === 'extension' && !window.nostr)

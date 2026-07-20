@@ -11,8 +11,16 @@ async function initPage() {
 
   if (viewPubkey && viewPubkey !== userPubkey) {
     showPublicProfile(viewPubkey);
-  } else if (isLoggedIn()) {
+  } else if (isLoggedIn() && canSign()) {
     showOwnAccount();
+  } else if (isLoggedIn() && !canSign()) {
+    // Stale façade: mode+pubkey in localStorage but no tab session nsec
+    document.getElementById('view-login').classList.remove('hidden');
+    const errEl = document.getElementById('login-error');
+    if (errEl) {
+      errEl.textContent = 'Re-enter your private key to continue signing';
+      errEl.classList.remove('hidden');
+    }
   } else {
     document.getElementById('view-login').classList.remove('hidden');
   }
@@ -229,8 +237,10 @@ async function saveProfile() {
       status.textContent = 'Saved!';
       status.style.color = 'var(--accent)';
       showOwnAccount();
-    } else if (data.token) {
+    } else if (data.token || resp.status === 402 || data.status === 'payment_required') {
       data._title = 'Pay to update profile:';
+      status.textContent = 'Payment required — pay the invoice to save';
+      status.style.color = 'var(--dim)';
       const eventOpts = {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},

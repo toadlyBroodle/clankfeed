@@ -214,15 +214,16 @@ class TestClientSignedNsecPostLive167:
 
 
 # ---------------------------------------------------------------------------
-# (2) /profile → / nsec drop: alert + zero /api/v1/post
+# (2) /profile → / with sessionStorage scrubbed: alert + zero /api/v1/post
 # ---------------------------------------------------------------------------
 
 
 class TestProfileHomeNsecDropLive167:
     @pytest.mark.asyncio
     async def test_profile_to_home_nsec_drop_alerts_zero_relay_post(self, live_server):
-        """Runtime RESULT: after /profile login, navigating to / drops in-memory
-        userNsec (H2); post must alert re-entry and never hit /api/v1/post.
+        """Runtime RESULT: when tab session nsec is scrubbed (sessionStorage cleared)
+        but mode+pubkey remain, post must alert re-entry and never hit /api/v1/post.
+        (16.17 keeps nsec across nav via sessionStorage; this covers the stale façade.)
         """
         from app.zaps import pubkey_from_privkey
         from playwright.async_api import async_playwright
@@ -254,7 +255,7 @@ class TestProfileHomeNsecDropLive167:
 
             await page.route("**/api/v1/**", on_route)
 
-            # Login on /profile with in-memory nsec (producer: loginWithNsec → setAuthState)
+            # Login on /profile with nsec (producer: loginWithNsec → setAuthState)
             await page.goto(
                 f"{base}/profile", wait_until="domcontentloaded", timeout=30_000
             )
@@ -267,10 +268,15 @@ class TestProfileHomeNsecDropLive167:
                 await asyncio.sleep(0.1)
             assert await page.evaluate("() => canSign()") is True
 
-            # Navigate home — userNsec is memory-only, so it must drop
+            # Scrub tab session secret but keep localStorage mode+pubkey façade
+            await page.evaluate(
+                """() => {
+                  sessionStorage.removeItem('cf_nsec');
+                  sessionStorage.removeItem('cf_session_nsec');
+                }"""
+            )
             await page.goto(f"{base}/", wait_until="domcontentloaded", timeout=30_000)
             await _wait_auth_ready(page)
-            # Persist mode+pubkey from localStorage; nsec must be gone
             assert await page.evaluate(
                 "() => isLoggedIn() && authMode === 'nsec' && !canSign()"
             ) is True
