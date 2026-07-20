@@ -660,7 +660,8 @@ async def get_profile(request: Request, pubkey: str, db: AsyncSession = Depends(
     need_fetch = row is None or refresh
 
     if need_fetch:
-        external = await fetch_author_kind0(pk)
+        # ?refresh=1 must re-contact EXTERNAL_RELAYS even within miss-cache TTL
+        external = await fetch_author_kind0(pk, bypass_negative_cache=refresh)
         if external:
             await store_event(db, external, sats_clank=0, origin="external")
             row = await _local_row()

@@ -112,12 +112,15 @@ async def _fetch_kind0_one_relay(url: str, pubkey: str) -> dict | None:
         return None
 
 
-async def fetch_author_kind0(pubkey: str) -> dict | None:
+async def fetch_author_kind0(
+    pubkey: str, *, bypass_negative_cache: bool = False
+) -> dict | None:
     """Fetch the author's latest kind:0 from EXTERNAL_RELAYS (EXT-1a).
 
     Parallel first-success across relays, capped by KIND0_FETCH_OVERALL_TIMEOUT.
     Confirmed misses are short-TTL negative-cached so random pubkeys cannot
-    re-hold workers for N×per-relay waits.
+    re-hold workers for N×per-relay waits. Pass bypass_negative_cache=True
+    (e.g. GET /api/v1/profile?refresh=1) to force a fresh EXTERNAL_RELAYS probe.
 
     Returns a validated kind:0 event dict, or None if none found / all fail.
     """
@@ -125,9 +128,10 @@ async def fetch_author_kind0(pubkey: str) -> dict | None:
         return None
 
     now = time.time()
-    miss_at = _kind0_miss_cache.get(pubkey)
-    if miss_at is not None and now - miss_at < KIND0_NEGATIVE_CACHE_TTL:
-        return None
+    if not bypass_negative_cache:
+        miss_at = _kind0_miss_cache.get(pubkey)
+        if miss_at is not None and now - miss_at < KIND0_NEGATIVE_CACHE_TTL:
+            return None
 
     urls = [u.strip() for u in settings.EXTERNAL_RELAYS.split(",") if u.strip()]
     if not urls:
