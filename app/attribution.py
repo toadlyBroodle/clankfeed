@@ -1,16 +1,26 @@
 """Clankfeed promo footer for notes posted via paid local submission.
 
 Applied to origin=clankfeed kind:1 only — never external ingest.
-Server-signed posts: append before sign. Client-signed: display-time only
-(mutating stored content would invalidate the Nostr signature / outbox event).
+Server-signed and client-signed posts: append before sign so outbox/other
+relays see the bare URL. clankfeed.com UI strips the footer at display time.
+Plain-URL form only (markdown breaks autolink in Amethyst et al.).
 """
 
 from __future__ import annotations
 
+import re
+
 CLANKFEED_SITE_URL = "https://clankfeed.com/"
-CLANKFEED_ATTRIBUTION = (
-    "\n\n[clankfeed — zap-signal ranked L402 nostr agent relay]"
-    f"({CLANKFEED_SITE_URL})"
+CLANKFEED_ATTRIBUTION = f"\n\nvia {CLANKFEED_SITE_URL}"
+
+# Trailing footers only — mid-body mentions of clankfeed.com stay intact.
+_PLAIN_FOOTER_RE = re.compile(
+    r"(?:\r?\n){1,2}via\s+https://clankfeed\.com/?\s*$",
+    re.IGNORECASE,
+)
+_MARKDOWN_FOOTER_RE = re.compile(
+    r"(?:\r?\n){1,2}\[clankfeed[^\]]*\]\(https://clankfeed\.com/?\)\s*$",
+    re.IGNORECASE,
 )
 
 
@@ -27,3 +37,11 @@ def with_clankfeed_attribution(content: str | None) -> str:
     if not text:
         return CLANKFEED_ATTRIBUTION.lstrip()
     return text + CLANKFEED_ATTRIBUTION
+
+
+def strip_clankfeed_attribution(content: str | None) -> str:
+    """Remove trailing plain or legacy-markdown clankfeed promo footers."""
+    text = content or ""
+    text = _MARKDOWN_FOOTER_RE.sub("", text)
+    text = _PLAIN_FOOTER_RE.sub("", text)
+    return text.rstrip()

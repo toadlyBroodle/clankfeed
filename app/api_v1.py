@@ -40,10 +40,12 @@ from app.zaps import append_zap_split_tags, pubkey_from_privkey, validate_kind1_
 from app.relay import store_event, broadcast_event, store_pending_event, query_events, row_to_event
 from app.tempo_pay import build_tempo_challenge, verify_tempo_credential, extract_tempo_tx_hash
 from app.stripe_pay import build_stripe_challenge
+from sqlalchemy import select, and_
 
 logger = logging.getLogger("clankfeed.api_v1")
 
 _EVENT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+_PUBKEY_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _invalid_event_id(event_id: str) -> JSONResponse | None:
@@ -612,6 +614,70 @@ async def get_event(request: Request, event_id: str, db: AsyncSession = Depends(
     if not row:
         return JSONResponse(status_code=404, content={"detail": "Event not found"})
     return {"event": row_to_event(row)}
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/profile/{pubkey}  (ensure kind:0 — local + EXTERNAL_RELAYS)
+# ---------------------------------------------------------------------------
+
+@router.get("/profile/{pubkey}")
+@limiter.limit(RATE_EVENTS_READ)
+async def get_profile(request: Request, pubkey: str, db: AsyncSession = Depends(get_db)):
+    """Return latest kind:0 metadata for pubkey, fetching from EXTERNAL_RELAYS if needed.
+
+    Free to read (no payment). Stores fetched profiles with origin=external.
+    Fast path: return local kind:0 immediately when present. When missing (or
+    ?refresh=1), fetch EXTERNAL_RELAYS and keep the newer by created_at.
+    """
+    pk = (pubkey or "").strip().lower()
+    if not _PUBKEY_RE.fullmatch(pk):
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "pubkey must be 64 lowercase hex characters"},
+        )
+
+    from app.ingest import fetch_author_kind0
+
+    def _parse_profile(row: NostrEvent) -> dict | None:
+        if not row or not row.content:
+            return None
+        try:
+            parsed = json.loads(row.content)
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return None
+        return None
+
+    async def _local_row() -> NostrEvent | None:
+        stmt = select(NostrEvent).where(
+            and_(NostrEvent.pubkey == pk, NostrEvent.kind == 0)
+        )
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    row = await _local_row()
+    refresh = (request.query_params.get("refresh") or "").strip() in ("1", "true", "yes")
+    need_fetch = row is None or refresh
+
+    if need_fetch:
+        external = await fetch_author_kind0(pk)
+        if external:
+            await store_event(db, external, sats_clank=0, origin="external")
+            row = await _local_row()
+
+    if not row:
+        return {"found": False, "profile": None, "origin": None, "event": None}
+
+    profile = _parse_profile(row)
+    if profile is None:
+        return {"found": False, "profile": None, "origin": None, "event": None}
+
+    return {
+        "found": True,
+        "profile": profile,
+        "origin": getattr(row, "origin", None) or "clankfeed",
+        "event": row_to_event(row),
+    }
 
 
 # ---------------------------------------------------------------------------

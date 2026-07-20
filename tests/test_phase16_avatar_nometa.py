@@ -87,17 +87,23 @@ class TestNoMetaAvatarClear1616:
 
     def test_show_public_empty_events_clears_avatar_and_about(self):
         block = _show_public_empty_and_catch(_profile_js())
-        # Isolate the empty-events else (not the pictured/no-picture success path)
+        # Isolate the !meta / empty-profile else (16.20 uses fetchKind0Profile)
         try_body = block.split("try {", 1)[1]
-        events_if = try_body.split("if (data.events && data.events.length > 0)", 1)
-        assert len(events_if) == 2, "missing events.length check"
-        else_body = events_if[1].rsplit("} else {", 1)[1].split("} catch", 1)[0]
+        # Prefer new ensure-path shape; fall back to legacy events.length
+        if "if (meta)" in try_body:
+            parts = try_body.split("if (meta)", 1)
+            assert len(parts) == 2, "missing if (meta) check"
+            else_body = parts[1].rsplit("} else {", 1)[1].split("} catch", 1)[0]
+        else:
+            events_if = try_body.split("if (data.events && data.events.length > 0)", 1)
+            assert len(events_if) == 2, "missing events.length or if (meta) check"
+            else_body = events_if[1].rsplit("} else {", 1)[1].split("} catch", 1)[0]
         assert "setAvatarPlaceholder(" in else_body, (
-            "showPublicProfile empty-events else must call setAvatarPlaceholder"
+            "showPublicProfile empty-profile else must call setAvatarPlaceholder"
         )
         assert "pub-about" in else_body and (
             ".textContent = ''" in else_body or '.textContent = ""' in else_body
-        ), "showPublicProfile empty-events else must clear #pub-about"
+        ), "showPublicProfile empty-profile else must clear #pub-about"
 
     def test_show_public_catch_clears_avatar(self):
         block = _show_public_empty_and_catch(_profile_js())
@@ -153,6 +159,7 @@ def live_server(tmp_path):
             "RELAY_PRIVATE_KEY": "a" * 64,
             "TEMPO_RECIPIENT": "",
             "BASE_URL": f"ws://127.0.0.1:{port}",
+            "EXTERNAL_RELAYS": "",
         }
     )
     proc = subprocess.Popen(

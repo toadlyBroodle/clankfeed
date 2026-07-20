@@ -310,12 +310,10 @@ async function showPublicProfile(pubkey) {
 
   document.getElementById('pub-pubkey').textContent = pubkey.slice(0, 12) + '...' + pubkey.slice(-4);
 
-  // Fetch metadata
+  // Fetch metadata (ensures EXTERNAL_RELAYS via /api/v1/profile)
   try {
-    const resp = await fetch(`/api/v1/events?authors=${pubkey}&kinds=0&limit=1`);
-    const data = await resp.json();
-    if (data.events && data.events.length > 0) {
-      const meta = JSON.parse(data.events[0].content);
+    const meta = await fetchKind0Profile(pubkey);
+    if (meta) {
       document.getElementById('pub-name').textContent = meta.name || meta.display_name || pubkey.slice(0, 12) + '...';
       document.getElementById('pub-about').textContent = meta.about || '';
       if (meta.picture) {

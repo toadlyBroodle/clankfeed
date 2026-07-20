@@ -314,7 +314,7 @@ async function submitClientSignedPost(content, btn) {
     kind: 1,
     created_at: Math.floor(Date.now() / 1000),
     tags,
-    content,
+    content: withClankfeedAttribution(content),
   };
   const signed = await signNostrEvent(event);
   if (!signed) {

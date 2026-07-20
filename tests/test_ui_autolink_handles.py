@@ -532,10 +532,7 @@ async def test_ui42_profile_autolink_and_many_links(live_server):
 
 @pytest.mark.asyncio
 async def test_ui43_zero_url_note_has_no_note_links(live_server):
-    """UI-4.3: user text with no http(s) → zero non-promo .note-link anchors.
-
-    Local kind:1 notes still get one display-time clankfeed.com attribution link.
-    """
+    """UI-4.3: user text with no http(s) → zero .note-link anchors (16.21 strips promo)."""
     pytest.importorskip("playwright")
     from playwright.async_api import async_playwright
 
@@ -556,12 +553,11 @@ async def test_ui43_zero_url_note_has_no_note_links(live_server):
             await all_links.nth(i).get_attribute("href")
             for i in range(await all_links.count())
         ]
-        # Local notes get display-time clankfeed promo; user text must still add zero URLs
-        non_promo = [h for h in hrefs if h and "clankfeed.com" not in h.lower()]
-        assert non_promo == [], f"unexpected non-promo links: {non_promo}"
-        assert any(h and "clankfeed.com" in h.lower() for h in hrefs), (
-            "expected display-time attribution link on local plain note"
-        )
+        # 16.21: clankfeed.com UI omits promo footer — zero links on plain notes
+        assert hrefs == [], f"expected zero links on plain note, got: {hrefs}"
+        text = await plain.locator(".note-content").inner_text()
+        assert "via https://clankfeed.com" not in text.lower()
+        assert "zap-signal ranked" not in text.lower()
         # Adversarial: bare www. / javascript: must not become hrefs either
         assert await plain.locator("a[href^='javascript:']").count() == 0
         assert await plain.locator("a[href*='notalink']").count() == 0

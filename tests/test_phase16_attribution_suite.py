@@ -1,8 +1,8 @@
 """16.4: suite contract for relay-signed attribution footer.
 
 Relay-signed posts bake the clankfeed promo into signed content. Client-signed
-events keep author content verbatim (display-time only). These pins define the
-red-suite fix: equality assertions must use `attributed()`, not bare body text.
+posts also bake before sign (16.21); UI strips at display time. Equality
+assertions must use `attributed()`, not bare body text.
 """
 
 from __future__ import annotations

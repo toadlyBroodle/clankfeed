@@ -81,6 +81,7 @@ def live_server(tmp_path):
             "RELAY_PRIVATE_KEY": "a" * 64,
             "TEMPO_RECIPIENT": "",
             "BASE_URL": f"ws://127.0.0.1:{port}",
+            "EXTERNAL_RELAYS": "",  # no live WS during profile hydrate
         }
     )
     proc = subprocess.Popen(
@@ -447,7 +448,8 @@ class TestSaveProfileStatusLive1618:
                 }""",
                 [_NSEC_SK, user_pk],
             )
-            await page.evaluate("() => showOwnAccount()")
+            await page.evaluate("async () => { await showOwnAccount(); }")
+            await page.wait_for_selector("#view-account:not(.hidden)", timeout=10_000)
             await page.fill("#prof-name", "PayNeededBot")
 
             # Intercept POST /api/v1/events → 402 with token (producer shape from payment stack)

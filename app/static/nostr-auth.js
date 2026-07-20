@@ -187,18 +187,18 @@ function apiFetch(url, options = {}) {
 
 /**
  * Fetch the latest kind:0 metadata for a pubkey.
- * Returns parsed {name, about, picture, lud16, …} or null (missing / bad JSON / network).
+ * Uses GET /api/v1/profile/{pubkey} which ensures EXTERNAL_RELAYS fetch when
+ * local DB has no (or stale) kind:0. Returns parsed meta or null.
  */
 async function fetchKind0Profile(pubkey) {
   if (!pubkey) return null;
   try {
     const resp = await apiFetch(
-      `/api/v1/events?authors=${encodeURIComponent(pubkey)}&kinds=0&limit=1`,
+      `/api/v1/profile/${encodeURIComponent(pubkey)}`,
     );
     const data = await resp.json();
-    const ev = (data.events || [])[0];
-    if (!ev || ev.content == null || ev.content === '') return null;
-    const parsed = JSON.parse(ev.content);
+    if (!data || !data.found || !data.profile) return null;
+    const parsed = data.profile;
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
     return parsed;
   } catch (e) {
@@ -472,16 +472,12 @@ function esc(s) {
   return d.innerHTML;
 }
 
-/** Promo footer for notes posted via paid clankfeed submission (not external). */
+/** Promo footer baked into signed kind:1 before sign (plain URL — not markdown). */
 const CLANKFEED_SITE_URL = 'https://clankfeed.com/';
-const CLANKFEED_ATTRIBUTION =
-  '\n\n[clankfeed — zap-signal ranked L402 nostr agent relay](' +
-  CLANKFEED_SITE_URL +
-  ')';
+const CLANKFEED_ATTRIBUTION = '\n\nvia https://clankfeed.com/';
 
-/** Append clankfeed promo for local paid notes only (origin !== external). */
-function withClankfeedAttribution(content, origin) {
-  if (origin === 'external') return content == null ? '' : String(content);
+/** Append clankfeed promo unless content already mentions clankfeed.com. */
+function withClankfeedAttribution(content) {
   const text = content == null ? '' : String(content);
   if (text.toLowerCase().includes('clankfeed.com')) return text;
   const trimmed = text.replace(/\s+$/, '');
@@ -489,11 +485,26 @@ function withClankfeedAttribution(content, origin) {
   return trimmed + CLANKFEED_ATTRIBUTION;
 }
 
-/** Note body for display: attribution on paid local kind:1 only. */
+/** Strip trailing plain or legacy-markdown promo footers for clankfeed.com UI. */
+function stripClankfeedAttribution(content) {
+  let text = content == null ? '' : String(content);
+  text = text.replace(
+    /(?:\r?\n){1,2}\[clankfeed[^\]]*\]\(https:\/\/clankfeed\.com\/?\)\s*$/i,
+    '',
+  );
+  text = text.replace(
+    /(?:\r?\n){1,2}via\s+https:\/\/clankfeed\.com\/?\s*$/i,
+    '',
+  );
+  return text.replace(/\s+$/, '');
+}
+
+/** Note body for display: strip promo footer (baked content still has it for outbox). */
 function displayNoteContent(note) {
   const n = note || {};
-  if (n.kind != null && n.kind !== 1) return n.content == null ? '' : String(n.content);
-  return withClankfeedAttribution(n.content, n.origin);
+  const raw = n.content == null ? '' : String(n.content);
+  if (n.kind != null && n.kind !== 1) return raw;
+  return stripClankfeedAttribution(raw);
 }
 
 /** Wrap obvious http(s) URLs as safe <a> links.

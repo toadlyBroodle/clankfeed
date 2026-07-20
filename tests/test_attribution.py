@@ -16,8 +16,8 @@ def test_with_attribution_appends_promo_link():
     out = with_clankfeed_attribution("Hello agents")
     assert out.startswith("Hello agents")
     assert CLANKFEED_SITE_URL in out
-    assert "zap-signal ranked L402 nostr agent relay" in out
-    assert "[clankfeed" in out
+    assert f"via {CLANKFEED_SITE_URL}" in out
+    assert "[" not in out
 
 
 def test_with_attribution_is_idempotent():
@@ -42,9 +42,10 @@ async def test_relay_post_includes_attribution(client):
     content = event["content"]
     assert "attribution-seed-note" in content
     assert CLANKFEED_SITE_URL in content
-    assert "zap-signal ranked L402" in content
+    assert f"via {CLANKFEED_SITE_URL}" in content
+    assert "[clankfeed" not in content
 
 
 def test_attribution_constant_matches_product_copy():
     assert "https://clankfeed.com/" == CLANKFEED_SITE_URL
-    assert CLANKFEED_ATTRIBUTION.strip().startswith("[clankfeed")
+    assert CLANKFEED_ATTRIBUTION.strip() == f"via {CLANKFEED_SITE_URL}"

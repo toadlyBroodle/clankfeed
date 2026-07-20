@@ -60,15 +60,14 @@ def _index() -> str:
 
 
 class TestFetchKind0Helper165:
-    """Shared helper must fetch authors=&kinds=0 and parse content."""
+    """Shared helper must fetch kind:0 via ensure endpoint (or events fallback)."""
 
     def test_fetch_kind0_profile_helper_exists(self):
         auth = _auth()
         assert "function fetchKind0Profile" in auth
         fn = auth.split("function fetchKind0Profile", 1)[1].split("\nfunction ", 1)[0]
-        assert "kinds=0" in fn or "kinds=0" in auth
-        assert "authors=" in fn
-        assert "JSON.parse" in fn
+        # 16.20: prefer /api/v1/profile/{pubkey}; legacy events?kinds=0 still ok as fallback
+        assert "/api/v1/profile/" in fn or ("kinds=0" in fn and "authors=" in fn)
 
     def test_fetch_kind0_returns_null_on_failure(self):
         """Adversarial: empty events / bad JSON must not throw — return null."""
@@ -170,6 +169,7 @@ def live_server(tmp_path):
             "RELAY_PRIVATE_KEY": "a" * 64,
             "TEMPO_RECIPIENT": "",
             "BASE_URL": f"ws://127.0.0.1:{port}",
+            "EXTERNAL_RELAYS": "",
         }
     )
     proc = subprocess.Popen(
