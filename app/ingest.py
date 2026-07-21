@@ -37,14 +37,24 @@ RECONNECT_MAX = 300  # seconds
 KIND0_FETCH_TIMEOUT = 8  # seconds per relay attempt
 KIND0_FETCH_OVERALL_TIMEOUT = 8  # wall-time budget across all EXTERNAL_RELAYS
 KIND0_NEGATIVE_CACHE_TTL = 60  # seconds — miss fan-out cooldown per pubkey
+REPLIES_FETCH_TIMEOUT = 8  # seconds per relay for #e thread fetch
+REPLIES_FETCH_OVERALL_TIMEOUT = 10  # wall-time budget to merge replies across relays
+REPLIES_HYDRATE_TTL = 60  # seconds — skip re-fetch for same parent after hydrate
 
 # pubkey -> monotonic/unix time of last confirmed miss (no kind:0 found)
 _kind0_miss_cache: dict[str, float] = {}
+# parent event_id -> unix time of last EXTERNAL_RELAYS replies hydrate
+_replies_hydrate_at: dict[str, float] = {}
 
 
 def clear_kind0_miss_cache() -> None:
     """Clear in-process kind:0 miss cache (tests)."""
     _kind0_miss_cache.clear()
+
+
+def clear_replies_hydrate_cache() -> None:
+    """Clear in-process replies hydrate TTL cache (tests)."""
+    _replies_hydrate_at.clear()
 
 
 def _acceptable_note(event: dict) -> bool:
@@ -184,6 +194,156 @@ async def fetch_author_kind0(
 
     _kind0_miss_cache[pubkey] = time.time()
     return None
+
+
+def _event_tags_parent(event: dict, parent_id: str) -> bool:
+    """True if event has an e-tag referencing parent_id."""
+    for t in event.get("tags") or []:
+        if isinstance(t, list) and len(t) >= 2 and t[0] == "e" and t[1] == parent_id:
+            return True
+    return False
+
+
+async def _fetch_replies_one_relay(url: str, parent_id: str, limit: int) -> list[dict]:
+    """Query one relay for kind:1 notes that tag parent_id via #e."""
+    out: list[dict] = []
+    try:
+        open_timeout = min(10, REPLIES_FETCH_TIMEOUT)
+        async with websockets.connect(
+            url, max_size=262144, open_timeout=open_timeout
+        ) as ws:
+            sub = f"re-{parent_id[:16]}"
+            await ws.send(json.dumps([
+                "REQ", sub,
+                {"kinds": [1], "#e": [parent_id], "limit": limit},
+            ]))
+            deadline = asyncio.get_running_loop().time() + REPLIES_FETCH_TIMEOUT
+            while asyncio.get_running_loop().time() < deadline:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    break
+                try:
+                    msg = json.loads(raw)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(msg, list) or len(msg) < 2:
+                    continue
+                if msg[0] == "EOSE" and msg[1] == sub:
+                    break
+                if msg[0] != "EVENT" or len(msg) < 3 or msg[1] != sub:
+                    continue
+                event = msg[2]
+                if not isinstance(event, dict):
+                    continue
+                valid, _ = validate_event(event)
+                if (
+                    valid
+                    and _acceptable_note(event)
+                    and _event_tags_parent(event, parent_id)
+                ):
+                    out.append(event)
+            try:
+                await ws.send(json.dumps(["CLOSE", sub]))
+            except Exception:
+                pass
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.debug("replies fetch from %s failed: %s", url, e)
+    return out
+
+
+async def fetch_and_store_replies(
+    parent_id: str,
+    *,
+    limit: int = 50,
+    bypass_ttl: bool = False,
+) -> int:
+    """Pull kind:1 replies for parent_id from EXTERNAL_RELAYS and store them.
+
+    Merges across relays (not first-success). Skips re-fetch within
+    REPLIES_HYDRATE_TTL unless bypass_ttl. Returns number of newly stored events.
+    No-op when EXTERNAL_INGEST is off or parent_id is invalid.
+    """
+    if not settings.EXTERNAL_INGEST:
+        return 0
+    if not isinstance(parent_id, str) or len(parent_id) != 64:
+        return 0
+    try:
+        int(parent_id, 16)
+    except ValueError:
+        return 0
+
+    now = time.time()
+    if not bypass_ttl:
+        last = _replies_hydrate_at.get(parent_id)
+        if last is not None and now - last < REPLIES_HYDRATE_TTL:
+            return 0
+
+    urls = [u.strip() for u in settings.EXTERNAL_RELAYS.split(",") if u.strip()]
+    if not urls:
+        _replies_hydrate_at[parent_id] = now
+        return 0
+
+    limit = min(max(int(limit or 50), 1), 100)
+    tasks = {
+        asyncio.create_task(
+            _fetch_replies_one_relay(url, parent_id, limit), name=f"re:{url}"
+        )
+        for url in urls
+    }
+    by_id: dict[str, dict] = {}
+    loop = asyncio.get_running_loop()
+    overall_deadline = loop.time() + REPLIES_FETCH_OVERALL_TIMEOUT
+    try:
+        while tasks:
+            remaining = overall_deadline - loop.time()
+            if remaining <= 0:
+                break
+            done, tasks = await asyncio.wait(
+                tasks, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
+            )
+            if not done:
+                break
+            for task in done:
+                try:
+                    batch = task.result()
+                except asyncio.CancelledError:
+                    continue
+                except Exception as e:
+                    logger.debug("replies relay task failed: %s", e)
+                    continue
+                for ev in batch or []:
+                    eid = ev.get("id")
+                    if isinstance(eid, str) and eid not in by_id:
+                        by_id[eid] = ev
+    finally:
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    stored = 0
+    if by_id:
+        async with async_session() as db:
+            for ev in by_id.values():
+                existing = await db.get(NostrEvent, ev["id"])
+                if existing:
+                    continue
+                await store_event(db, ev, sats_clank=0, origin="external")
+                stored += 1
+        if stored:
+            logger.info(
+                "Hydrated %d external reply(ies) for parent %s",
+                stored, parent_id[:12],
+            )
+
+    _replies_hydrate_at[parent_id] = time.time()
+    return stored
 
 
 async def _ensure_author_lud16(db, author_pubkey: str) -> str | None:

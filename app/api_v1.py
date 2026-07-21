@@ -1023,14 +1023,31 @@ async def get_replies(
     db: AsyncSession = Depends(get_db),
     limit: int = 50,
     sort: str = "newest",
+    refresh: int = 0,
 ):
-    """Get replies to a specific note."""
+    """Get replies to a specific note.
+
+    Hydrates from EXTERNAL_RELAYS (#e filter) so outboxed clankfeed notes that
+    received replies on public relays still expand in the UI. Pass refresh=1 to
+    bypass the short hydrate TTL.
+    """
     bad = _invalid_event_id(event_id)
     if bad:
         return bad
     row = await db.get(NostrEvent, event_id)
     if not row:
         return JSONResponse(status_code=404, content={"detail": "Event not found"})
+
+    # Pull network replies into local DB (zap-only ingest never sees #e threads).
+    from app.ingest import fetch_and_store_replies
+    try:
+        await fetch_and_store_replies(
+            event_id,
+            limit=min(max(limit, 1), 100),
+            bypass_ttl=bool(refresh),
+        )
+    except Exception as e:
+        logger.warning("replies hydrate failed for %s: %s", event_id[:12], e)
 
     filt = {"reply_to": event_id, "kinds": [1], "limit": min(max(limit, 1), 500)}
     replies = await query_events(db, [filt], sort=sort)
