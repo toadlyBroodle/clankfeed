@@ -547,13 +547,15 @@ async def read_events(
     max_value: int | None = None,
     reply_to: str = "",
     origin: str = "all",
+    value_by: str = "clank",
 ):
     """Query stored events with optional filters.
 
     sort: "newest" (default), "value"/"clank" (paid value first), or "zaps"/"ext" (sats_ext first)
-    min_value/max_value: filter by sats_clank range
+    min_value/max_value: filter by sats_clank (value_by=clank) or sats_ext (value_by=ext)
     reply_to: filter replies to a specific event ID
     origin: "clankfeed" (submitted here), "external" (ingested), or "all" (default)
+    value_by: "clank" (default) or "ext" — which sats column min/max apply to
     """
     filt = {}
 
@@ -593,8 +595,22 @@ async def read_events(
     if origin != "all":
         filt["origin"] = origin
 
+    if value_by not in ("clank", "ext"):
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "value_by must be clank or ext"},
+        )
+    # External-only listings default to sats_ext when caller omits value_by intent
+    # via the explicit enum (client always sends value_by on the web feed).
+
     events = await query_events(
-        db, [filt], sort=sort, min_value=min_value, max_value=max_value, origin=origin if origin != "all" else None
+        db,
+        [filt],
+        sort=sort,
+        min_value=min_value,
+        max_value=max_value,
+        origin=origin if origin != "all" else None,
+        value_by=value_by,
     )
     return {"events": events, "count": len(events)}
 

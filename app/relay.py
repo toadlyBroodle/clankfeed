@@ -121,17 +121,23 @@ async def query_events(
     min_value: int | None = None,
     max_value: int | None = None,
     origin: str | None = None,
+    value_by: str = "clank",
 ) -> list[dict]:
     """Query stored events matching any of the given filters.
 
     sort: "newest" (created_at DESC), "clank"/"value" (sats_clank DESC:
     money paid to clankfeed), or "ext"/"zaps" (sats_ext DESC: fair ranking
     of zaps + votes at face value)
-    min_value/max_value: filter by sats_clank range
+    min_value/max_value: filter by sats_clank (value_by=clank) or sats_ext
+    (value_by=ext) range
     origin: "clankfeed" | "external" | None/all (no filter)
+    value_by: "clank" (default) or "ext" — which sats column min/max apply to
     """
     results = []
     seen_ids = set()
+    value_col = (
+        NostrEvent.sats_ext if value_by == "ext" else NostrEvent.sats_clank
+    )
 
     for filt in filters:
         conditions = []
@@ -149,11 +155,11 @@ async def query_events(
         if "until" in filt:
             conditions.append(NostrEvent.created_at <= filt["until"])
 
-        # Value filters
+        # Value filters (column selected by value_by)
         if min_value is not None:
-            conditions.append(NostrEvent.sats_clank >= min_value)
+            conditions.append(func.coalesce(value_col, 0) >= min_value)
         if max_value is not None:
-            conditions.append(NostrEvent.sats_clank <= max_value)
+            conditions.append(func.coalesce(value_col, 0) <= max_value)
 
         # Origin filter (clankfeed-submitted vs ingested)
         filt_origin = filt.get("origin", origin)

@@ -1141,6 +1141,10 @@ async function setSort(mode) {
     }
     if (filterMinValue !== null) url += `&min_value=${filterMinValue}`;
     if (filterMaxValue !== null) url += `&max_value=${filterMaxValue}`;
+    // External tab ranks/filters on sats_ext; clankfeed tab on sats_clank
+    if (filterMinValue !== null || filterMaxValue !== null) {
+      url += `&value_by=${currentFeed === 'external' ? 'ext' : 'clank'}`;
+    }
     const since = sinceParamForFilter();
     if (since !== null) url += `&since=${since}`;
     const resp = await fetch(url);
