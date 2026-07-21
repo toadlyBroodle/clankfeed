@@ -188,8 +188,9 @@ def well_known_l402_document() -> dict:
             "description": "Post a note with L402 payment (Python)",
             "code": (
                 "import httpx\n"
-                "# 1. Hit endpoint to get 402 challenge\n"
-                f"r = httpx.post('{base}/api/v1/post', json={{'content': 'hello'}})\n"
+                "# 1. GET (or POST) to obtain a 402 L402 challenge\n"
+                f"r = httpx.get('{base}/api/v1/post')\n"
+                "assert r.status_code == 402\n"
                 "www_auth = r.headers['WWW-Authenticate']\n"
                 "macaroon = www_auth.split('macaroon=\"')[1].split('\"')[0]\n"
                 "invoice = www_auth.split('invoice=\"')[1].split('\"')[0]\n"

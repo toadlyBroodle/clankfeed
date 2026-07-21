@@ -531,6 +531,39 @@ async def confirm_event(request: Request, db: AsyncSession = Depends(get_db)):
 # GET /api/v1/events  (read events with filters)
 # ---------------------------------------------------------------------------
 
+@router.get("/events/challenge")
+@router.head("/events/challenge")
+@limiter.limit(RATE_POST)
+async def events_paywall_probe(request: Request):
+    """Live L402 (+ MPP) 402 for write-path discovery (GET /events itself is free).
+
+    Agents: POST /api/v1/events with a signed event after paying.
+    """
+    if not (payments_enabled() or tempo_enabled() or stripe_enabled()):
+        return JSONResponse(
+            status_code=200,
+            content={
+                "detail": "Payments disabled (test mode). POST signed events to /api/v1/events.",
+                "method": "POST",
+                "path": "/api/v1/events",
+                "docs": "/api/",
+            },
+        )
+    return await _error_402_with_challenge({
+        "type": "https://paymentauth.org/problems/payment-required",
+        "title": "Payment required",
+        "detail": (
+            "Pay L402, then POST a signed Nostr event to /api/v1/events with "
+            "Authorization: L402 <macaroon>:<preimage>. "
+            "GET /api/v1/events is free (read). See GET /api/."
+        ),
+        "method": "POST",
+        "path": "/api/v1/events",
+        "price": {"sats": settings.POST_PRICE_SATS},
+        "docs": "/api/",
+    })
+
+
 @router.get("/events")
 @limiter.limit(RATE_EVENTS_READ)
 async def read_events(
@@ -695,6 +728,41 @@ async def get_profile(request: Request, pubkey: str, db: AsyncSession = Depends(
         "origin": getattr(row, "origin", None) or "clankfeed",
         "event": row_to_event(row),
     }
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/post  (L402 paywall probe — satring/agents often GET listed URLs)
+# ---------------------------------------------------------------------------
+
+@router.get("/post")
+@router.head("/post")
+@limiter.limit(RATE_POST)
+async def relay_post_paywall_probe(request: Request):
+    """Return a live L402 (+ MPP) 402 challenge for directory probes and agent discovery.
+
+    Writing still requires POST with a JSON body after payment.
+    """
+    if not (payments_enabled() or tempo_enabled() or stripe_enabled()):
+        return JSONResponse(
+            status_code=200,
+            content={
+                "detail": "Payments disabled (test mode). POST JSON {content} to publish.",
+                "method": "POST",
+                "docs": "/api/",
+            },
+        )
+    return await _error_402_with_challenge({
+        "type": "https://paymentauth.org/problems/payment-required",
+        "title": "Payment required",
+        "detail": (
+            "This endpoint accepts POST only for publishing. "
+            "Pay the L402 invoice, then POST {\"content\": \"...\"} with "
+            "Authorization: L402 <macaroon>:<preimage>. See GET /api/ for agent docs."
+        ),
+        "method": "POST",
+        "price": {"sats": settings.POST_PRICE_SATS},
+        "docs": "/api/",
+    })
 
 
 # ---------------------------------------------------------------------------
