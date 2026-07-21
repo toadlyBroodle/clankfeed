@@ -162,14 +162,17 @@ async def query_events(
 
         # FEED-1: hide origin=external kind:1 notes with no economic signal
         # (sats_ext=0 and sats_clank=0). Kind:0 metadata and local notes stay.
-        conditions.append(
-            or_(
-                NostrEvent.kind != 1,
-                NostrEvent.origin != "external",
-                func.coalesce(NostrEvent.sats_ext, 0) > 0,
-                func.coalesce(NostrEvent.sats_clank, 0) > 0,
+        # Skip when fetching a thread (reply_to): expand / reply-counts must agree —
+        # otherwise counts include zero-sats externals but GET .../replies returns [].
+        if "reply_to" not in filt:
+            conditions.append(
+                or_(
+                    NostrEvent.kind != 1,
+                    NostrEvent.origin != "external",
+                    func.coalesce(NostrEvent.sats_ext, 0) > 0,
+                    func.coalesce(NostrEvent.sats_clank, 0) > 0,
+                )
             )
-        )
 
         # Reply filter (SECURITY M3: only exact 64-hex event ids — no LIKE wildcards)
         if "reply_to" in filt:
