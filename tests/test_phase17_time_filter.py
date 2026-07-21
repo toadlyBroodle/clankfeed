@@ -97,11 +97,13 @@ class TestTimeFilterSource:
         assert 'id="filter-since"' in INDEX_HTML
         for opt in ("1day", "3day", "1week", "1month", "all"):
             assert f'value="{opt}"' in INDEX_HTML
+        assert 'value="1day" selected' in INDEX_HTML
 
     def test_set_sort_appends_since(self):
         """Feed fetch must map filter-since → since= (except all)."""
         assert "filter-since" in INDEX_JS or "filterSince" in INDEX_JS
         assert "since=" in INDEX_JS
+        assert "DEFAULT_SINCE" in INDEX_JS and "'1day'" in INDEX_JS
         # Window seconds for each option (approx)
         assert "86400" in INDEX_JS  # 1 day
         assert "259200" in INDEX_JS or "3" in INDEX_JS  # 3 day
@@ -176,13 +178,19 @@ async def test_17_2_time_filter_since_urls_and_window(live_server):
         await page.goto(base, wait_until="domcontentloaded", timeout=30_000)
         await page.wait_for_selector("#filter-since", timeout=10_000)
         await page.wait_for_selector(f"#note-{fresh_id}", timeout=15_000)
-        # Default all: both visible, last feed URL has no since=
-        assert await page.locator(f"#note-{old_id}").count() == 1
-        default_urls = [u for u in seen if "kinds=" in u]
-        assert default_urls, "expected initial feed fetch"
-        assert all("since=" not in u for u in default_urls), default_urls
-
+        # Default 1day: old (40d) hidden, feed URL has since≈now-86400
         import re
+
+        assert await page.locator(f"#note-{old_id}").count() == 0
+        default_urls = [u for u in seen if "kinds=" in u and "/events?" in u]
+        assert default_urls, "expected initial feed fetch"
+        assert "since=" in default_urls[-1], default_urls[-1]
+        m0 = re.search(r"since=(\d+)", default_urls[-1])
+        assert m0, default_urls[-1]
+        expect0 = int(time.time()) - 86400
+        assert abs(int(m0.group(1)) - expect0) < 120, default_urls[-1]
+        selected = await page.locator("#filter-since").input_value()
+        assert selected == "1day"
 
         windows = {
             "1day": 86400,

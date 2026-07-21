@@ -22,7 +22,7 @@ function _ensureWidgetDOM() {
   if (document.getElementById('pw-widget')) return;
   const div = document.createElement('div');
   div.id = 'pw-widget';
-  div.className = 'hidden mt-4 p-4 rounded b-accent';
+  div.className = 'hidden mt-4 p-4 rounded b-accent bg-alt';
   div.innerHTML = `
     <div class="flex justify-between items-center mb-2">
       <p class="text-sm c-accent" id="pw-title">Payment required</p>

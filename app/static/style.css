@@ -1,6 +1,7 @@
 /* Clankfeed Theme */
 
 :root {
+  color-scheme: dark;
   --bg: #000;
   --bg-alt: #111;
   --text: #4ade80;
@@ -23,15 +24,24 @@ bc-button {
 }
 
 /* Base elements */
-textarea, input {
+textarea, input, select {
   background: var(--bg-alt);
   color: var(--text);
   border: 1px solid var(--border);
   font-family: inherit;
 }
-textarea:focus, input:focus {
+textarea:focus, input:focus, select:focus {
   outline: none;
   border-color: var(--accent);
+}
+select {
+  appearance: auto;
+  color-scheme: dark;
+}
+select option,
+select optgroup {
+  background: var(--bg-alt);
+  color: var(--text);
 }
 input::selection, textarea::selection {
   background: var(--border);
@@ -198,6 +208,26 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .filter-group { white-space: nowrap; }
 .w-filter { width: 72px; font-size: 11px; }
 .w-amount { width: 72px; }
+#filter-since {
+  background: var(--bg-alt);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+/* Payment / overlay dialogs */
+#pw-widget {
+  background: var(--bg-alt);
+  color: var(--text);
+}
+#reply-context {
+  background: var(--bg-alt);
+}
+.vote-prompt.active {
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px;
+}
 
 /* QR code */
 #qr-canvas { image-rendering: pixelated; }

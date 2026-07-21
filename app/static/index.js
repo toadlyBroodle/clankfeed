@@ -1058,7 +1058,8 @@ function scrollToNote(eventId) {
 // ---- Sort & Filter & Feed ----
 let filterMinValue = null;
 let filterMaxValue = null;
-let filterSinceKey = 'all';  // all | 1day | 3day | 1week | 1month
+const DEFAULT_SINCE = '1day';
+let filterSinceKey = DEFAULT_SINCE;  // 1day | 3day | 1week | 1month | all
 
 const SINCE_WINDOW_SECS = {
   '1day': 86400,
@@ -1073,26 +1074,30 @@ function sinceParamForFilter() {
   return Math.floor(Date.now() / 1000) - secs;
 }
 
+function filtersAreDefault() {
+  return filterMinValue === null && filterMaxValue === null && filterSinceKey === DEFAULT_SINCE;
+}
+
 function applyFilters() {
   const minVal = document.getElementById('filter-min').value;
   const maxVal = document.getElementById('filter-max').value;
   filterMinValue = minVal ? parseInt(minVal) : null;
   filterMaxValue = maxVal ? parseInt(maxVal) : null;
   const sinceEl = document.getElementById('filter-since');
-  if (sinceEl) filterSinceKey = sinceEl.value || 'all';
+  if (sinceEl) filterSinceKey = sinceEl.value || DEFAULT_SINCE;
   const clearBtn = document.getElementById('clear-filters-btn');
-  clearBtn.style.display = (filterMinValue !== null || filterMaxValue !== null || filterSinceKey !== 'all') ? 'inline' : 'none';
+  clearBtn.style.display = filtersAreDefault() ? 'none' : 'inline';
   setSort(currentSort);
 }
 
 function clearFilters() {
   filterMinValue = null;
   filterMaxValue = null;
-  filterSinceKey = 'all';
+  filterSinceKey = DEFAULT_SINCE;
   document.getElementById('filter-min').value = '';
   document.getElementById('filter-max').value = '';
   const sinceEl = document.getElementById('filter-since');
-  if (sinceEl) sinceEl.value = 'all';
+  if (sinceEl) sinceEl.value = DEFAULT_SINCE;
   document.getElementById('clear-filters-btn').style.display = 'none';
   setSort(currentSort);
 }
@@ -1182,10 +1187,10 @@ document.getElementById('apply-filters-btn')?.addEventListener('click', applyFil
 document.getElementById('clear-filters-btn')?.addEventListener('click', clearFilters);
 document.getElementById('filter-since')?.addEventListener('change', () => {
   const sinceEl = document.getElementById('filter-since');
-  filterSinceKey = (sinceEl && sinceEl.value) || 'all';
+  filterSinceKey = (sinceEl && sinceEl.value) || DEFAULT_SINCE;
   const clearBtn = document.getElementById('clear-filters-btn');
   if (clearBtn) {
-    clearBtn.style.display = (filterMinValue !== null || filterMaxValue !== null || filterSinceKey !== 'all') ? 'inline' : 'none';
+    clearBtn.style.display = filtersAreDefault() ? 'none' : 'inline';
   }
   setSort(currentSort);
 });
