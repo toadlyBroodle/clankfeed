@@ -10,7 +10,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from slowapi.errors import RateLimitExceeded
 from starlette.exceptions import HTTPException
@@ -303,7 +303,7 @@ def _custom_openapi():
     # Routes to exclude from OpenAPI (non-API utility/static routes)
     excluded_paths = {
         "/", "/terms", "/privacy", "/favicon.ico", "/health",
-        "/.well-known/l402", "/profile",
+        "/.well-known/l402", "/.well-known/satring-verify", "/profile",
         # Custodial account APIs removed (14.5) — hide from discovery
         "/api/v1/account/create",
         "/api/v1/account/balance",
@@ -651,6 +651,17 @@ async def well_known_l402():
     """L402 Lightning payment discovery endpoint (Phase 14.2)."""
     from app.l402 import well_known_l402_document
     return JSONResponse(well_known_l402_document())
+
+
+@app.get("/.well-known/satring-verify")
+async def well_known_satring_verify():
+    """Serve satring.com domain-ownership challenge (regenerated on token recovery)."""
+    path = Path(__file__).resolve().parent.parent / ".well-known" / "satring-verify"
+    try:
+        content = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return PlainTextResponse("satring-verify not configured", status_code=404)
+    return PlainTextResponse(content, media_type="text/plain")
 
 
 @app.websocket("/")
