@@ -37,7 +37,7 @@ _EXT_PROFILE = {
     "name": "ExternalOnlyBot",
     "about": "kind0 only on external relay",
     "picture": "https://example.com/ext-only.png",
-    "lud16": "extonly@botlab.dev",
+    "lud16": "extonly@clankwright.com",
 }
 
 
@@ -111,7 +111,7 @@ async def test_profile_endpoint_fetches_and_stores_external(client):
     assert body.get("found") is True
     meta = body["profile"]
     assert meta["name"] == "ExternalOnlyBot"
-    assert meta["lud16"] == "extonly@botlab.dev"
+    assert meta["lud16"] == "extonly@clankwright.com"
     assert body.get("origin") == "external"
     assert body.get("event", {}).get("id") == ext_event["id"]
 
@@ -130,12 +130,12 @@ async def test_profile_endpoint_prefers_newer_created_at(client):
     pk = pubkey_from_privkey(_USER_SK)
     local = _signed_kind0(
         _USER_SK,
-        {"name": "LocalOld", "lud16": "old@botlab.dev"},
+        {"name": "LocalOld", "lud16": "old@clankwright.com"},
         created_at=1_700_000_000,
     )
     newer = _signed_kind0(
         _USER_SK,
-        {"name": "ExternalNew", "lud16": "new@botlab.dev"},
+        {"name": "ExternalNew", "lud16": "new@clankwright.com"},
         created_at=1_700_000_100,
     )
     # Seed local via paid-free test store (POST events in test-mode)
@@ -164,12 +164,12 @@ async def test_profile_endpoint_keeps_newer_local(client):
     pk = pubkey_from_privkey(_USER_SK)
     local = _signed_kind0(
         _USER_SK,
-        {"name": "LocalNew", "lud16": "local@botlab.dev"},
+        {"name": "LocalNew", "lud16": "local@clankwright.com"},
         created_at=1_700_000_200,
     )
     older_ext = _signed_kind0(
         _USER_SK,
-        {"name": "ExternalOld", "lud16": "ext@botlab.dev"},
+        {"name": "ExternalOld", "lud16": "ext@clankwright.com"},
         created_at=1_700_000_000,
     )
     from app.database import async_session
@@ -364,12 +364,12 @@ async def test_headed_profile_hydrates_from_ensure_endpoint(live_server):
         while time.time() < deadline:
             name_val = await page.input_value("#prof-name")
             lud_val = await page.input_value("#prof-lud16")
-            if name_val == "ExternalOnlyBot" and lud_val == "extonly@botlab.dev":
+            if name_val == "ExternalOnlyBot" and lud_val == "extonly@clankwright.com":
                 break
             await asyncio.sleep(0.2)
 
         assert name_val == "ExternalOnlyBot", f"name={name_val!r}"
-        assert lud_val == "extonly@botlab.dev", f"lud16={lud_val!r}"
+        assert lud_val == "extonly@clankwright.com", f"lud16={lud_val!r}"
         pic = await page.input_value("#prof-picture")
         assert pic == "https://example.com/ext-only.png"
 

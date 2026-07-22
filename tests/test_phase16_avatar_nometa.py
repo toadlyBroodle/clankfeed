@@ -43,7 +43,7 @@ _PROFILE = {
     "name": "NoMetaPicBot",
     "about": "has picture and about",
     "picture": _PICTURE,
-    "lud16": "nometa@botlab.dev",
+    "lud16": "nometa@clankwright.com",
 }
 
 

@@ -42,7 +42,7 @@ _PROFILE = {
     "name": "AvatarClearBot",
     "about": "avatar clear restore",
     "picture": _PICTURE,
-    "lud16": "clear@botlab.dev",
+    "lud16": "clear@clankwright.com",
 }
 _PEER_NO_PIC = {
     "name": "PeerNoPic",

@@ -34,7 +34,7 @@ _PROFILE = {
     "name": "HydrateBot",
     "about": "kind0 hydrate test",
     "picture": "https://example.com/hydrate.png",
-    "lud16": "hydrate@botlab.dev",
+    "lud16": "hydrate@clankwright.com",
 }
 
 

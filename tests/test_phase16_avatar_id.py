@@ -38,7 +38,7 @@ _PROFILE = {
     "name": "AvatarIdBot",
     "about": "avatar id preserve",
     "picture": _PICTURE,
-    "lud16": "avatar@botlab.dev",
+    "lud16": "avatar@clankwright.com",
 }
 
 
