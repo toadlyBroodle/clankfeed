@@ -202,7 +202,7 @@ Copy `.env.example` to `.env` (or set environment variables):
 | `TEMPO_PRICE_USD` | No | Price per post in USD (default: 0.01) |
 | `ZAP_AUTHOR_WEIGHT` | No | NIP-57 zap-split weight for the note author (default: 9 → 90%) |
 | `ZAP_RELAY_WEIGHT` | No | NIP-57 zap-split weight for the relay fee (default: 1 → 10%) |
-| `RELAY_LUD16` | For Zap fees | Lightning address for the relay's NIP-57 fee leg (e.g. `clankfeed@botlab.dev`; no lnurlp on clankfeed.com) |
+| `RELAY_LUD16` | For Zap fees | Lightning address for the relay's NIP-57 fee leg (e.g. `clankfeed@clankwright.com`; no lnurlp on clankfeed.com) |
 
 ```bash
 # Development (payments disabled)

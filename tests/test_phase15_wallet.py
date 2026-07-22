@@ -72,7 +72,7 @@ class TestReceiveOnlyDocs:
         assert "receive-only" in lower or "receive only" in lower or "inkey" in lower
         assert "nwc" in lower
         assert "botfeed" in lower
-        assert "botlab.dev" in lower  # lud16 host — no lnurlp on clankfeed.com
+        assert "clankwright.com" in lower  # lud16 host — no lnurlp on clankfeed.com
 
     def test_api_md_pay_once_outbox(self):
         api = (ROOT / "docs" / "API.md").read_text()
